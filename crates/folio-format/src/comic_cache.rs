@@ -507,7 +507,11 @@ fn file_name(path: &Path) -> String {
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
+// `missing_const_for_thread_local` 在 Android target 下仍说「可 const 化」，而
+// initializer 已经是 `const { … }` 形式（桌面 --all-targets 不报这条）—— 是它对
+// const 块形式的误报，压掉，别为它改语义。
 thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)]
     static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 

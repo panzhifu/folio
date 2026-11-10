@@ -17,7 +17,7 @@ use std::path::Path;
 use crate::Result;
 use crate::content::format::{
     Content, ContentKind, DocMeta, FixedDoc, FlowDoc, FontBytes, FontRef, Format, ImageRes,
-    ParseBudget, TocEntry,
+    ParseBudget, Resource, ResourceKind, TocEntry,
 };
 
 /// 阅读位置的坐标系。可重排是「章 + 字符偏移」，定版式是「页码」。
@@ -39,6 +39,21 @@ pub enum ContentRef<'a> {
     Fixed(&'a FixedDoc),
 }
 
+/// 从手头信息派生资源清单（[`Document::resources`] 的兜底）：图片表折成
+/// [`ResourceKind::Image`]、可重排的样式表位置折成 [`ResourceKind::Css`]。
+/// `BookDocument` 的覆盖在 provider 的 manifest 全量清单为空时回落到这一条 ——
+/// 老库、单文件格式、测试替身都走它。
+fn derived_resources(images: &[ImageRes], css_hrefs: &[String]) -> Vec<Resource> {
+    let mut out = Vec::with_capacity(images.len() + css_hrefs.len());
+    for image in images {
+        out.push(image.as_resource());
+    }
+    for href in css_hrefs {
+        out.push(Resource::new(href.clone(), ResourceKind::Css));
+    }
+    out
+}
+
 /// 一本已解析、可阅读的书。
 pub trait Document: Send + Sync {
     fn meta(&self) -> &DocMeta;
@@ -58,6 +73,32 @@ pub trait Document: Send + Sync {
     /// 容器里某个 `href` 的字节（图片，将来也可能是别的资源）。
     /// 读不到是 `None`，不是错误 —— 那块地方空着就好。
     fn image_bytes(&self, href: &str) -> Option<Vec<u8>>;
+
+    /// **统一资源清单**（`doc/format.md` API 4）：容器里按类登记的可寻址字节。
+    ///
+    /// 默认实现由手头的信息派生（[`derived_resources`]）：图片表折成 `Image`、
+    /// 可重排的样式表位置清单折成 `Css` —— 老库与不认容器的格式靠它兜底。
+    /// 认得容器的实现（[`BookDocument`] + EPUB）覆盖它：provider 交出的 manifest
+    /// 全量清单**优先**，那一列里有字体、音视频与只登记不执行的 JavaScript，
+    /// 是派生给不出来的。
+    ///
+    /// 与设计稿的偏差写明：API 4 的签名是 `&[Resource]`，这里交 `Vec<Resource>` ——
+    /// 清单**不落库、不驻留**，现取现合成；`images` 表 / `chapters.images_json` /
+    /// `fixed_json` 那些已落库的形状一格没动，老库零迁移。落表与 `&[Resource]`
+    /// 签名留在拆分路线的阶段二。
+    fn resources(&self) -> Vec<Resource> {
+        let css = self
+            .flow()
+            .map(|flow| flow.css_hrefs.as_slice())
+            .unwrap_or(&[]);
+        derived_resources(self.images(), css)
+    }
+
+    /// 按 `href` 取容器里的字节。实现本来就是「定位条目再读」，并不挑它是不是
+    /// 图片 —— 这条只是给 [`image_bytes`](Document::image_bytes) 一个不撒谎的名字。
+    fn resource_bytes(&self, href: &str) -> Option<Vec<u8>> {
+        self.image_bytes(href)
+    }
 
     /// 定版式里那一页**要算出来才有字节**（`PageSource::Render`）：交回 PNG。
     ///

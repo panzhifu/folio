@@ -81,6 +81,16 @@ pub struct Resource { pub href: String, pub kind: ResourceKind, pub size: Option
 - 章内图片引用指向这份清单，不再单独存图。
 - 取不到字节回 `None`：资源缺失，那块地方空着。
 
+**现状（2026-11-10，阶段一已落地）**：类型住在 folio-model（`Resource` /
+`ResourceKind`，media type 经 `from_media_type` 折类，认不出落 `Other` 不猜）；
+`DocumentProvider::resources(path)` 由 EPUB 交 **manifest 全量**（spine 章与 nav
+不进清单，size 从 zip 中央目录现量），其余 provider 默认空；`Document::resources()`
+与 `resource_bytes(href)` 在 folio-core —— provider 清单优先，为空回落派生
+（图片表折 `Image`、`css_hrefs` 折 `Css`），老库零迁移。与设计稿的偏差写明：
+签名是 `Vec<Resource>` 而不是 `&[Resource]`（清单不落库、不驻留，现取现合成），
+`images` 表 / `chapters.images_json` / `fixed_json` 那些已落库的形状一格没动；
+「章内图片引用指向清单」、落表迁移与 `&[Resource]` 签名留在阶段二。
+
 ### 5. chapter_text / page_image — 获取书籍内容
 
 ```rust
@@ -125,5 +135,5 @@ pub fn write_chapter(&mut self, chapter: &Chapter, body: &str) -> Result<()>
 
 ---
 
-现状一行：1 / 2 / 3 / 5 在现有代码里已有对应物（`provider_for` / `index` /
-`chapters` 章表 / `chapter_source`），4 与 6 是新增。
+现状一行：1 / 2 / 3 / 4 / 5 在现有代码里已有对应物（`provider_for` / `index` /
+`chapters` 章表 / `resources` 资源清单 / `chapter_source`），6 是新增。

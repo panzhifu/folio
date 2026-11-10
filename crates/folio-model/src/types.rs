@@ -158,20 +158,10 @@ impl AnnotationStyle {
     }
 }
 
-/// 自己实现序列化，理由与 `Mode`、`PageTurn`（都在 folio-core）那两条一样：
-/// derive 碰到认不出的字符串会报错，而报错的代价是**整节** `Appearance` 退回默认。
-impl Serialize for AnnotationStyle {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for AnnotationStyle {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(d)?;
-        Ok(Self::parse(&text))
-    }
-}
+// 自己实现序列化，理由与 `Mode`、`PageTurn`（都在 folio-core）那两条一样：
+// derive 碰到认不出的字符串会报错，而报错的代价是**整节** `Appearance` 退回默认。
+// 与 `ImageScale` 共用 lib.rs 里 `serde_as_string!` 那一份口径。
+serde_as_string!(AnnotationStyle);
 
 /// 一条标注：坐标（含找回它所需的指纹）+ 读者写的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,8 +245,8 @@ impl Collection {
     /// 时未必想连组一起去掉，而他下次给别的书挂同一个组名，`create_collection` 照旧复用
     /// 那一行（同名即复用）。
     ///
-    /// 「按组清点」那份数据形状（书库的 `Store::collection_groups`）不归这条判据管：
-    /// 那一串是每组一串书，不是架面顶部那一排组卡。
+    /// `Store::collection_tiles` 拿它当函数指针用（`.filter(Collection::is_shown)`），
+    /// 所以删不得 —— 全仓扫描只数 `name(` 会漏掉这种不带括号的引用。
     pub fn is_shown(&self) -> bool {
         self.book_count > 0
     }
@@ -332,18 +322,6 @@ impl ReadingSummary {
     /// 今天（窗口最后那一格）的时长。窗口为空时是 0。
     pub fn seconds_at_today(&self) -> i64 {
         self.days.last().map_or(0, |day| day.seconds)
-    }
-
-    /// 有读的那些天的日均。
-    ///
-    /// 除以**活跃天数**而不是窗口天数：「近 14 天日均」要回答的是「他坐下来读的时候
-    /// 一次读多久」，把没读的那几天摊进去会把这个数一路压低到没有意义。
-    pub fn average_per_active_day(&self) -> i64 {
-        if self.active_days == 0 {
-            0
-        } else {
-            self.seconds / self.active_days as i64
-        }
     }
 }
 

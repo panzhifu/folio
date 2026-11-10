@@ -245,6 +245,23 @@ impl Document for BookDocument {
         provider.image_bytes(path, at)
     }
 
+    /// **统一资源清单**（`doc/format.md` API 4）：provider 交出的 manifest 全量
+    /// 优先（认得容器的格式才有），为空则回落派生 —— 图片表折 `Image`、CSS 位置
+    /// 折 `Css`（单文件格式与老库走这一条）。
+    fn resources(&self) -> Vec<crate::content::format::Resource> {
+        if let Some((provider, path)) = self.container() {
+            let list = provider.resources(path);
+            if !list.is_empty() {
+                return list;
+            }
+        }
+        let css = self
+            .flow()
+            .map(|flow| flow.css_hrefs.as_slice())
+            .unwrap_or(&[]);
+        super::derived_resources(self.images(), css)
+    }
+
     fn warm(&self) {
         if let Some((provider, path)) = self.container() {
             provider.warm(path);
@@ -656,6 +673,61 @@ mod tests {
         for (ix, want) in full.iter().enumerate() {
             assert_eq!(&book.chapter_source(ix).unwrap(), want, "第 {ix} 章");
         }
+    }
+
+    /// 统一资源清单（API 4）：EPUB 的 manifest 全量优先（CSS 按类折好、size 是
+    /// 中央目录记的解压后长度），`resource_bytes` 与 `image_bytes` 同源 —— 清单里
+    /// 的每一条 href 都取得回字节。
+    #[test]
+    fn the_resource_list_comes_from_the_manifest_and_its_hrefs_resolve() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/oss/minimal-zh.epub");
+        let book = BookDocument::open(&path).unwrap();
+        let list = book.resources();
+        // 章（spine）与 nav 文档不是按类消费的对象，不进清单。
+        assert_eq!(list.len(), 3, "两条样式表 + 一张封面：{list:?}");
+        assert!(!list.iter().any(|r| r.href.contains("chap")));
+        assert!(!list.iter().any(|r| r.href.contains("nav")));
+        let css = list
+            .iter()
+            .find(|r| r.href.ends_with("style.css"))
+            .expect("样式表该在清单里");
+        assert_eq!(css.kind, crate::content::format::ResourceKind::Css);
+        assert_eq!(css.size, Some(281));
+        assert!(
+            list.iter()
+                .any(|r| r.kind == crate::content::format::ResourceKind::Image)
+        );
+        // 清单是取字节的索引：每一条都取得回，且与 image_bytes 同源。
+        for resource in &list {
+            let bytes = book.resource_bytes(&resource.href).expect("取得回字节");
+            assert_eq!(
+                book.image_bytes(&resource.href),
+                Some(bytes.clone()),
+                "{} 两条路同一份字节",
+                resource.href
+            );
+            assert_eq!(bytes.len() as u64, resource.size.unwrap_or_default());
+        }
+    }
+
+    /// 没有容器的书（测试替身 / 库里读回）也答得出清单：从图片表与 CSS 位置派生，
+    /// 老库零迁移就有一份能用的清单。
+    #[test]
+    fn a_book_without_a_container_still_derives_a_resource_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            "a.md",
+            "# 一\n\n正文。\n\n# 二\n\n再来一段。\n".as_bytes(),
+        );
+        let book = BookDocument::open(&path).unwrap();
+        let list = book.resources();
+        // Markdown 的 CSS 是空的（单文件），清单里只有它自己没有的那几样也行 ——
+        // 这本书没图没 CSS，清单为空也是「答得出」。
+        assert!(list.is_empty(), "没图没 CSS 的书清单为空：{list:?}");
+        // resource_bytes 对任何 href 都回 None（没有容器），不是 panic。
+        assert_eq!(book.resource_bytes("不存在的.png"), None);
     }
 
     /// 容器不在了：要报 **`ChapterUnavailable`**，不是给一页空白。

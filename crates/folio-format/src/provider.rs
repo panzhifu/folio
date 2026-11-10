@@ -20,6 +20,7 @@ use std::path::Path;
 
 use super::{
     Chapter, ChapterLocator, ChapterText, Content, DocMeta, FlowDoc, FontBytes, FontRef, Format,
+    Resource,
 };
 use crate::Result;
 
@@ -222,6 +223,19 @@ pub trait DocumentProvider: Send + Sync {
     /// 「这本书没这张图」与「容器丢了」在屏幕上是同一件事（那块地方空着）。
     fn image_bytes(&self, _path: &Path, _href: &str) -> Option<Vec<u8>> {
         None
+    }
+
+    /// **资源清单**（`doc/format.md` API 4）：容器里按类登记的可寻址字节。
+    /// 默认空 —— 单文件格式没有「容器里还有别的」这一说，清单由 core 侧从图片
+    /// 与 CSS 派生兜底；认得容器的格式（EPUB）覆盖它，交出 manifest 全量。
+    fn resources(&self, _path: &Path) -> Vec<Resource> {
+        Vec::new()
+    }
+
+    /// 按 `href` 取容器里的字节。实现本来就是「定位条目再读」，并不挑它是不是
+    /// 图片 —— 这条只是给 [`Self::image_bytes`] 一个不撒谎的名字（API 4）。
+    fn resource_bytes(&self, path: &Path, href: &str) -> Option<Vec<u8>> {
+        self.image_bytes(path, href)
     }
 
     /// 定版式里**要算出来才有字节**的那一页（`PageSource::Render`），交回 PNG。

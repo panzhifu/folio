@@ -17,7 +17,8 @@ use quick_xml::events::Event;
 use super::zip::{EntryRange, EntryReader, Zip};
 use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FixedDoc, FixedPage, FlowDoc,
-    FontBytes, FontRef, Format, ImageRes, PageImage, PageSource, ParseBudget, Series, TocEntry,
+    FontBytes, FontRef, Format, ImageRes, PageImage, PageSource, ParseBudget, Resource,
+    ResourceKind, Series, TocEntry,
 };
 use super::{
     HeadDims, dir_of, extension_of, fragment_of, image_dims, image_dims_from_head,
@@ -112,6 +113,47 @@ impl DocumentProvider for EpubAdapter {
         let mut zip = Zip::open(path).ok()?;
         let name = zip.locate(href)?;
         zip.read(&name)
+    }
+
+    /// manifest **全量**资源清单（`doc/format.md` API 4）：EPUB 的 manifest 本来就
+    /// 一条不落地列着容器里的东西（CSS、图、字体、音视频……），这里是它第一次以
+    /// 「按类消费」的形状交出去。spine 引用的条目是**章**、nav 文档是目录自己 ——
+    /// 都不是按类消费的对象，不进清单。`size` 从 zip 中央目录现量，不解压。
+    fn resources(&self, path: &Path) -> Vec<Resource> {
+        let Ok(mut zip) = Zip::open(path) else {
+            return Vec::new();
+        };
+        let Some(container_xml) = zip.read_text("META-INF/container.xml") else {
+            return Vec::new();
+        };
+        let Some(opf_path) = container_path(&container_xml) else {
+            return Vec::new();
+        };
+        let Some(opf_text) = zip
+            .read_text(&opf_path)
+            .or_else(|| zip.locate(&opf_path).and_then(|n| zip.read_text(&n)))
+        else {
+            return Vec::new();
+        };
+        let opf = parse_opf(&opf_text);
+        let base_dir = dir_of(&opf_path);
+        let mut out = Vec::with_capacity(opf.items.len());
+        for item in &opf.items {
+            if opf.spine.iter().any(|reference| reference.id == item.id)
+                || item.properties.iter().any(|p| p == "nav")
+            {
+                continue;
+            }
+            let href = resolve_href(&base_dir, &item.href);
+            let mut resource = Resource::new(href, ResourceKind::from_media_type(&item.media_type));
+            if let Some(at) = zip.index_of(&resource.href)
+                && let Some(range) = zip.range_of(at)
+            {
+                resource.size = Some(range.raw_len());
+            }
+            out.push(resource);
+        }
+        out
     }
 
     /// 容器绝对路径 → 那一章的 XHTML。与 `image_bytes` 同一条路：库里只有位置，

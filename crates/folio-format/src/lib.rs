@@ -113,7 +113,8 @@ pub use provider::{
 // （`Chapter::inline`、`char_len`、`copy_extension`、`PageText::text_map`）作为扩展
 // trait 住在 [`ext`]。
 pub use folio_model::format::{
-    Chapter, ChapterLocator, ChapterText, DocMeta, Format, ImageRes, Series, TocEntry, locator_for,
+    Chapter, ChapterLocator, ChapterText, DocMeta, Format, ImageRes, Resource, ResourceKind,
+    Series, TocEntry, locator_for,
 };
 
 pub mod ext;

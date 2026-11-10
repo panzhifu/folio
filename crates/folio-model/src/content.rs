@@ -212,14 +212,16 @@ impl PageRect {
 
     /// 点到这个盒的最短距离的平方。不在任何盒里时用它找最近的那个字
     /// （点在行空的页边距里、或在两张图之间，都该收到最近的一格而不是判「没命中」）。
-    pub fn distance_sq(&self, x: f32, y: f32) -> f32 {
+    /// 只被 [`PageText::hit`] 内部调用，不对外。
+    fn distance_sq(&self, x: f32, y: f32) -> f32 {
         let dx = (x - self.x).max(self.x + self.width - x).max(0.0);
         let dy = (y - self.y).max(self.y + self.height - y).max(0.0);
         dx * dx + dy * dy
     }
 
     /// 两格并成一格（选中按行出色块时，一行里的字并成一条）。
-    pub fn union(&self, other: &Self) -> Self {
+    /// 只被 [`PageText::rects`] 内部调用，不对外。
+    fn union(&self, other: &Self) -> Self {
         let x = self.x.min(other.x);
         let y = self.y.min(other.y);
         Self {

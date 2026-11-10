@@ -61,19 +61,9 @@ impl ImageScale {
     }
 }
 
-/// 自己实现序列化：derive 碰到认不出的字符串会让**整节**退回默认。
-impl Serialize for ImageScale {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for ImageScale {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(d)?;
-        Ok(Self::parse(&text))
-    }
-}
+// 自己实现序列化：derive 碰到认不出的字符串会让**整节**退回默认。
+// 与 `AnnotationStyle` 共用 lib.rs 里 `serde_as_string!` 那一份口径。
+serde_as_string!(ImageScale);
 
 #[cfg(test)]
 mod tests {

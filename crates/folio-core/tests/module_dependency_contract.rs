@@ -11,7 +11,13 @@
 use std::path::{Path, PathBuf};
 
 /// (分区目录, 被禁的路径前缀, 白名单: (相对 src 的文件路径, 欠账说明))
-const BANS: &[(&str, &[&str], &[(&str, &str)])] = &[
+type Ban = (
+    &'static str,
+    &'static [&'static str],
+    &'static [(&'static str, &'static str)],
+);
+
+const BANS: &[Ban] = &[
     // 内容区只往「下」依赖（folio-format / folio-model / infra），不认识存储与导入。
     ("content", &["crate::store", "crate::ingest"], &[]),
     // 存储层不认识网络协议：同步 DTO 归 sync，SQL 只吃数据形状。

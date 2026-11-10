@@ -97,103 +97,69 @@ pub enum Format {
     Mhtml,
 }
 
-impl Format {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Format::Markdown => "markdown",
-            Format::Text => "text",
-            Format::Epub => "epub",
-            Format::Fb2 => "fb2",
-            Format::Html => "html",
-            Format::Cbz => "cbz",
-            Format::Rtf => "rtf",
-            Format::Chm => "chm",
-            Format::Mobi => "mobi",
-            Format::Pdf => "pdf",
-            Format::Docx => "docx",
-            Format::Doc => "doc",
-            Format::Odt => "odt",
-            Format::Pdb => "pdb",
-            Format::Azw4 => "azw4",
-            Format::Cb7 => "cb7",
-            Format::Cbr => "cbr",
-            Format::Cbt => "cbt",
-            Format::Djvu => "djvu",
-            Format::Htmlz => "htmlz",
-            Format::Mhtml => "mhtml",
-        }
-    }
+/// 21 个格式的键名与 media type 只在这里列一遍；`as_str` / `mime` / `parse`
+/// 三个方法都由这张表生成。用宏而不是运行时查表，是为了让 `as_str` 与 `mime`
+/// 保持**穷尽 match** —— 加一个 `Format` 变体却忘了加表行，编译期就红，
+/// 不会拖到「分享出去打不开」才发现。
+macro_rules! format_methods {
+    ($( $variant:ident => $key:literal, $mime:literal );* $(;)?) => {
+        impl Format {
+            /// 全部变体，由表生成；契约测试拿它遍历，确认每个键名与 mime 都在。
+            #[cfg(test)]
+            pub(crate) const ALL: &'static [Self] = &[ $( Self::$variant, )* ];
 
-    /// 对外交出这本书时报的 media type —— 系统的分享面板按它筛选能收件的应用。
-    ///
-    /// 与落地副本的扩展名（它问 provider 注册表，在 folio-format 的
-    /// `FormatExt::copy_extension`）不同，这张对照只有这一份：注册表管的是
-    /// 「哪个 provider 来读这个扩展名」，不是「对面把这个文件当成什么」，
-    /// 两者各写一张表反而会漂。已注册的类型优先（EPUB、RTF、HTML、CHM、PDF），
-    /// 没注册的用事实标准那个（FB2、MOBI、CBZ）。
-    ///
-    /// 返回值不会是空串：Android 的 `GpuiSystemUi.shareImage` 把空 mime 退成 `image/*`，
-    /// 一本 `.epub` 顶着 `image/*` 出去，读者看到的是相册那一排应用，一个也打不开书。
-    pub fn mime(self) -> &'static str {
-        match self {
-            Format::Markdown => "text/markdown",
-            Format::Text => "text/plain",
-            Format::Epub => "application/epub+zip",
-            Format::Fb2 => "application/x-fictionbook+xml",
-            Format::Html => "text/html",
-            Format::Cbz => "application/vnd.comicbook+zip",
-            Format::Rtf => "application/rtf",
-            Format::Chm => "application/vnd.ms-htmlhelp",
-            Format::Mobi => "application/x-mobipocket-ebook",
-            Format::Pdf => "application/pdf",
-            Format::Docx => {
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            pub fn as_str(self) -> &'static str {
+                match self { $( Self::$variant => $key, )* }
             }
-            // `.doc` 与 `.dot`（模板）在分享面板里是同一个类型：Windows 登记的就是这一条，
-            // 而对面按它挑收件应用 —— 报一条认不出的 MIME，症状是收件列表整个空掉。
-            Format::Doc => "application/msword",
-            Format::Odt => "application/vnd.oasis.opendocument.text",
-            Format::Pdb => "application/vnd.palm",
-            // AZW4 在系统分享面板里仍是 Kindle 那一族；它不是 PDF 文件本身。
-            Format::Azw4 => "application/x-mobipocket-ebook",
-            Format::Cb7 => "application/x-7z-compressed",
-            Format::Cbr => "application/vnd.comicbook-rar",
-            Format::Cbt => "application/vnd.comicbook+tar",
-            // IANA 注册的是 image/vnd.djvu；`image/x-djvu` 是历史别名，不另报。
-            Format::Djvu => "image/vnd.djvu",
-            Format::Htmlz => "application/zip",
-            // 对面按它筛收件应用：`message/rfc822` 那一族会被邮件客户端抢走，
-            // 而 `multipart/related` 才是这一族自己声明的形状。
-            Format::Mhtml => "multipart/related",
-        }
-    }
 
-    pub fn parse(s: &str) -> Option<Format> {
-        match s {
-            "markdown" => Some(Format::Markdown),
-            "text" => Some(Format::Text),
-            "epub" => Some(Format::Epub),
-            "fb2" => Some(Format::Fb2),
-            "html" => Some(Format::Html),
-            "cbz" => Some(Format::Cbz),
-            "rtf" => Some(Format::Rtf),
-            "chm" => Some(Format::Chm),
-            "mobi" => Some(Format::Mobi),
-            "pdf" => Some(Format::Pdf),
-            "docx" => Some(Format::Docx),
-            "doc" => Some(Format::Doc),
-            "odt" => Some(Format::Odt),
-            "pdb" => Some(Format::Pdb),
-            "azw4" => Some(Format::Azw4),
-            "cb7" => Some(Format::Cb7),
-            "cbr" => Some(Format::Cbr),
-            "cbt" => Some(Format::Cbt),
-            "djvu" => Some(Format::Djvu),
-            "htmlz" => Some(Format::Htmlz),
-            "mhtml" => Some(Format::Mhtml),
-            _ => None,
+            /// 对外交出这本书时报的 media type —— 系统的分享面板按它筛选能收件的应用。
+            ///
+            /// 与落地副本的扩展名（它问 provider 注册表，在 folio-format 的
+            /// `FormatExt::copy_extension`）不同，这张对照只有这一份：注册表管的是
+            /// 「哪个 provider 来读这个扩展名」，不是「对面把这个文件当成什么」，
+            /// 两者各写一张表反而会漂。已注册的类型优先（EPUB、RTF、HTML、CHM、PDF），
+            /// 没注册的用事实标准那个（FB2、MOBI、CBZ）。
+            ///
+            /// 返回值不会是空串：Android 的 `GpuiSystemUi.shareImage` 把空 mime 退成 `image/*`，
+            /// 一本 `.epub` 顶着 `image/*` 出去，读者看到的是相册那一排应用，一个也打不开书。
+            pub fn mime(self) -> &'static str {
+                match self { $( Self::$variant => $mime, )* }
+            }
+
+            pub fn parse(s: &str) -> Option<Format> {
+                match s { $( $key => Some(Self::$variant), )* _ => None }
+            }
         }
-    }
+    };
+}
+
+format_methods! {
+    Markdown => "markdown", "text/markdown";
+    Text => "text", "text/plain";
+    Epub => "epub", "application/epub+zip";
+    Fb2 => "fb2", "application/x-fictionbook+xml";
+    Html => "html", "text/html";
+    Cbz => "cbz", "application/vnd.comicbook+zip";
+    Rtf => "rtf", "application/rtf";
+    Chm => "chm", "application/vnd.ms-htmlhelp";
+    Mobi => "mobi", "application/x-mobipocket-ebook";
+    Pdf => "pdf", "application/pdf";
+    Docx => "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    // `.doc` 与 `.dot`（模板）在分享面板里是同一个类型：Windows 登记的就是这一条，
+    // 报一条认不出的 MIME 会让收件列表整个空掉。
+    Doc => "doc", "application/msword";
+    Odt => "odt", "application/vnd.oasis.opendocument.text";
+    Pdb => "pdb", "application/vnd.palm";
+    // AZW4 在系统分享面板里仍是 Kindle 那一族；它不是 PDF 文件本身。
+    Azw4 => "azw4", "application/x-mobipocket-ebook";
+    Cb7 => "cb7", "application/x-7z-compressed";
+    Cbr => "cbr", "application/vnd.comicbook-rar";
+    Cbt => "cbt", "application/vnd.comicbook+tar";
+    // IANA 注册的是 image/vnd.djvu；`image/x-djvu` 是历史别名，不另报。
+    Djvu => "djvu", "image/vnd.djvu";
+    Htmlz => "htmlz", "application/zip";
+    // `multipart/related` 才是这一族自己声明的形状，报 `message/rfc822` 会被邮件客户端抢走。
+    Mhtml => "mhtml", "multipart/related";
 }
 
 /// 一本书的书目信息。**字段按 Dublin Core 的术语集命名与取舍**（DCMI Terms / ISO 15839），
@@ -412,13 +378,6 @@ impl ChapterLocator {
     pub fn is_inline(&self) -> bool {
         matches!(self, Self::Inline(_))
     }
-
-    pub fn as_inline(&self) -> Option<&str> {
-        match self {
-            Self::Inline(text) => Some(text),
-            _ => None,
-        }
-    }
 }
 
 /// 一章该按哪种位置存。
@@ -486,6 +445,12 @@ pub struct TocEntry {
 /// `Chapter::spine_href` 同形），排版与绘制都用它当键；`width`/`height` 是解码前的
 /// 固有像素尺寸，读取时算好，布局期只查表。SVG 等取不到尺寸的格式为 0，由排版层降级。
 ///
+/// 与 [`Resource`]（API 4 资源清单）的分工，两者**并存而不是重复**：这里记的是
+/// **排版元数据**（占位尺寸 + 降级路），布局热路径按它查表摆图；`Resource` 是
+/// **按类消费**的容器目录（清单里还有 CSS / 字体 / 音视频），不参与摆位。所以它
+/// 删不得 —— `Resource` 没有 width/height，清单替代不了它；它也不并入 `Resource`
+/// （字段语义不同：像素尺寸 vs 字节长度），真要折成清单项走 [`ImageRes::as_resource`]。
+///
 /// **字节不在这里，也不进数据库**（学 KOReader 的 `NodeImageProxy`）：真要画时按
 /// 这一条去容器里现取（folio-core 的 `Document::image_bytes`）。原图随时能从书里
 /// 再拿一次，就不该在库里留第二份 —— 一本 200 MB 的漫画，图片一入库就等于把书抄了一遍。
@@ -508,4 +473,167 @@ pub struct ImageRes {
     pub media_type: String,
     pub width: u32,
     pub height: u32,
+}
+
+impl ImageRes {
+    /// 折成清单里的一项（`doc/format.md` API 4 的 `ResourceKind::Image`）。
+    /// `size` 这一层给不出 —— 它记的是**像素尺寸**，清单那一格要的是**字节长度**；
+    /// 想要字节数去问 provider 的 `resources()`（EPUB 从 zip 中央目录现量）。
+    pub fn as_resource(&self) -> Resource {
+        Resource::new(self.href.clone(), ResourceKind::Image)
+    }
+}
+
+/// 一本书里的一项**资源**（`doc/format.md` API 4）：容器里一条可寻址的字节，按
+/// 种类登记 —— 不再只有图片那一张表。
+///
+/// 类型一步写全（8 档），但**消费先只认 Css / Image / Text 三类**：Font 已在用
+/// （内嵌字体子集化），Video / Audio 只登记，JavaScript 只登记、永不执行。
+/// `href` 与 [`Chapter::spine_href`] / [`ImageRes::href`] 同形（容器绝对路径），
+/// 是 `resource_bytes` 的查询键；`size` 是容器里那条字节的长度，取不到时是 `None`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resource {
+    pub href: String,
+    pub kind: ResourceKind,
+    pub size: Option<u64>,
+}
+
+impl Resource {
+    pub fn new(href: impl Into<String>, kind: ResourceKind) -> Self {
+        Self {
+            href: href.into(),
+            kind,
+            size: None,
+        }
+    }
+
+    /// 带容器字节数的那一种（EPUB 的 manifest 能从 zip 条目直接量出来）。
+    pub fn with_size(mut self, size: u64) -> Self {
+        self.size = Some(size);
+        self
+    }
+}
+
+/// 资源的种类（[`Resource`]）。serde 键名是库里 / 清单里看得见的那一格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceKind {
+    Css,
+    Image,
+    /// 书内夹带的纯文本（txt 附件之类），当正文一样取字节。
+    Text,
+    Font,
+    Video,
+    Audio,
+    /// 只登记、永不执行。
+    JavaScript,
+    #[default]
+    Other,
+}
+
+impl ResourceKind {
+    /// 从 manifest / 容器给的 media type 折成种类。`;` 之后的参数不参与判定；
+    /// 认不出的一律 [`ResourceKind::Other`]，**不猜** —— 登记错一类，将来按类
+    /// 消费时就静默拿错字节。XHTML / HTML 条目是「章」，不算资源消费类，落 Other。
+    pub fn from_media_type(media_type: &str) -> Self {
+        let base = media_type.split(';').next().unwrap_or("").trim();
+        match base {
+            "text/css" => Self::Css,
+            "text/plain" => Self::Text,
+            "text/javascript" | "application/javascript" => Self::JavaScript,
+            _ => match base.split('/').next().unwrap_or("") {
+                "image" => Self::Image,
+                "audio" => Self::Audio,
+                "video" => Self::Video,
+                "font" => Self::Font,
+                _ if base.starts_with("application/x-font")
+                    || base.starts_with("application/font") =>
+                {
+                    Self::Font
+                }
+                _ => Self::Other,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Format, Resource, ResourceKind};
+
+    /// media type → 种类的映射：manifest 给什么就折成什么，认不出的落 Other 不猜。
+    #[test]
+    fn media_types_map_to_resource_kinds() {
+        use ResourceKind::*;
+        assert_eq!(ResourceKind::from_media_type("text/css"), Css);
+        assert_eq!(ResourceKind::from_media_type("image/png"), Image);
+        assert_eq!(ResourceKind::from_media_type("image/svg+xml"), Image);
+        assert_eq!(
+            ResourceKind::from_media_type("image/jpeg; charset=binary"),
+            Image
+        );
+        assert_eq!(ResourceKind::from_media_type("font/woff2"), Font);
+        assert_eq!(
+            ResourceKind::from_media_type("application/x-font-opentype"),
+            Font
+        );
+        assert_eq!(ResourceKind::from_media_type("audio/mpeg"), Audio);
+        assert_eq!(ResourceKind::from_media_type("video/mp4"), Video);
+        assert_eq!(ResourceKind::from_media_type("text/javascript"), JavaScript);
+        assert_eq!(ResourceKind::from_media_type("text/plain"), Text);
+        // XHTML / HTML 条目是「章」，不是资源消费类。
+        assert_eq!(
+            ResourceKind::from_media_type("application/xhtml+xml"),
+            Other
+        );
+        assert_eq!(
+            ResourceKind::from_media_type("application/octet-stream"),
+            Other
+        );
+    }
+
+    /// serde 往返：kind 的键名小写，`size` 可缺席。
+    #[test]
+    fn resources_round_trip_through_json() {
+        let resource = Resource::new("OEBPS/styles/main.css", ResourceKind::Css).with_size(2048);
+        let json = serde_json::to_string(&resource).unwrap();
+        assert!(json.contains("\"kind\":\"css\""), "{json}");
+        let back: Resource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, resource);
+        let no_size: Resource = serde_json::from_str(r#"{"href":"a.png","kind":"image"}"#).unwrap();
+        assert_eq!(no_size.kind, ResourceKind::Image);
+        assert_eq!(no_size.size, None);
+    }
+
+    /// 键名与 media type 是持久化 / 分享出去的契约：三张 match 合成一张表之后，
+    /// 这条门负责钉住「每个变体的键名往返得回来、mime 非空、变体数对得上」。
+    #[test]
+    fn every_format_key_round_trips_and_has_a_mime() {
+        assert_eq!(Format::ALL.len(), 21, "加格式时表与 enum 要一起加");
+        for format in Format::ALL {
+            assert_eq!(
+                Format::parse(format.as_str()),
+                Some(*format),
+                "{format:?} 的键名读不回来"
+            );
+            assert!(!format.mime().is_empty(), "{format:?} 没有 media type");
+        }
+    }
+
+    /// 表里那几个「不是变体名简单拼出来」的键逐字钉死，防止改表时顺手改错。
+    #[test]
+    fn special_format_keys_and_mimes_stay_put() {
+        assert_eq!(Format::Epub.mime(), "application/epub+zip");
+        assert_eq!(Format::Doc.mime(), "application/msword");
+        assert_eq!(Format::Azw4.mime(), "application/x-mobipocket-ebook");
+        assert_eq!(Format::Djvu.mime(), "image/vnd.djvu");
+        assert_eq!(Format::Mhtml.mime(), "multipart/related");
+        assert_eq!(
+            Format::Docx.mime(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(Format::parse("mhtml"), Some(Format::Mhtml));
+        assert_eq!(Format::parse("不在表里"), None);
+        assert_eq!(Format::default(), Format::Text);
+    }
 }

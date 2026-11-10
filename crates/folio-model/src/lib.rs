@@ -22,6 +22,28 @@
 //! - [`reading`] —— 阅读偏好的档位词汇（如图往哪块尺寸折）。
 //! - [`types`] —— 书库记录的行形状（批注 / 书签 / 集合 / 统计）。
 
+/// 两个「存名字不存值」的档位枚举（`AnnotationStyle` / `ImageScale`）共用同一份
+/// serde 口径：序列化成 `as_str()` 的键名，反序列化交 `parse()` 把坏值回落默认档。
+/// 抽成宏是为了两处不各写一遍 —— 漏改一处就是「写出去的键名读不回来」。
+/// 定义在模块声明之前，子模块（types / reading）直接调用；展开处各自已
+/// `use serde::{Deserialize, Serialize};`。
+macro_rules! serde_as_string {
+    ($ty:ty) => {
+        impl Serialize for $ty {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let text = String::deserialize(d)?;
+                Ok(Self::parse(&text))
+            }
+        }
+    };
+}
+
 pub mod anchor;
 pub mod char_class;
 pub mod content;

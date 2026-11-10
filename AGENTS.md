@@ -3,35 +3,56 @@
 ## 项目是什么
 
 Folio：Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 阅读器，覆盖桌面
-（Linux / macOS / Windows）与 Android。不嵌 WebView，正文由自研排版引擎
-（DOM → CSS 子集 → 排版）产出，`folio-core` 零 GPUI 依赖是硬边界。
+（Linux / macOS / Windows）与 Android（另有 iOS / HarmonyOS 两条入口臂）。
+不嵌 WebView，正文由自研排版引擎（DOM → CSS 子集 → 排版）产出；引擎与界面分离，
+引擎各 crate 零 GPUI 依赖是硬边界，`folio-app` 是唯一的 GPUI 依赖方。
 
-文档地图：
+## 文档地图
 
-- [README.md](README.md)（英文，读者向）/ [doc/README_zh.md](doc/README_zh.md)（中文）
-- [doc/development.md](doc/development.md) —— 构建、测试、Android 交叉编译、日志、发版配方
-- [doc/design/README.md](doc/design/README.md) —— 设计稿 51 屏：手机 compact 一档（384×853）与
-  平板两朝向（800×1280 / 1280×800），共用的那份尺是 `_kit.py`；
-  **SVG 是真相源，改版式改生成器再重出**
-- [packaging/README.md](packaging/README.md) —— 安装包里非代码资产（图标、desktop 条目）的真相源
+`doc/` 下这十篇是现状的真相源；`软件架构.md` 开头写明「以代码为准，改了架构顺手改
+这一篇」。先看总纲，再按要改的层挑对应的 API 篇。
+
+| 篇 | 讲什么 |
+|---|---|
+| [doc/软件架构.md](doc/软件架构.md) | **总纲，先读**：workspace 与 crate 依赖图、各层职责与边界、关键数据流、横切机制、平台矩阵；§7 是 crate 拆分路线图 |
+| [doc/地基.md](doc/地基.md) | `folio-base`：目录、配置、日志、作业池、取消、身份、内存预算、时间、占用 |
+| [doc/数据结构.md](doc/数据结构.md) | `folio-model`：共用类型与三条规矩（只有数据 / 两个以上消费方才进 / 换 crate 不换形状） |
+| [doc/format.md](doc/format.md) | 格式解析六个 API：识别 / 打开 / 章表 / 资源 / 取内容 / 写回 |
+| [doc/渲染.md](doc/渲染.md) | 排版（`folio-render`）与绘制（`folio-app`）两段管线、仿真翻页 |
+| [doc/网络.md](doc/网络.md) | `Transport` / `RemoteStore`、OPDS、Wi-Fi 传书、局域网同步、更新检查、会员兑换 |
+| [doc/AI.md](doc/AI.md) · [doc/翻译.md](doc/翻译.md) | `folio-ai` 的问答与选区翻译；配置到参数的挑选留在 core 入口层 |
+| [doc/储存.md](doc/储存.md) | `Store` 的 SQLite API：书目 / 进度 / 批注 / 统计 / 笔记聚合 |
+| [doc/服务.md](doc/服务.md) | 服务层与导入管线（写得最全的一条业务线）、`Services` 组合根 |
+
+**别把设计稿当现状**：各篇明确标了「现状 ≠ 目标」的地方 —— `format.md` 末行的
+API 4（资源清单）与 6（写回）尚未实现、`地基.md` 的 settings 层仍在 core、
+`储存.md` 的 store 拆 crate 停在路线图阶段四、`软件架构.md` §7 的阶段二~五各有卡点。
+动这些之前先读对应段落，别照着文档以为已经有代码。
+
+[README.md](README.md)（英文，读者向）/ [CHANGELOG.md](CHANGELOG.md) /
+[packaging/README.md](packaging/README.md)（安装包里非代码资产：图标、desktop 条目）。
+旧的 `doc/development.md` / `doc/design/` / `doc/README_zh.md` 已在 2026-11-10
+随旧 doc 一并删除，别再引用；构建、测试、发版的约定以本文下面几节为准。
 
 ## 仓库布局
 
 ```
-crates/folio-base/   地基：时间、路径、作业池、取消、日志装配、占用统计、内存预算；
-                     不认识业务类型，也不依赖 format / core
-crates/folio-model/  公共数据模型：文档 / 书目 / 锚点 / 位置 / 书库记录的**类型**，只有数据；
-                     三条规矩见其 lib.rs（只有数据 / 两个以上消费方才进 / 换 crate 不换形状）
-crates/folio-format/ 文件格式解析：21 个 provider、容器/判定、DOM、CSS、scan、字符坐标；
-                     搬进 model 的类型经 re-export 沿用旧路径，与解析绑定的行为
-                     （Chapter::inline / copy_extension / text_map）是 src/ext.rs 的扩展 trait
-crates/folio-core/   引擎：排版、锚点与批注、SQLite、配置；内容经 folio-format 取
-crates/folio-app/    应用壳；src/ui/ 下 shared / widgets / features / shell / host / platform
-                     features 按功能纵切：reader / shelf / notes / stats / settings / welcome
-doc/                 面向人的文档
-packaging/           四端安装包里的非代码资产与打包脚本
-tests/               fixtures：程序合成的书可入库；真书只放 tests/fixtures/local/ 且不入库
-reference/           借鉴用的上游只读克隆（含 AGPL），gitignore，永不入库、不参与构建
+crates/
+  folio-base/    地基：时间、路径、作业池、取消、日志、身份、内存预算；零业务依赖
+  folio-model/   公共数据模型：诸 crate 共用的类型，只有数据（三条规矩见其 lib.rs）
+  folio-format/  文件格式解析：字节 + 路径 → 统一文档模型（21 个 provider、DOM、CSS、scan）
+  folio-net/     出网地层：Transport / RemoteStore / Sink 与 WebDAV（原 core::net::remote）
+  folio-ai/      AI 问答与选区翻译（原 core::net::ai / translate）
+  folio-render/  排版引擎：DOM + 样式 → 扁平的块盒 / 行盒两张表（原 core::layout）
+  folio-core/    引擎：内容与锚点、书库（SQLite）、导入、剩余的网络面；
+                 内部按 content / store / ingest / net / infra 单向分区
+  folio-app/     应用壳：GPUI 界面、平台入口、原生桥；src/ui/ 依赖方向只有一条
+                 shell ▶ features ▶ components ▶ services ▶ foundation（host / platform 在两侧），
+                 `cfg(mobile)` 只许出现在 host 与 platform
+doc/             十篇架构与分层 API 文档（见上面的文档地图）
+packaging/       四端安装包里的非代码资产与打包脚本
+tests/           fixtures：程序合成的书可入库；真书只放 tests/fixtures/local/ 且不入库
+reference/       借鉴用的上游只读克隆（含 AGPL），gitignore，永不入库、不参与构建
 ```
 
 ## 常用命令
@@ -63,8 +84,9 @@ Linux 需要 fontconfig / Wayland / xkbcommon 开发包与可用 Vulkan 驱动�
 - **别在 shell 里用 `git commit` / `git checkout` / `git stash`** —— colocated 之后
   git 的 HEAD 是分离的，那些改动 jj 看不见。
 - **jj 把未被 ignore 的文件全收进当前 change** —— 本机 scratch 先进 `.gitignore` 再动。
-- **推送**：`jj bookmark move main --to @` 把 main 挪过来，`jj git push --dry-run`
-  确认后再 `jj git push`；新 tag 还要 `jj tag track`（见 doc/development.md 的发版一节）。
+- **推送**：`jj bookmark move main --to @` 把 main 挪过来（若刚 `jj commit` 过、当前
+  change 是空的，要挪的是 `@-`），`jj git push --dry-run` 确认后再 `jj git push`；
+  新 tag 还要 `jj tag track`。发版步骤以本节为准，旧 `doc/development.md` 已删除。
 
 提交说明用中文，写**为什么**与实测到的事实（红在哪、量出来是多少），不写改动文件的清单。
 

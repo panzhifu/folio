@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::EpubAdapter;
 use super::read_with;
 use crate::css::computed::{ComputedStyle, Length, TextAlign, cascade};
 use crate::css::{Origin, RuleSet};
@@ -12,7 +13,8 @@ use crate::dom::Dom;
 use crate::ext::ChapterExt;
 use crate::fixtures::{CONTAINER, published_shape_epub, write_epub};
 use crate::{
-    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ParseBudget, dir_of, resolve_href,
+    Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ParseBudget, ResourceKind,
+    dir_of, resolve_href,
 };
 
 fn fixture() -> PathBuf {
@@ -112,6 +114,30 @@ fn chapters_follow_spine_not_manifest() {
             .count(),
         0
     );
+}
+
+/// manifest 全量清单（API 4）：CSS / 图按 media-type 折成 kind，spine 里的章与
+/// nav 不进清单；`size` 与 zip 条目长度一致，href 解过百分号编码、能取回字节。
+#[test]
+fn the_manifest_becomes_a_typed_resource_list() {
+    let path = fixture();
+    let list = EpubAdapter.resources(&path);
+    // 清单里只剩「按类消费」的资源：三条章与 nav 文档都不出现。
+    assert_eq!(list.len(), 3, "两条样式表 + 一张封面：{list:?}");
+    assert!(!list.iter().any(|r| r.href.contains("chap")));
+    assert!(!list.iter().any(|r| r.href.contains("nav")));
+    let css = list
+        .iter()
+        .find(|r| r.href.ends_with("style.css"))
+        .expect("样式表该在清单里");
+    assert_eq!(css.kind, ResourceKind::Css);
+    assert_eq!(css.size, Some(281), "size 从 zip 中央目录现量");
+    assert!(list.iter().any(|r| r.kind == ResourceKind::Image));
+    // href 是解析后的容器绝对路径（含百分号解码），`resource_bytes` 取得回字节。
+    let bytes = EpubAdapter
+        .resource_bytes(&path, &css.href)
+        .expect("清单里的 href 要能取回字节");
+    assert_eq!(bytes.len(), 281);
 }
 
 /// 两份 CSS 都在 manifest 里：索引记下的是**位置清单**，顺序就是声明顺序；
