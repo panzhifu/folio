@@ -69,6 +69,7 @@ pub use folio_model::position;
 // 从这里拿，不必直接依赖 folio-format。
 pub use error::{Error, ImportReject, Result};
 pub use folio_format::ext::{ChapterExt, FlowDocExt, FormatExt, PageTextExt};
+pub use folio_model::Tag;
 pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};

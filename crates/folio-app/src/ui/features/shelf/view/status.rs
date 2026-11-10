@@ -27,6 +27,7 @@ use folio_core::{ImportLanding, ImportOutcome, ImportReject, Imported};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::progress::Progress;
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -37,7 +38,7 @@ use gpui_kit::{
 use super::super::overlay;
 use super::scan::fmt_size;
 use super::{ShelfEvent, ShelfView};
-use crate::ui::components::{muted_label, scroll_guard};
+use crate::ui::components::muted_label;
 use crate::ui::services::l10n::{duration, tr};
 use crate::ui::{host, services};
 
@@ -90,9 +91,11 @@ pub(in crate::ui::features::shelf) fn record_width(viewport: f32) -> f32 {
 /// 不必像扫描那一屏那样先给一个定死的框 —— 一本书的卡就该是一本书的高。
 fn record_height(rows: usize, running: bool) -> f32 {
     let foot = if running { FOOT_HEIGHT } else { 0.0 };
-    // 一行都还没有（刚提交、第一条字节读数还没上来）也要给那条等着的条子留一格。
-    let body = rows.max(if running { 1 } else { 0 }) as f32 * ROW_HEIGHT;
-    (HEAD_HEIGHT + body + foot).min(overlay::RECORD_MAX_HEIGHT)
+    // 三层之间那两条分隔线（标题层 / 内容层 / 动作层）各占 1 像素，报的高要带上；
+    // 一行都还没有时也要给那格空态留位：在跑等的是那条进度条，没在跑等的是
+    // 「暂无导入记录」那句话 —— 两态都至少占一行的高。
+    let body = rows.max(1) as f32 * ROW_HEIGHT;
+    (HEAD_HEIGHT + body + foot + 2.0).min(overlay::RECORD_MAX_HEIGHT)
 }
 
 /// 一本书在这一批记录里的样子。
@@ -357,6 +360,10 @@ impl ShelfView {
     ///
     /// 只清内存不算清干净：下一次架面起起来又会从库里读回来，读者看到的是「按了一下，
     /// 过一会儿又冒出来」。库没装上时（还在启动那一段）就只清内存那一半。
+    ///
+    /// 卡**不收**：清完摆出空态（「暂无导入记录」，见 [`Self::record_body`]），读者当场
+    /// 看得见动作生效了。那条给「在跑」准备的进度条只认 `running`（同处有注），空态不会
+    /// 再把它摆出来。
     fn clear_import_records(&mut self, cx: &mut Context<Self>) {
         self.import_history.clear();
         if let Some(store) = services::app_store::handle(cx)
@@ -449,6 +456,10 @@ impl ShelfView {
     }
 
     /// 卡的内容：头顶一行标题，中间那条清单，脚下一排动作。
+    ///
+    /// 三层之间各垫一条 [`Separator::horizontal`]：标题与清单、清单与动作是两个层级，
+    /// 各归各的那条横线替它们划界 —— 没有那两条线，滚动着的清单行与顶上那行标题、
+    /// 底下那颗按钮会糊成一片同质的内容。
     fn record_body(&self, width: f32, cx: &mut Context<Self>) -> AnyElement {
         let running = self.importing.is_some();
         let rows = self.record_rows(running);
@@ -468,13 +479,12 @@ impl ShelfView {
             // 外壳那扇回归门按 id 认这张卡画没画出来（`ui::shell::tests`）。id 沿用从前
             // 那一行的：门断言的是「在导入时这句话在不在屏幕上」。
             .test_support()
-            // 卡里的清单滚完就到此为止：身后那片架面（或弹层外框）不该跟着动。这一格
-            // **排在清单之前** —— 冒泡相倒着走，先画才轮得到它在清单之后收尾。
-            .child(scroll_guard("shelf-import-records-scroll"))
             .w(px(width))
             .h(px(height))
             .flex_col()
             .child(head)
+            // 标题层与内容层之间那条线。
+            .child(Separator::horizontal())
             .child(
                 div()
                     .flex_1()
@@ -492,14 +502,25 @@ impl ShelfView {
                             .flex_1(),
                         )
                     })
-                    // 还没有一行可列（刚提交、第一条字节读数还没上来）：摆一条不定进度的条子
-                    // 说「它在干活」——与行里那一条同一个组件，不另立一句文案。
-                    .when(count == 0, |empty| {
+                    // 空的那一格按状态分叉：**在跑**还没有一行可列（刚提交、第一条字节读数
+                    // 还没上来）摆那条不定进度的条子；**没在跑**还空着（历史被清空、或本来
+                    // 就没有）说的是「暂无导入记录」—— 这里从前不分状态，清完记录之后那条
+                    // 给「在跑」准备的进度条就永远转下去（真机上读者报的那个「删完一直加载」）。
+                    .when(running && count == 0, |empty| {
                         empty
                             .px(px(super::grid::GUTTER))
                             .child(Progress::new("shelf-record-waiting").w_full().loading(true))
+                    })
+                    .when(!running && count == 0, |empty| {
+                        empty
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(muted_label(tr(cx, "shelf.record_empty"), cx))
                     }),
             )
+            // 内容层与动作层之间那条线：foot 只在跑的那一档存在，线跟着它走。
+            .when(running, |column| column.child(Separator::horizontal()))
             .child(foot)
             .into_any_element()
     }

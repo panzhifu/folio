@@ -8,7 +8,7 @@
 //! 是同一个状态，不需要额外的开关。
 
 use gpui_kit::component::button::Button;
-use gpui_kit::{FontWeight, IntoElement as _, ParentElement, SharedString, Styled, div};
+use gpui_kit::{IntoElement as _, ParentElement, SharedString, Styled, div};
 
 use super::super::*;
 use crate::ui::components::{access_question, muted_label, waiting_for};
@@ -31,7 +31,7 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
     // 用系统文件夹选择器挑任意目录。静态设置页每帧重建、拿不住 `Task`，所以 `detach()`
     // 让这次选择跑完（取消或选区结束都不需要回调界面）。
     // 没拿到「所有文件访问」时这一格摆的是那一问（`access_panel`），不是选择器按钮。
-    let pick = Row::custom(move |cx| {
+    let pick = Row::custom(move |_, cx| {
         if waiting_for(Pick::Library, cx) {
             return access_question(cx);
         }
@@ -46,7 +46,7 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
 
     // 建议位置照实写出来：读者要的是知道不管填没填、默认会去哪儿，
     // 而不是自己去猜一个路径。
-    let suggested = Row::custom(move |cx| {
+    let suggested = Row::custom(move |_, cx| {
         div()
             .flex()
             .flex_col()
@@ -73,7 +73,7 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
     .description(tr(cx, "field.watch.desc"))
     .keywords(&["watch", "监听", "inbox", "收件箱", "自动"]);
 
-    let watch_pick = Row::custom(move |cx| {
+    let watch_pick = Row::custom(move |_, cx| {
         if waiting_for(Pick::Watch, cx) {
             return access_question(cx);
         }
@@ -110,7 +110,7 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
     })
     .keywords(&["watch", "inbox", "收件箱", "目录"]);
 
-    let watch_suggested = Row::custom(move |cx| {
+    let watch_suggested = Row::custom(move |_, cx| {
         div()
             .flex()
             .flex_col()
@@ -131,15 +131,11 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
     .description(tr(cx, "field.transfer.desc"))
     .keywords(&["wifi", "transfer", "传书", "上传", "网页"]);
 
-    let wifi_status = Row::custom(move |cx| match wifi::running() {
+    let wifi_status = Row::custom(move |_, cx| match wifi::running() {
         None => muted_label(tr(cx, "field.transfer.off"), cx).into_any_element(),
         Some(status) => {
+            // 不设配对码之后这一行只剩地址：同一 Wi-Fi 里打开就能传，不必再手打口令。
             let mut col = div().flex().flex_col().gap_1();
-            col = col.child(div().font_weight(FontWeight::SEMIBOLD).child(tf(
-                cx,
-                "field.transfer.pin",
-                &[("pin", &status.pin)],
-            )));
             if status.urls.is_empty() {
                 col = col.child(muted_label(tr(cx, "field.transfer.no_url"), cx));
             } else {
@@ -150,7 +146,7 @@ pub(in crate::ui::features::settings) fn library_page(cx: &App) -> Page {
             col.into_any_element()
         }
     })
-    .keywords(&["wifi", "pin", "配对码", "地址"]);
+    .keywords(&["wifi", "地址"]);
 
     page(
         tr(cx, "page.library"),

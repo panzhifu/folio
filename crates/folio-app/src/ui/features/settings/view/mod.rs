@@ -337,7 +337,7 @@ fn setting_item(row: &spec::Row) -> SettingItem {
                 let render = render.clone();
                 let item = SettingItem::new(
                     title.clone(),
-                    SettingField::render(move |_, _, cx| render(cx)),
+                    SettingField::render(move |_, window, cx| render(window, cx)),
                 );
                 if *vertical {
                     item.layout(Axis::Vertical)
@@ -347,7 +347,7 @@ fn setting_item(row: &spec::Row) -> SettingItem {
             }
             None => {
                 let render = render.clone();
-                SettingItem::render(move |_, _, cx| render(cx))
+                SettingItem::render(move |_, window, cx| render(window, cx))
             }
         },
     };

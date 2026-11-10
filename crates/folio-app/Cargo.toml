@@ -30,6 +30,8 @@ folio-core.workspace = true
 # 挪到公共那一段。版本与锁里那一份一致（folio-core 已在用），不引入新 crate、不产生
 # 双版本；PNG 那一档由 workspace 根的 feature 统一打开。
 image.workspace = true
+# 网络导入卡：地址 → 二维码位图。见根 Cargo.toml 那条注释（同一份 image 0.25）。
+qrcode.workspace = true
 # 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
 # 它住在 `panzhifu/gpui-folio` 那个 workspace 里，rev 必须跟根
 # `[patch.crates-io]` 那五条同一个数 —— 一份 fork 六个成员，钉成两个 rev 就是两份代码。

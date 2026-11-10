@@ -30,6 +30,7 @@
 // 这一屏压出来的两页与它共用同一个实体：信息页（压导航栈的整屏）与整机扫描的候选清单。
 pub(in crate::ui::features::shelf) mod book_info;
 pub(in crate::ui::features::shelf) mod grid;
+pub(in crate::ui::features::shelf) mod network_import;
 pub(in crate::ui::features::shelf) mod scan;
 pub(in crate::ui::features::shelf) mod sheets;
 pub(in crate::ui::features::shelf) mod status;
@@ -37,22 +38,23 @@ pub(in crate::ui::features::shelf) mod toolbar;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use folio_core::FormatExt;
-use folio_core::net::remote::Transport;
 use folio_core::store::Collection;
 use folio_core::{
-    Cancel, Format, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent,
-    UrlSource, submit_import,
+    Cancel, Format, ImportOutcome, ImportReport, Imported, PathsSource, Store, Tag, TaskEvent,
+    submit_import,
 };
 use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::base::{NavMotion, NavStackState, VirtualListScrollHandle};
+use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::dialog::DialogButtonProps;
 use gpui_kit::component::input::InputEvent;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Sizable as _, v_flex};
+use gpui_kit::component::{Sizable as _, WindowExt as _, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
     IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Subscription,
@@ -72,21 +74,13 @@ use crate::ui::foundation::file_stem::title_stem;
 use crate::ui::host;
 use crate::ui::services::cloud_upload;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::services::l10n::{book_count, tr};
+use crate::ui::services::l10n::{book_count, tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::resident;
+use crate::ui::services::transfer;
 use crate::ui::shell::navigation::{self, SizeClass};
 use grid::{Cell, GUTTER, GridSpec, grid_spec, merge_cells};
 use scan::ScanPhase;
-
-/// 出网共用的那一份传输（`ureq` + rustls）。一个进程一个连接池就够 ——
-/// 所有 URL 下载都从这里拿。
-fn url_transport() -> Arc<dyn Transport> {
-    static TRANSPORT: OnceLock<Arc<dyn Transport>> = OnceLock::new();
-    TRANSPORT
-        .get_or_init(folio_core::net::remote::ureq::shared)
-        .clone()
-}
 
 /// 手机上一行放几本。
 ///
@@ -225,6 +219,25 @@ pub struct ShelfView {
     group_entry: Option<(i64, Entity<InputState>)>,
     /// 建组那一屏的意图。`false` 而内容还在 = 正在沉下去。
     group_open: bool,
+    /// 标记浮层为哪一本书开着，带**打开那一刻**库里的标签快照（打勾读的是它，
+    /// 落库走 [`Self::toggle_tag`] 一格一写）。`None` = 浮层没开。
+    tag_entry: Option<(i64, Vec<Tag>)>,
+    /// 「网络导入」那张卡摆没摆。开着时 Wi-Fi 传书服务一定起着（打开那一手起的），
+    /// 收卡**不停**服务 —— 读者要切到另一台设备上去传书。
+    network_open: bool,
+    /// 手机那一档的弹层状态。桌面那一档用 `overlay::centered`，不需要它；留着是为了
+    /// 转屏 / 拉窗口时不必重建（与 `group_sheet` / `scan_sheet` 同一条）。
+    network_sheet: Entity<BottomSheetState>,
+    /// 卡片上那张二维码（第一个地址的 PNG）。打开卡片时算一次，之后每帧只画，
+    /// 不重编码；收卡时丢掉。没探到局域网地址时是 `None`。
+    network_qr: Option<Arc<Image>>,
+    /// 整架的标签表：书号 → 挂着的标签。与架面同一次重查取（[`Self::reload`]），
+    /// 卡片画角标读它；标记浮层落库后也只改它那一格，不必整架重查。
+    pub(in crate::ui::features::shelf) tags: HashMap<i64, Vec<Tag>>,
+    /// 架面的标签筛选。`Some(tag)` = 整架那一片只摆挂着这一个标签的书
+    /// （[`Store::shelf_by_tag`]），组卡区跟着藏起（与搜索词非空同一处理）。
+    /// 单颗可点选 / 再点取消；一次筛一颗，多颗 any-of 留给有真实读者之前再说。
+    tag_filter: Option<Tag>,
     /// 架面上是不是站着那块「书库位置」确认面板。
     ///
     /// 导入会把文件**拷一份**进硬盘，所以位置要先说定。没定过的时候点导入不开选择器，
@@ -306,16 +319,11 @@ pub struct ShelfView {
     /// 自动导入（监听 / 传书）事件的订阅链。这些批次不是这个视图提交的，
     /// 靠共享事件通道流回来 —— 处理与手工导入同一套（读数、重查架面）。
     _auto_import: Option<Task<()>>,
-    /// 「从链接导入」那一屏的输入框（内容）。开没开看 [`Self::url_open`]。
-    url_entry: Option<Entity<InputState>>,
-    /// 链接导入那一屏的意图。见 [`Self::group_open`] 那一段为什么分两半。
-    url_open: bool,
-    /// 移动端那三块弹层各自的开合与停靠档。桌面那一档用的是 `Popover`，这三份只是
+    /// 移动端那两块弹层各自的开合与停靠档。桌面那一档用的是 `Popover`，这两份只是
     /// 没挂载而已 —— 状态留着比按档位分叉省一件事：转屏 / 拉窗口时不必重建。
     group_sheet: Entity<BottomSheetState>,
-    url_sheet: Entity<BottomSheetState>,
     scan_sheet: Entity<BottomSheetState>,
-    /// 三块弹层各自「读者自己关掉了」那一条：下拉过头、点遮罩、按返回都走它。
+    /// 两块弹层各自「读者自己关掉了」那一条：下拉过头、点遮罩、按返回都走它。
     /// 订阅在 `boot` 里装一次，清的是架面这一侧的状态（面板留着而弹层没了会立刻被
     /// 重新抬起来，见 [`Self::sync_sheet`]）。
     _sheet_watches: Vec<Subscription>,
@@ -357,8 +365,6 @@ pub struct ShelfView {
     /// 勾中的书（库主键）。用 `BTreeSet` 而不是 `HashSet`：删除时按主键从小到大做，
     /// 同一批书的日志与报错顺序稳定，测试也不必容忍随机序。
     pub(in crate::ui::features::shelf) selected: BTreeSet<i64>,
-    /// 多选删除那张确认面板摆没摆。批量删是不可撤销的，比单本菜单多问一句。
-    selection_delete_confirm: bool,
     /// 格子「落定」那段动画的起算时刻，第一次真画出格子时才记。
     ///
     /// 只为**第一次**上屏留的，之后不再重放（理由见 [`super::book_card::Enter`]）。
@@ -423,16 +429,16 @@ impl ShelfView {
             let SearchBoxEvent::Change(query) = event;
             this.search_soon(query, cx);
         });
-        // 三块弹层各订阅一次「读者自己把它关掉了」：下拉过头、点遮罩、按返回都只报这一条。
-        // 不据此清架面那一侧的状态的话，下一帧 [`Self::sync_sheet`] 看着「面板还开着」
+        // 两块弹层各订阅一次「读者自己把它关掉了」：下拉过头、点遮罩、按返回都只报这一条。
+        // 不据此清架面那一侧的状态的话，下一帧 [`Self::sync_panels`] 看着「面板还开着」
         // 又把弹层抬起来 —— 在读者手里就成了「这层关不掉」。
-        // 「没拿到所有文件访问」那一问：与那三块弹层同一立场——状态归服务那份实体，画不画
+        // 「没拿到所有文件访问」那一问：与那两块弹层同一立场——状态归服务那份实体，画不画
         // 归架面，所以这里必须观察它，否则答完不重画。
         let question = crate::ui::services::library::access(cx);
         let access_watch = cx.observe(&question, |_, _, cx| cx.notify());
         let group_sheet = cx.new(BottomSheetState::closed);
-        let url_sheet = cx.new(BottomSheetState::closed);
         let scan_sheet = cx.new(BottomSheetState::closed);
+        let network_sheet = cx.new(BottomSheetState::closed);
         // 扫描清单的搜索框：与架面顶上那颗分开（一个查库、一个筛内存里的候选）。
         // 小一档：它坐在卡片里，与旁边那颗筛选按钮同高。
         let scan_search = cx
@@ -457,14 +463,17 @@ impl ShelfView {
                     this.group_open = false;
                 }
             }),
-            cx.subscribe(&url_sheet, |this, _, event, _| {
-                if matches!(event, BottomSheetEvent::Dismissed) {
-                    this.url_open = false;
-                }
-            }),
             cx.subscribe(&scan_sheet, |this, _, event, _| {
                 if matches!(event, BottomSheetEvent::Dismissed) {
                     this.scan_open = false;
+                }
+            }),
+            cx.subscribe(&network_sheet, |this, _, event, cx| {
+                if matches!(event, BottomSheetEvent::Dismissed) {
+                    // 与 `close_network_import` 同一条：收卡即停服务、丢掉二维码。
+                    this.network_open = false;
+                    this.network_qr = None;
+                    transfer::set_enabled(false, cx);
                 }
             }),
         ];
@@ -484,6 +493,11 @@ impl ShelfView {
             group_page: None,
             group_entry: None,
             group_open: false,
+            tag_entry: None,
+            network_open: false,
+            network_qr: None,
+            tags: HashMap::new(),
+            tag_filter: None,
             confirming: false,
             covers: HashMap::new(),
             covers_ink: false,
@@ -508,11 +522,9 @@ impl ShelfView {
             _scan_size_watch,
             _scan: None,
             _auto_import: None,
-            url_entry: None,
-            url_open: false,
             group_sheet,
-            url_sheet,
             scan_sheet,
+            network_sheet,
             _sheet_watches,
             _group_watch: None,
             _info_watch: None,
@@ -526,7 +538,6 @@ impl ShelfView {
             flow_dirty: true,
             selecting: false,
             selected: BTreeSet::new(),
-            selection_delete_confirm: false,
             enter_at: None,
         };
         this.reload(&SharedString::default(), cx);
@@ -567,10 +578,14 @@ impl ShelfView {
             self.pop(cx);
             return;
         }
-        // 组卡只在「整架 + 没搜词」那一屏出现。某一组那一页再摆一排组卡，等于把读者刚
+        // 组卡只在「整架 + 没搜词 + 没筛标签」那一屏出现。某一组那一页再摆一排组卡，等于把读者刚
         // 走进去的那一层又摊回他面前；而搜的是书不是组 —— 词非空时那几张卡上的封面跟
-        // 搜索结果没有半点关系，摆出来只会读成「这几本匹配」。
-        self.tiles = if self.scope == ShelfScope::Shelf && query.trim().is_empty() {
+        // 搜索结果没有半点关系，摆出来只会读成「这几本匹配」。筛着标签时同理：那一排
+        // 回答的是「按组收纳」，不是「按状态筛」。
+        self.tiles = if self.scope == ShelfScope::Shelf
+            && query.trim().is_empty()
+            && self.tag_filter.is_none()
+        {
             self.tile_cards()
         } else {
             Vec::new()
@@ -580,7 +595,10 @@ impl ShelfView {
         // 搜不出来（某一组那一页没有搜索行），而读者读到的结果是「书丢了」。
         let queried = self.store.as_ref().map(|store| match self.scope {
             ShelfScope::Shelf => {
-                if query.trim().is_empty() {
+                // 筛着标签时只查挂着它的那一片（any-of 的单标签版）；搜索词叠在标签之上。
+                if let Some(tag) = self.tag_filter {
+                    store.shelf_by_tag(tag, query)
+                } else if query.trim().is_empty() {
                     store.shelf_ungrouped(query)
                 } else {
                     store.shelf(query)
@@ -593,6 +611,12 @@ impl ShelfView {
         match queried {
             Some(Ok(items)) => {
                 self.query = query.into();
+                // 卡片角标要的那份标签表与架面同一次重查取：逐卡再查一次等于几百本就是几百趟。
+                if let Some(store) = &self.store
+                    && let Ok(map) = store.tags_map()
+                {
+                    self.tags = map;
+                }
                 // 先把封面解析出来再收集：`map(|item| self.card(item))` 那种写法同时借
                 // `self` 的不可变与可变两半，编译器不让过。
                 self.items = items
@@ -1053,51 +1077,7 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 打开「从链接导入」那一屏。书库位置没确认过先摆确认面板 —— 与选文件导入
-    /// 同一道门禁：往哪儿拷还没说清楚，就不该动手。
-    fn open_url_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.url_open || self.importing.is_some() || self.scan_open {
-            return;
-        }
-        if target_dir(&ConfigHolder::library(cx)).is_none() {
-            self.confirming = true;
-            cx.notify();
-            return;
-        }
-        self.url_entry =
-            Some(cx.new(|cx| {
-                InputState::new(window, cx).placeholder(tr(cx, "shelf.url_placeholder"))
-            }));
-        self.url_open = true;
-        cx.notify();
-    }
-
-    /// 收「从链接导入」那一屏。**只**改意图：内容（那个输入框）留到弹层停稳才 drop，
-    /// 不然手机上读者看到的是一张空卡往下沉。桌面那张浮层没有退场动画，同一帧就没了。
-    fn close_url_panel(&mut self, cx: &mut Context<Self>) {
-        self.url_open = false;
-        cx.notify();
-    }
-
-    /// 那一屏上那颗「导入」。链接不对（不是 http/https）就不动 —— 假链接交给
-    /// 管线只会得到一条谁都看不懂的网络错误。
-    fn import_from_url(&mut self, cx: &mut Context<Self>) {
-        let Some(entry) = &self.url_entry else {
-            return;
-        };
-        let url = entry.read(cx).value().trim().to_string();
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            tracing::info!(
-                "ShelfView: 不是 http(s) 链接，不导入：{}",
-                &url[..url.len().min(80)]
-            );
-            return;
-        }
-        self.close_url_panel(cx);
-        self.dispatch_import(Box::new(UrlSource::new(url, url_transport())), cx);
-    }
-
-    /// 两块表单那一屏在弹层里的内容：弹层还没停稳、且内容还在的时候才给。
+    /// 表单那一屏在弹层里的内容：弹层还没停稳、且内容还在的时候才给。
     ///
     /// 弹层里给横向留白而浮层里不给：浮层自己那一圈 `p_3` 已经留了，弹层那块表面是满幅的。
     fn form_body(
@@ -1120,7 +1100,7 @@ impl ShelfView {
         )
     }
 
-    /// 把三块弹层的开合**派生**自那三个意图位，顺手把「已经停稳」的那些内容 drop 掉。
+    /// 把两块弹层的开合**派生**自那两个意图位，顺手把「已经停稳」的那些内容 drop 掉。
     ///
     /// 派生而不是在每一处改意图的地方各叫一次 `show()` / `hide()`：那样有五六处，漏一处
     /// 就是一屏关不掉的弹层。桌面那一档 `want` 恒假，于是意图一收内容当场跟着没 ——
@@ -1128,8 +1108,8 @@ impl ShelfView {
     fn sync_panels(&mut self, compact: bool, cx: &mut Context<Self>) {
         for (want, state) in [
             (self.group_open, &self.group_sheet),
-            (self.url_open, &self.url_sheet),
             (self.scan_open, &self.scan_sheet),
+            (self.network_open, &self.network_sheet),
         ] {
             match (want && compact, state.read(cx).is_open()) {
                 (true, false) => state.update(cx, |state, cx| state.show(cx)),
@@ -1139,9 +1119,6 @@ impl ShelfView {
         }
         if !self.group_open && self.rest(&self.group_sheet, cx) {
             self.group_entry = None;
-        }
-        if !self.url_open && self.rest(&self.url_sheet, cx) {
-            self.url_entry = None;
         }
         if !self.scan_open && self.rest(&self.scan_sheet, cx) {
             self.scan = None;
@@ -1177,18 +1154,16 @@ impl ShelfView {
         if let Some(id) = with {
             self.selected.insert(id);
         }
-        self.selection_delete_confirm = false;
         self.notify_selection(cx);
     }
 
     /// 退出多选态。取消 / 返回 / 做完批量动作都走这一条。
     pub(in crate::ui::features::shelf) fn exit_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.selecting && self.selected.is_empty() && !self.selection_delete_confirm {
+        if !self.selecting && self.selected.is_empty() {
             return;
         }
         self.selecting = false;
         self.selected.clear();
-        self.selection_delete_confirm = false;
         self.notify_selection(cx);
     }
 
@@ -1312,7 +1287,7 @@ impl ShelfView {
             }
             navigation::SelectionAction::Info => self.show_selected_info(window, cx),
             navigation::SelectionAction::Upload => self.upload_selection(cx),
-            navigation::SelectionAction::Delete => self.ask_delete_selection(cx),
+            navigation::SelectionAction::Delete => self.ask_delete_selection(window, cx),
         }
     }
 
@@ -1360,30 +1335,49 @@ impl ShelfView {
     }
 
     /// 删除前先问一句：批量删是不可撤销的，而工具栏那颗「删除」离手指很近。
-    fn ask_delete_selection(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// 用的是框架的 AlertDialog（`window.open_alert_dialog`）而不是手搭的居中卡片：
+    /// 尺寸、遮罩、居中、Escape / 返回键与焦点框都由框架给，且宽度自动夹在视口之内
+    /// —— 从前的手写卡写死 420 宽、152 高，手机上比视口还宽，把整屏占得满满当当。
+    /// 点头才落库（[`Self::confirm_delete_selection`]），取消什么都不动。
+    fn ask_delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected.is_empty() {
             return;
         }
-        self.selection_delete_confirm = true;
-        cx.notify();
+        let count = self.selected.len();
+        let entity = cx.entity().clone();
+        let title = tf(cx, "shelf.selection_delete_title", &[("n", &count)]);
+        let body = tf(cx, "shelf.selection_delete_body", &[("n", &count)]);
+        let ok = tr(cx, "shelf.selection_delete_confirm");
+        let cancel = tr(cx, "shelf.cancel");
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            // build 闭包是 `Fn`（dialog 层重建时会再跑一遍），所以句柄只在每次重建时
+            // 现摘一份交给 `on_ok`，不能把外层捕获的那一整个 move 进去。
+            let on_ok_entity = entity.clone();
+            alert
+                .title(title.clone())
+                .description(body.clone())
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(ok.clone())
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(cancel.clone())
+                        .on_ok(move |_, _, cx| {
+                            on_ok_entity.update(cx, |this, cx| this.confirm_delete_selection(cx));
+                            true
+                        }),
+                )
+        });
     }
 
+    /// 确认框上那颗「删除」：真正落库。留在架面这一层、由 `on_ok` 派回来 —— 这一段的
+    /// 动作（删书、退出多选、重查）与确认框是谁摆的无关，回归门也直接敲这一句。
     pub(in crate::ui::features::shelf) fn confirm_delete_selection(
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        self.selection_delete_confirm = false;
         self.delete_selection(cx);
-    }
-
-    pub(in crate::ui::features::shelf) fn cancel_delete_selection(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) {
-        if self.selection_delete_confirm {
-            self.selection_delete_confirm = false;
-            cx.notify();
-        }
     }
 
     fn delete_selection(&mut self, cx: &mut Context<Self>) {
@@ -1491,10 +1485,202 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 收「新建分组」那一屏。**只**改意图，理由同 [`Self::close_url_panel`]。
+    /// 收「新建分组」那一屏。**只**改意图：内容（那个输入框）留到弹层停稳才 drop，
+    /// 不然手机上读者看到的是一张空卡往下沉；桌面那张浮层没有退场动画，同一帧就没了
+    /// —— 看意图位在哪一格收（[`Self::sync_panels`]）。
     pub(in crate::ui::features::shelf) fn close_group_panel(&mut self, cx: &mut Context<Self>) {
         self.group_open = false;
         cx.notify();
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // 标记与阅读记录
+    // ────────────────────────────────────────────────────────────────────
+
+    /// 长按菜单里那格「标记」：开那张居中的标记浮层，记下是为哪本书开的。
+    ///
+    /// 打勾读的是**打开那一刻**库里的标签（快照进 [`Self::tag_entry`]），之后每一格
+    /// 点按当场落库（[`Self::toggle_tag`]），不攒一笔总账 —— 菜单里分组那节的开关
+    /// 就是这么做的，两处同一个习惯。
+    pub(in crate::ui::features::shelf) fn open_tag_popover(
+        &mut self,
+        book_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let snapshot = self
+            .store
+            .as_ref()
+            .and_then(|store| store.tags_of_book(book_id).ok())
+            .unwrap_or_default();
+        self.tag_entry = Some((book_id, snapshot));
+        // 这张浮层的入口也是卡片菜单：菜单点完就散，没有留下能钉的元素 —— 与建组
+        // 那一屏同一条理由，卡摆在屏幕正中（`sheets::tag_popover`）。
+        cx.notify();
+    }
+
+    /// 收标记浮层。只改意图：落库已经在每格点按的那一刻做完了。
+    pub(in crate::ui::features::shelf) fn close_tag_popover(&mut self, cx: &mut Context<Self>) {
+        if self.tag_entry.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// 标记浮层里点了一格：当场写库，并只更新架面那份标签表的**这一格**。
+    ///
+    /// 写走 [`Store::set_book_tags`] 整组替换（幂等），架面不整架重查 —— 角标归
+    /// [`Self::tags`] 管，改完那一格 `notify` 一帧就够；只有「这本书挂没挂这个标签」
+    /// 变了，架面上的书一排都没动。
+    pub(in crate::ui::features::shelf) fn toggle_tag(
+        &mut self,
+        book_id: i64,
+        tag: Tag,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((entry_id, snapshot)) = self.tag_entry.as_mut() else {
+            return;
+        };
+        if *entry_id != book_id {
+            return;
+        }
+        let on = if let Some(at) = snapshot.iter().position(|t| *t == tag) {
+            snapshot.remove(at);
+            false
+        } else {
+            snapshot.push(tag);
+            true
+        };
+        // 要写的整组先抄一份：快照那笔可变借用借在 `self.tag_entry` 上，而下面要借
+        // `self.store` 落库 —— 两次借用都得从 `self` 出发，抄一份让前一笔当场收手。
+        let want = snapshot.clone();
+        let Some(store) = &self.store else {
+            return;
+        };
+        let written = store
+            .set_book_tags(book_id, &want)
+            .with_context(|| format!("写第 {book_id} 本的标签"));
+        if let Err(err) = written {
+            report("ShelfView", &err);
+            // 写失败把快照拨回去：浮层上的勾说的是库，不是本地这次没写成的意图。
+            if let Some((_, snapshot)) = self.tag_entry.as_mut() {
+                if on {
+                    snapshot.retain(|t| *t != tag);
+                } else {
+                    snapshot.push(tag);
+                }
+            }
+        } else {
+            let row = if on { vec![tag] } else { Vec::new() };
+            self.tags.insert(book_id, row);
+        }
+        cx.notify();
+    }
+
+    /// 长按菜单里那格「清除阅读记录」：先问一句再动手 —— 清掉的东西找不回来。
+    ///
+    /// 与多选删除同一张框架的 AlertDialog：尺寸、遮罩、居中、返回键都由框架给，
+    /// 不再手搭 420 宽的居中卡（那张在手机上比视口还宽）。哪一本由 `book_id` 直接
+    /// 交给 `on_ok`，所以不需要再在架面上留一个「确认浮层开给谁」的状态位。
+    pub(in crate::ui::features::shelf) fn open_clear_history(
+        &mut self,
+        book_id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entity = cx.entity().clone();
+        let title = tr(cx, "shelf.clear_history");
+        let body = tr(cx, "shelf.clear_history_body");
+        let ok = tr(cx, "shelf.clear_history_confirm");
+        let cancel = tr(cx, "shelf.cancel");
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            // build 是 `Fn`（dialog 层重建会再跑），句柄每次现摘一份给 `on_ok`。
+            let on_ok_entity = entity.clone();
+            alert
+                .title(title.clone())
+                .description(body.clone())
+                .confirm()
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(ok.clone())
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(cancel.clone())
+                        .on_ok(move |_, _, cx| {
+                            on_ok_entity
+                                .update(cx, |this, cx| this.confirm_clear_history(book_id, cx));
+                            true
+                        }),
+                )
+        });
+    }
+
+    /// 确认框上按了「清除」：清库（进度、已读章、时长、最近打开），然后重查架面
+    /// ——「最近打开」变了，整架那条序要跟着重排。
+    pub(in crate::ui::features::shelf) fn confirm_clear_history(
+        &mut self,
+        book_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        if let Err(err) = store
+            .clear_reading_history(book_id)
+            .with_context(|| format!("清第 {book_id} 本的阅读记录"))
+        {
+            report("ShelfView", &err);
+        }
+        self.force_reload(cx);
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // 网络导入（Wi-Fi 传书）
+    // ────────────────────────────────────────────────────────────────────
+
+    /// ⋮ 菜单里那格「网络导入」：确保传书服务起着，把它的第一个地址画成二维码，摆卡。
+    ///
+    /// 服务没起就当场起（设置页那个开关是同一条 `transfer::set_enabled`），起了就复用 ——
+    /// 端口被占会顺延，所以地址与二维码都要**这一刻**重新问一次，不能缓存上一次的。
+    pub(in crate::ui::features::shelf) fn open_network_import(&mut self, cx: &mut Context<Self>) {
+        if transfer::running().is_none() {
+            transfer::set_enabled(true, cx);
+        }
+        self.network_qr = transfer::running()
+            .and_then(|status| status.urls.into_iter().next())
+            .and_then(|url| network_import::qr_image(&url));
+        self.network_open = true;
+        cx.notify();
+    }
+
+    /// 收卡：**顺手停服务**（卡上没有关闭 / 停止按钮，点外面或按返回就是这一条）。
+    ///
+    /// 服务不设口令，开着等于把局域网里的上传入口一直敞着；读者关掉这张卡就是
+    /// 「我用完了」。二维码也一起丢掉，下次打开按那时候的地址重算。
+    pub(in crate::ui::features::shelf) fn close_network_import(&mut self, cx: &mut Context<Self>) {
+        self.network_open = false;
+        self.network_qr = None;
+        transfer::set_enabled(false, cx);
+        cx.notify();
+    }
+
+    /// 筛选那一排点了一颗标签 chip：点中的那颗在筛与不筛之间切换（一次只筛一颗）。
+    ///
+    /// 换了筛选就重查一次架面 —— 查的是另一片书，`reload` 的去重帮不上忙。
+    pub(in crate::ui::features::shelf) fn toggle_tag_filter(
+        &mut self,
+        tag: Tag,
+        cx: &mut Context<Self>,
+    ) {
+        self.tag_filter = if self.tag_filter == Some(tag) {
+            None
+        } else {
+            Some(tag)
+        };
+        tracing::debug!(
+            "ShelfView: 标签筛选 → {:?}",
+            self.tag_filter.map(|tag| tag.as_str())
+        );
+        self.items.clear();
+        let query = self.query.clone();
+        self.reload(&query, cx);
     }
 
     /// 那一屏上那颗「建组」：建好就把这本书丢进去，然后重查架面。
@@ -1940,6 +2126,14 @@ impl Render for ShelfView {
         } else {
             top
         };
+        // 标签筛选那一排挂在顶栏**下面**、折叠容器之外：它是常驻的筛入口，不跟着
+        // 搜索行收折 —— 收进那个定高裁切的容器里，它会被 SEARCH_BAND 那个高度裁掉
+        // 而不是让位。整架那一屏才有（某一组那一页筛的是组里的人，不归标签管）。
+        let tag_bar = if self.scope == ShelfScope::Shelf {
+            Some(self.tag_filter_bar(cx))
+        } else {
+            None
+        };
         let spec = grid_spec(f32::from(window.viewport_size().width), size);
         // 悬浮底栏压在内容上（Compact 档），滚动内容得自己空出那一段 —— 加在容器的
         // 留白上会把视口切短，格子就再也到不了栏底下。侧栏两档平时是嵌入的、由外壳让位，
@@ -1957,11 +2151,11 @@ impl Render for ShelfView {
         // 那三块「答一句话」的面板：桌面是一张浮层，手机是同一份内容压进底部弹层。
         self.sync_panels(size.is_compact(), cx);
         let mut overlays: Vec<AnyElement> = if size.is_compact() {
-            // 三块弹层每帧都交元素：弹簧的采样在里面，收稳的那些只是不给内容。
+            // 两块弹层每帧都交元素：弹簧的采样在里面，收稳的那些只是不给内容。
             vec![
                 self.group_sheet(cx),
-                self.url_sheet(cx),
                 self.scan_sheet(cx),
+                self.network_sheet(cx),
             ]
         } else {
             let mut overlays = Vec::new();
@@ -1969,11 +2163,6 @@ impl Render for ShelfView {
                 && let Some((_, entry)) = &self.group_entry
             {
                 overlays.push(self.group_popover(entry.clone(), cx));
-            }
-            if self.url_open
-                && let Some(entry) = &self.url_entry
-            {
-                overlays.push(self.url_popover(entry.clone(), cx));
             }
             if self.scan_open && self.scan.is_some() {
                 overlays.push(self.scan_popover(cx));
@@ -1987,8 +2176,15 @@ impl Render for ShelfView {
         if let Some(card) = self.import_status_popover(viewport, cx) {
             overlays.push(card);
         }
-        if self.selection_delete_confirm {
-            overlays.push(self.selection_delete_popover(cx));
+        // 标记与「清除阅读记录」那两张：两端都是居中浮层（与多选删除的确认同一档
+        // —— 问的是一句话，不是一块要滚的清单），所以不进上面的档位分支。
+        if self.tag_entry.is_some() {
+            overlays.push(self.tag_popover(cx));
+        }
+        // 网络导入：桌面那一档的居中卡。手机那一档在上面那段弹层分支里
+        // （`network_sheet`），与扫描同一套容器。
+        if self.network_open && !size.is_compact() {
+            overlays.push(self.network_popover(cx));
         }
         if let Some(progress) =
             cloud_upload::handle(cx).and_then(|entity| entity.read(cx).progress().cloned())
@@ -2002,6 +2198,7 @@ impl Render for ShelfView {
             .relative()
             .size_full()
             .child(top)
+            .children(tag_bar)
             .child(self.body(flow, enter, cx, spec, tail))
             .children(overlays)
             // 帧探针：这一格排在最后，绘制回调跑在别的孩子之后，两条回调之间的间隔
@@ -2598,6 +2795,63 @@ mod tests {
         .expect("窗口应可更新");
     }
 
+    /// 标记浮层**浮在**架面上，点一格当场落库，关掉只收意图。
+    ///
+    /// 形状与建组那张浮层的门同一条：开合是架面自己的状态（`tag_entry`），浮层晚一帧
+    /// 才挂进弹窗层，所以断言前连画两帧。落库写的是 `Store::set_book_tags` —— 门要钉的
+    /// 正是「点一格就写」，不是攒一笔总账等关浮层才写。
+    #[gpui_kit::test]
+    fn the_tag_popover_floats_and_writes_through(cx: &mut TestAppContext) {
+        use folio_core::Tag;
+
+        let (shelf, handle, store, _) = boot_shelf(cx);
+        let a = add(&store, "甲");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-tag-panel").is_none(),
+                "没点「标记」时不该有面板"
+            );
+            shelf.update(cx, |this, cx| this.open_tag_popover(a, cx));
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-tag-panel").is_some(),
+                "点「标记」要浮起那张卡"
+            );
+            assert!(
+                window
+                    .try_find(ElementId::Name(format!("shelf-cover-{a}").into()))
+                    .is_some(),
+                "卡浮在架面上，不是把整片格子换掉"
+            );
+
+            // 点「在读」那一格：当场写库，不必等关浮层。
+            shelf.update(cx, |this, cx| this.toggle_tag(a, Tag::Reading, cx));
+            assert_eq!(
+                store.tags_of_book(a).unwrap(),
+                vec![Tag::Reading],
+                "点一格当场写库"
+            );
+            // 再点同一格：摘掉，也是当场。
+            shelf.update(cx, |this, cx| this.toggle_tag(a, Tag::Reading, cx));
+            assert!(
+                store.tags_of_book(a).unwrap().is_empty(),
+                "再点同一格是摘掉"
+            );
+
+            shelf.update(cx, |this, cx| this.close_tag_popover(cx));
+            window.render_frame(cx);
+            assert!(
+                window.try_find("shelf-tag-panel").is_none(),
+                "关掉之后就没了"
+            );
+        })
+        .expect("窗口应可更新");
+    }
+
     /// 多选态里点一张卡是**勾选**，不是开书：两条路共用 `tap_card` 这一个入口，走错一条
     /// 读者就会在批量删到一半的时候被推进一本书里。
     #[gpui_kit::test]
@@ -2719,9 +2973,12 @@ mod tests {
     }
 
     /// 批量删除：那颗「删除」只是把确认摆出来，落库在读者点头之后；删完退出这一态并重查。
+    ///
+    /// 确认框现在由框架的 `AlertDialog` 摆在窗口的 dialog 层，所以「问」这一手要借窗口；
+    /// 落库那一句仍是架面自己的方法，回归门直接敲它（点 OK 走的是同一句）。
     #[gpui_kit::test]
     fn a_batch_delete_takes_every_checked_book_off_the_shelf(cx: &mut TestAppContext) {
-        let (shelf, _, store, _) = boot_shelf(cx);
+        let (shelf, handle, store, _) = boot_shelf(cx);
         let a = add(&store, "甲");
         let b = add(&store, "乙");
         add(&store, "丙");
@@ -2729,13 +2986,15 @@ mod tests {
         shelf.update(cx, |this, cx| this.begin_selection(Some(a), cx));
         shelf.update(cx, |this, cx| this.tap_card(b, cx));
 
-        shelf.update(cx, |this, cx| this.ask_delete_selection(cx));
+        cx.update_window(handle, |_, window, cx| {
+            shelf.update(cx, |this, cx| this.ask_delete_selection(window, cx));
+        })
+        .expect("窗口应可更新");
         assert_eq!(
             shelf.read_with(cx, |this, _| this.card_count()),
             3,
             "问的那一帧一本都还没没"
         );
-        assert!(shelf.read_with(cx, |this, _| this.selection_delete_confirm));
 
         shelf.update(cx, |this, cx| this.confirm_delete_selection(cx));
         assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);

@@ -251,4 +251,81 @@ mod tests {
         })
         .expect("窗口应能渲染");
     }
+
+    /// 浅深那一格要画成四张预览卡（浅 / 深 / 水墨 / 跟随系统），而不是退回下拉框。
+    /// 默认配置是「跟随系统」，四张卡都得在树里 —— 桌面这一档是四列网格。
+    #[gpui_kit::test]
+    async fn the_appearance_page_draws_one_preview_card_per_mode(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::ui::foundation::theme::register_builtin_themes);
+        let handle = cx
+            .open_window(size(px(900.), px(700.)), |window, cx| {
+                ConfigHolder::install(Config::default(), cx);
+                let settings = cx.new(|cx| SettingsView::new(SettingsPage::Appearance, cx));
+                Root::new(settings, window, cx)
+            })
+            .into();
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            for id in ["mode-card-light", "mode-card-dark", "mode-card-ink", "mode-card-system"]
+            {
+                assert!(
+                    window.try_find(id).is_some(),
+                    "找不到浅深卡 {id}：这一页没有把浅深画成预览卡"
+                );
+            }
+        })
+        .expect("窗口应能渲染");
+    }
+
+    /// 钉了深色之后，深侧的主题网格摊开、浅侧收起（元素树里没有浅色主题卡）——
+    /// 「选中的深浅直接显示对应侧主题」靠的就是这一格；收起的网格不进树，
+    /// 一屏才装得下。收回「跟随系统」两侧都回来。
+    #[gpui_kit::test]
+    async fn pinning_dark_folds_the_light_theme_grid(cx: &mut TestAppContext) {
+        use folio_core::infra::config::Mode;
+
+        cx.update(gpui_kit::init);
+        cx.update(crate::ui::foundation::theme::register_builtin_themes);
+        let handle = cx
+            .open_window(size(px(900.), px(700.)), |window, cx| {
+                ConfigHolder::install(Config::default(), cx);
+                let settings = cx.new(|cx| SettingsView::new(SettingsPage::Appearance, cx));
+                Root::new(settings, window, cx)
+            })
+            .into();
+
+        let light_card = crate::ui::foundation::theme::DEFAULT_LIGHT;
+        let dark_card = crate::ui::foundation::theme::DEFAULT_DARK;
+        let rendered = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                (
+                    window.try_find(format!("theme-card-{light_card}")).is_some(),
+                    window.try_find(format!("theme-card-{dark_card}")).is_some(),
+                )
+            })
+            .expect("窗口应能渲染")
+        };
+
+        // 跟随系统：两侧都摊开。
+        let (light, dark) = rendered(cx);
+        assert!(light && dark, "跟随系统时两侧主题网格都该摊开");
+
+        // 钉深色：浅侧收起（不在树里），深侧还在。
+        cx.update(|cx| {
+            ConfigHolder::edit_appearance(cx, |appearance| appearance.mode = Mode::Dark);
+        });
+        let (light, dark) = rendered(cx);
+        assert!(!light, "钉深色后浅侧主题网格该收起（不在元素树里）");
+        assert!(dark, "钉深色后深侧主题网格该摊开");
+
+        // 收回跟随系统：浅侧回来。
+        cx.update(|cx| {
+            ConfigHolder::edit_appearance(cx, |appearance| appearance.mode = Mode::System);
+        });
+        let (light, dark) = rendered(cx);
+        assert!(light && dark, "收回跟随系统后两侧网格都该回来");
+    }
 }

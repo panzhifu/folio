@@ -252,6 +252,51 @@ impl Collection {
     }
 }
 
+/// 阅读状态标签，固定四档：未读 / 在读 / 读完 / 弃读。**多选**：一本书可以同时挂着
+/// 不止一个（读者自己决定组合说不说得通），所以存的是一张 `(book_id, tag)` 表而不是
+/// `books` 上的一列。
+///
+/// 与 [`AnnotationStyle`] 同一条存法：**存名字不存序号** —— 枚举的顺序是界面该出现的
+/// 顺序，会动；名字是身份，往中间插一档不能把老行读错。
+///
+/// 界面上的文案不在这里：[`Self::as_str`] 只是库里的键名，本地化按名字在 app 那侧查。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tag {
+    Unread,
+    Reading,
+    Finished,
+    Abandoned,
+}
+
+impl Tag {
+    /// 全部四档，按界面该出现的顺序（阅读的一生）。加一档忘了在这里挂，界面上就永远选不到它。
+    pub const ALL: &'static [Self] =
+        &[Self::Unread, Self::Reading, Self::Finished, Self::Abandoned];
+
+    /// 库里 `book_tags.tag` 用的键名。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unread => "unread",
+            Self::Reading => "reading",
+            Self::Finished => "finished",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    /// 认不出的名字交回 `None`：老版本写进库的键、或手改坏的键不该在界面上冒出一档
+    /// 说不清的东西 —— 读侧直接跳过那一行。这与 [`AnnotationStyle::parse`] 落默认档
+    /// 不同：那里是「三选一的偏好」，总有正确答案；这里是「读者挂的标记」，没有默认。
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "unread" => Self::Unread,
+            "reading" => Self::Reading,
+            "finished" => Self::Finished,
+            "abandoned" => Self::Abandoned,
+            _ => return None,
+        })
+    }
+}
+
 /// 一次阅读会话。时间都是 Unix 秒。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadingSession {
@@ -345,4 +390,26 @@ pub struct ReadingRecord {
     pub title: String,
     pub started_at: i64,
     pub seconds: i64,
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::Tag;
+
+    /// 存名字不存序号那条口径的往返门：`as_str` 产出的每个键都必须被 `parse` 认回
+    /// 同一档 —— 漏一个就是「写出去的标记读不回来」，读者挂的标签悄悄掉。
+    #[test]
+    fn every_key_round_trips() {
+        for tag in Tag::ALL {
+            assert_eq!(Tag::parse(tag.as_str()), Some(*tag), "{}", tag.as_str());
+        }
+    }
+
+    /// 认不出的键交 `None` 而不是默认档：没有默认标签这一说，坏键直接跳过。
+    #[test]
+    fn unknown_names_do_not_become_a_tag() {
+        assert_eq!(Tag::parse(""), None);
+        assert_eq!(Tag::parse("Reading"), None);
+        assert_eq!(Tag::parse("archived"), None);
+    }
 }

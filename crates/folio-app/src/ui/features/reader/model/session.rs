@@ -23,7 +23,7 @@ use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::format::PageText;
 use folio_core::content::format::css::PageMargins;
 use folio_core::store::{Annotation, Bookmark, Store};
-use folio_core::{BookSettings, DocMeta, Format, Locator, PageTurn, Reader, StaleReason};
+use folio_core::{BookSettings, DocMeta, Format, Locator, PageTurn, Reader};
 use gpui_kit::base::SelectionEdge;
 use gpui_kit::{App, AppContext as _, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
 
@@ -1070,18 +1070,15 @@ impl ReaderSession {
         // 换书先清掉上一本的整页底色：下面任何一条早退路径都不该让旧书色串过来。
         crate::ui::foundation::reading_theme::set_page_bg(None);
         // 正文只在源文件里，所以「文件还是那份文件吗」是能不能读的前提。
-        // 不可信的那几种各自处置：文件不在 → 连数据一起删（读者看见的是这本书从架上消失，
-        // 而不是点开一片空白）；文件换了 / 索引是旧引擎算的 / 那套分章规则换了 →
-        // **投一趟后台重扫**，这一屏照旧用现有索引开，位置与批注都还在（`book_id` 没变）。
+        // 不可信的那几种统一交后台重扫：文件换了 / 索引是旧引擎算的 / 那套分章规则换了 /
+        // **文件此刻读不到**都一样 —— 这一屏照旧用现有索引开，位置与批注都还在（`book_id`
+        // 没变）。文件真不在的重扫会自己失败（进程内抑制，已有机制），而这里**不删行**：
+        // 一次 stat 失败可能只是授权被收、卷还没挂载（移动端共享存储最常见），当场删书
+        // 把「暂时看不见」变成「永远没了」；行的去留归启动时 `Store::prune_missing` 判
+        // ——它带着「上一层目录读得到才删」的守门，误删的输入没了，孤儿副本清扫也不会
+        // 跟着把文件带走。
         if let Some(store) = self.store.clone() {
             match store.stale_reason(book_id) {
-                Ok(Some(StaleReason::Missing)) => {
-                    tracing::warn!(book_id, "ReaderSession: 源文件不在了，连数据一起删");
-                    if let Err(err) = store.remove_book(book_id) {
-                        tracing::error!(book_id, error = %err, "ReaderSession: 删书失败");
-                    }
-                    return;
-                }
                 Ok(Some(reason)) => {
                     tracing::info!(book_id, reason = ?reason, "ReaderSession: 索引要重扫，已交后台");
                     let pool = crate::ui::services::resident::pool();

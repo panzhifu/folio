@@ -532,7 +532,6 @@ mod tests {
             let log = Arc::new(Mutex::new(Log::default()));
             let config = TransferConfig {
                 port: 0,
-                pin: "2468".into(),
                 inbox_dir: tmp.path().join("inbox"),
                 lan: lan.map(|key| LanConfig {
                     key,
@@ -856,12 +855,8 @@ mod tests {
         assert_eq!(status, 404, "没开就没有「这里本该有一条路由」的信号");
         assert_eq!(rig.get(ROUTE_MANIFEST).0, 404);
         assert_eq!(rig.get(ROUTE_SNAPSHOT).0, 404);
-        // 传书那一侧不受影响：配对码对了就给页面。
-        assert_eq!(
-            rig.get("/?pin=2468").0,
-            200,
-            "局域网同步没开不该把传书一起关掉"
-        );
+        // 传书那一侧不受影响：不带配对码也直接给页面。
+        assert_eq!(rig.get("/").0, 200, "局域网同步没开不该把传书一起关掉");
     }
 
     /// **客户端那一半与这台上的一半真在一根套接头上遇一次。**

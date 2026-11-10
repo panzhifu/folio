@@ -288,6 +288,13 @@ impl Store {
     /// 「这本书是不是已经在了」不由这里判——管线在落地之前就按内容哈希判过重了
     /// （[`Store::book_by_hash`]）。这里只管把那一行写成现在这个样子。
     ///
+    /// 会走到 `ON CONFLICT` 臂的只有**重扫**那一条路（[`crate::ingest::import::reindex`]）：
+    /// 新导入按哈希判重提前返回，自愈走 [`Store::retarget_book_path`]。所以这一臂刷新的
+    /// 只该是「那份文件的事实」（格式、大小、修改时间与那几书目列），**不碰 title / authors**
+    /// ——重扫解析的是哈希名副本，无内嵌书名的格式（PDF / TXT）会把标题回落成文件主名，
+    /// 也就是一串哈希（0.1.4 bump `INDEX_VERSION` 全书重扫时整架标题变哈希串，就是这一句盖的）。
+    /// 读者改过的书名同理保得住：[`Store::set_book_meta`] 不再被重扫静默冲掉。
+    ///
     /// `content_hash` 不在本语句里写：管线随后单独调 [`Store::set_content_hash`]。
     /// 中间崩溃留下的是一条**没有身份的行**，而懒补本来就有这个状态（NULL），
     /// 补齐作业会重算哈希把它填上——所以这两步不需要包在一个事务里。
@@ -300,7 +307,6 @@ impl Store {
                                 language, isbn, dctype, rights, series, series_position)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(path) DO UPDATE SET
-               title = excluded.title, authors = excluded.authors,
                format = excluded.format, size = excluded.size,
                mtime = excluded.mtime,
                contributors = excluded.contributors, subjects = excluded.subjects,
@@ -544,9 +550,10 @@ impl Store {
     /// 空串与只有空白的作者**不存**：`authors = ''` 读回来是空 `Vec`，界面上那一行随之消失
     /// （`shelf::book_info` 的「作者可能缺」那条规则）。
     ///
-    /// **同一路径再导一次会把它盖掉**：[`Store::add_book`] 的 `ON CONFLICT DO UPDATE`
-    /// 用文件里的书目重写这两列。这里不留「读者改过」的标记 —— 此刻认文件与内容是权威，
-    /// 手动改的名字属于「重导就没了」那一类，界面不另加解释。
+    /// **重扫不会把它盖回去**：[`Store::add_book`] 的 `ON CONFLICT DO UPDATE`
+    /// 不碰这两列（能走到那一臂的只有重扫，它解析的是哈希名副本，盖回来只会把
+    /// 无内嵌书名的格式变成一串哈希）。同一份内容从别的文件**重新导入**时走判重
+    /// 提前返回，也不经过那一条语句 —— 读者改的名字是稳的。
     pub fn set_book_meta(&self, id: i64, title: &str, authors: &[String]) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let rows = conn.execute(
@@ -934,6 +941,31 @@ impl Store {
         let pattern = like_pattern(trimmed);
         Ok(stmt
             .query_map(params![trimmed, pattern], shelf_from_row)?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// 挂着**某一个标签**的书，序与整架同一条（[`SHELF_ORDER`]）。
+    ///
+    /// 名分用 `IN (SELECT …)` 问而不是 join `book_tags`：join 进来会让一本书挂两个标签时
+    /// 在结果里出两行，而那条共用的 [`SHELF_ORDER`] 用的还是裸列名 —— 与
+    /// [`Store::shelf_in_collection_in`] 同一条写法、同一个理由。标签是**多选**，但这一格
+    /// 筛的是「挂着这一个的所有书」（any-of 的单标签版）：界面上一次筛一颗，
+    /// 一次筛多颗留给将来有真实读者之前再说。
+    pub fn shelf_by_tag(&self, tag: crate::Tag, query: &str) -> Result<Vec<ShelfItem>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let trimmed = query.trim();
+        let sql = format!(
+            r#"SELECT {SHELF_COLUMNS} FROM books
+             LEFT JOIN positions ON positions.book_id = books.id
+             WHERE books.id IN (SELECT book_id FROM book_tags WHERE tag = ?1)
+               AND {}
+             {SHELF_ORDER}"#,
+            query_clause("?2", "?3")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let pattern = like_pattern(trimmed);
+        Ok(stmt
+            .query_map(params![tag.as_str(), trimmed, pattern], shelf_from_row)?
             .collect::<std::result::Result<_, _>>()?)
     }
 

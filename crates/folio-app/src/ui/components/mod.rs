@@ -22,7 +22,7 @@ pub use bottom_sheet::{
 };
 pub use font_picker::{FontFamilySetter, FontPicker};
 pub use gate_banner::gate_banner;
-pub use primitives::{empty_state, hairline, muted_label};
+pub use primitives::{empty_state, muted_label};
 pub use reading_theme_picker::ReadingThemePicker;
 pub use scroll_guard::{ScrollShields, scroll_guard};
 pub use search_box::{SEARCH_SETTLE_FRAMES, SearchBox, SearchBoxEvent, SearchDebounce};

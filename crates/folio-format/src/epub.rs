@@ -502,6 +502,13 @@ pub(crate) struct Opf {
     /// 这里指的是承载它的那**一页**。封面页常被作者标成 `linear="no"`（`itemref` 上），
     /// 于是按「非线性不当章」会被整个丢掉 —— 见 [`KEEP_NONLINEAR`] 那条破例。
     cover_page: Option<String>,
+    /// `<guide><reference type="toc" href="…">`：**书内目录页**（一个 xhtml）的相对路径。
+    ///
+    /// 与 `cover_page` 同一件事的目录版：EPUB2 的出版方常把一张排好版的目录页放进
+    /// spine，同时把 `itemref` 标成 `linear="no"`（Kindle 导出的书多半如此）。按
+    /// 「非线性不当章」它会被丢掉，于是封面之后直接落到扉页 —— 《搜神记》就是这个形状。
+    /// 读者要的是那一页本身，不是侧栏里再生成一份目录，所以它和封面页一样破例。
+    toc_page: Option<String>,
     /// Dublin Core 的其余各项。采集在 `parse_opf`，归置在 [`place_metadata`]。
     ///
     /// 为什么先攒成一串再归置而不是边采边填：有三条规则**要看完全部条目才定得下来** ——
@@ -540,9 +547,11 @@ pub(crate) struct Opf {
 /// `hide_nonlinear_flows`，`frontend/apps/reader/modules/readerrolling.lua:248`）；
 /// **改了它要连 [`super::INDEX_VERSION`] 一起改** —— 章数与章号都变了，老库的位置会错位。
 ///
-/// **封面页是唯一的例外**（不看这颗开关）：`<guide type="cover">` 指的那一页即使被标成
-/// 非线性也照样收成第一章。作者把封面页写成 `linear="no"` 很常见（《杀死玛丽苏》就是），
-/// 而读者开书第一眼要看的就是它 —— 少了它，第一屏直接落在目录页上。
+/// **封面页与 `<guide type="toc">` 指的书内目录页是例外**（不看这颗开关）：
+/// 那两页即使被标成非线性也照样收成章。作者把封面页写成 `linear="no"` 很常见
+/// （《杀死玛丽苏》就是），而读者开书第一眼要看的就是它 —— 少了它，第一屏直接落在
+/// 目录页上；目录页反过来，少了它封面之后就只剩扉页（《搜神记》）。
+/// 其余非线性项（脚注弹层、隐藏的封面替代文本）照旧丢。
 const KEEP_NONLINEAR: bool = false;
 
 /// 取命名空间前缀之后的部分：`dc:title` → `title`，`epub:type` → `type`。
@@ -970,14 +979,25 @@ fn read_item(e: &quick_xml::events::BytesStart<'_>) -> Option<Item> {
     })
 }
 
-/// `<guide><reference type="cover" href="…">` 里认封面页，写进 [`Opf::cover_page`]。
+/// `<guide><reference type="cover"|"toc" href="…">` 里认封面页与书内目录页。
 ///
-/// 其余 `type`（`toc` / `text` / `start` …）采进来没有用处 —— 目录我们另走 nav/ncx。
+/// 其余 `type`（`text` / `start` …）采进来没有用处 —— 目录条目我们另走 nav/ncx，
+/// 但**目录页本身**是读者要翻到的一页，所以记下 href，交给 spine 那一层破例。
 fn read_guide_reference(out: &mut Opf, e: &quick_xml::events::BytesStart<'_>) {
-    if attr(e, "type").is_some_and(|t| t.trim().eq_ignore_ascii_case("cover"))
-        && let Some(href) = attr(e, "href").filter(|h| !h.is_empty())
+    let kind = attr(e, "type");
+    let Some(href) = attr(e, "href").filter(|h| !h.is_empty()) else {
+        return;
+    };
+    if kind
+        .as_deref()
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("cover"))
     {
         out.cover_page = Some(href);
+    } else if kind
+        .as_deref()
+        .is_some_and(|t| t.trim().eq_ignore_ascii_case("toc"))
+    {
+        out.toc_page = Some(href);
     }
 }
 
@@ -2068,9 +2088,10 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     // 标题回落要按 spine 下标算「第 N 节」，而下标得是**过滤之前**的那一个：
     // spine 里被跳过的 nav 与资源不该改变后面章节的编号（与 `ChapterJob::spine` 同一条理由）。
     //
-    // 封面页解析成容器绝对路径：`<guide>` 里的 href 与 manifest 的 href 同以 OPF 目录为基，
-    // 两边都过 [`resolve`] 才比得起来。
+    // 封面页与书内目录页解析成容器绝对路径：`<guide>` 里的 href 与 manifest 的 href
+    // 同以 OPF 目录为基，两边都过 [`resolve`] 才比得起来。
     let cover_page_href = opf.cover_page.as_deref().map(|h| resolve(&base_dir, h));
+    let toc_page_href = opf.toc_page.as_deref().map(|h| resolve(&base_dir, h));
     for (spine, node) in opf.spine.iter().enumerate() {
         let Some(item) = by_id.get(node.id.as_str()) else {
             // spine 指着一个 manifest 里没有的 id：这一节整个没了，而且界面上看不出来。
@@ -2085,11 +2106,16 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
             continue;
         }
         let href = resolve(&base_dir, &item.href);
-        // 非线性那一档：默认不当章，**封面页除外**。封面页（`<guide type="cover">` 指的
-        // 那一页）常被作者标成 `linear="no"`，可它是读者开书要看的第一眼；其余非线性项
-        // （脚注弹层、隐藏的封面替代文本）照旧丢。口径与那颗开关收在 [`KEEP_NONLINEAR`]。
+        // 非线性那一档：默认不当章，**封面页与 guide toc 页除外**。封面页常被作者标成
+        // `linear="no"`，可它是读者开书要看的第一眼；目录页是同一个道理 —— 少了它，
+        // 封面之后直接落到扉页（《搜神记》）。其余非线性项（脚注弹层、隐藏的封面替代
+        // 文本）照旧丢。口径与那颗开关收在 [`KEEP_NONLINEAR`]。
         let is_cover_page = cover_page_href.as_deref() == Some(href.as_str());
-        if !node.linear && !KEEP_NONLINEAR && !is_cover_page {
+        // 目录页必须是 HTML：`guide toc` 若指向一个非 HTML 的 spine 项，留给下面那条
+        // 「读不动但仍是内容」的分支去报错，不在这里当成正常目录页收进来。
+        let is_toc_page =
+            toc_page_href.as_deref() == Some(href.as_str()) && item.media_type.contains("html");
+        if !node.linear && !KEEP_NONLINEAR && !is_cover_page && !is_toc_page {
             tracing::debug!("epub: spine 第 {} 项写的非线性内容，不当成一章", spine + 1);
             continue;
         }

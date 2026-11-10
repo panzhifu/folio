@@ -26,17 +26,15 @@ use super::resident;
 /// 默认端口。被占就顺延（core 里最多试 10 个），真实的以 `addr` 为准。
 const DEFAULT_PORT: u16 = 8410;
 
-/// 传书服务此刻的对外信息：能打开的地址与配对码。
+/// 传书服务此刻的对外信息：能打开的地址。
 pub struct TransferStatus {
     pub urls: Vec<String>,
-    pub pin: String,
 }
 
 /// 服务活着就给出它的对外信息；没起就是 `None`。
 pub fn running() -> Option<TransferStatus> {
     resident::services().with_transfer(|server| TransferStatus {
         urls: server.urls(),
-        pin: server.pin().to_string(),
     })
 }
 
@@ -82,7 +80,6 @@ pub fn set_enabled(on: bool, cx: &mut App) {
     match TransferServer::start(
         TransferConfig {
             port: DEFAULT_PORT,
-            pin: String::new(),
             inbox_dir,
             // 局域网同步：开着账号、且这一把密钥解得开时才挂上那五条路由。
             // `None` 就是它们一概 404 —— 传书照常开，两个决定各管各的。

@@ -351,8 +351,7 @@ library_dir = "라이브러리 위치"
 "transfer" = "Wi-Fi 전송"
 
 "transfer.desc" = "같은 Wi-Fi의 브라우저로 아래 주소를 열면 책을 바로 서가에 보낼 수 있습니다. 서버는 끄기 전까지 유지되며, 다시 실행해도 자동으로 켜지지 않습니다."
-"transfer.off" = "스위치를 켜면 여는 주소와 짝짓기 코드가 여기에 표시됩니다."
-"transfer.pin" = "짝짓기 코드: %{pin}"
+"transfer.off" = "스위치를 켜면 여는 주소가 여기에 표시됩니다."
 "transfer.no_url" = "로컬 네트워크 주소를 찾지 못했습니다 — 브라우저에 이 기기의 IP를 입력하세요(포트는 스위치 옆 로그에 있습니다)."
 "library_dir.pick" = "폴더 선택…"
 toc_density = "목록 간격"
@@ -634,12 +633,17 @@ search_placeholder = "제목 또는 저자 검색"
 # 右上角那颗三点按钮：本体不做事，点开是一条导入方式的菜单，文案挂在
 # 无障碍标签与桌面的 tooltip 上。
 more = "가져오기 방식"
-import = "가져오기"
+import = "로컬 가져오기"
+network_import = "네트워크 가져오기"
+network_hint = "같은 Wi-Fi에서 다른 기기로 아래 QR 코드를 스캔하거나 주소를 열면 책을 책장으로 보낼 수 있습니다. 이 카드를 닫으면 서비스가 중지됩니다."
+network_copy = "주소 복사"
+network_no_url = "로컬 네트워크 주소를 찾지 못했습니다 — 두 기기가 같은 Wi-Fi에 연결되어 있는지 확인해 주세요."
 # 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）只有一句标题：进度交给每行名字下面那条 bar，卡头不摆数字。
 status_importing = "가져오는 중"
 # 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
 # 数已经在行里了）；卡头不再摆成功 / 没进来的汇总数。
 record_title = "가져오기 기록"
+record_empty = "가져오기 기록이 아직 없습니다"
 status_added = "완료"
 status_duplicate = "서가에 있음"
 status_needs_password = "암호 필요"
@@ -668,11 +672,7 @@ reject_unreadable_other = "%{count}권은 읽을 수 없습니다"
 # 整机扫描。扫描只找不导：找到的候选摆成清单，读者勾选再导（勾选 = 亲手挑的，
 # 重名算更新）。已在书架的那几条默认不勾并标出来。
 cancel = "취소"
-url_import = "링크로 가져오기"
-url_title = "링크에서 가져오기"
-url_placeholder = "책 다운로드 링크 붙여넣기(http…)"
-url_hint = "다운로드는 백그라운드에 진행되고, 진행 상황은 서가에 표시됩니다. 제목은 링크의 마지막 부분에서 가져옵니다."
-scan = "검사"
+scan = "스마트 검사"
 scan_title = "기기에서 책 찾기"
 scan_running = "검사 중…"
 scan_found = "검사 중… %{n}권 발견"
@@ -704,6 +704,19 @@ no_results_hint = "다른 단어로 해보세요 — 여기서 찾는 것은 본
 # 「分享」递的是库里那一份副本的文件本身，只在有系统分享面板的那一端摆这一条（Android）。
 share = "공유"
 book_delete = "삭제"
+# 독서 상태 태그: 고정 4값(읽지 않음/읽는 중/완독/중단), 다중 선택. 타입은 folio-model의 Tag.
+tag = "표시"
+tag_hint = "이 책에 상태를 남깁니다. 여러 개를 동시에 달 수 있고, 밖을 누르면 저장됩니다."
+tag_unread = "읽지 않음"
+tag_reading = "읽는 중"
+tag_finished = "완독"
+tag_abandoned = "중단"
+# 독서 기록 지우기: 길게 누른 메뉴의 항목. "어디까지 읽었는지"를 지우며 주석은 남습니다.
+clear_history = "독서 기록 지우기"
+clear_history_body = "이 책의 진도·읽은 챕터·독서 시간을 함께 지웁니다. 주석은 남습니다. 되돌릴 수 없습니다."
+clear_history_confirm = "지우기"
+# 서재 필터 행: 태그 칩의 머리글.
+filter_tag = "상태"
 # 分组（集合）：卡片菜单里那一节 + 架面顶部那几张组卡。
 group = "그룹"
 group_new = "새 그룹"

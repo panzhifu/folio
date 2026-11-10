@@ -351,8 +351,7 @@ library_dir = "Bibliotheksordner"
 "transfer" = "Übertragung per WLAN"
 
 "transfer.desc" = "Im selben WLAN die Adresse unten im Browser öffnen, dann wandern Bücher direkt ins Regal. Der Server läuft, bis du ihn abschaltest — von selbst startet er nie."
-"transfer.off" = "Nach dem Einschalten stehen hier die Adresse und der Kopplungscode."
-"transfer.pin" = "Kopplungscode: %{pin}"
+"transfer.off" = "Nach dem Einschalten steht hier die Adresse."
 "transfer.no_url" = "Keine LAN-Adresse gefunden — tippe die IP dieses Geräts im Browser ein (den Port zeigt das Protokoll)."
 "library_dir.pick" = "Ordner wählen…"
 toc_density = "Zeilendichte"
@@ -634,12 +633,17 @@ search_placeholder = "Titel oder Autor suchen"
 # 右上角那颗三点按钮：本体不做事，点开是一条导入方式的菜单，文案挂在
 # 无障碍标签与桌面的 tooltip 上。
 more = "Importwege"
-import = "Importieren"
+import = "Lokal importieren"
+network_import = "Netzwerk-Import"
+network_hint = "Im selben WLAN: Mit einem anderen Gerät den QR-Code scannen oder die Adresse öffnen, um Bücher ins Regal zu senden. Schließen dieser Karte beendet den Dienst."
+network_copy = "Adresse kopieren"
+network_no_url = "Keine lokale Netzwerkadresse gefunden — prüfe, ob beide Geräte im selben WLAN sind, und versuche es erneut."
 # 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）只有一句标题：进度交给每行名字下面那条 bar，卡头不摆数字。
 status_importing = "Import läuft"
 # 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
 # 数已经在行里了）；卡头不再摆成功 / 没进来的汇总数。
 record_title = "Importverlauf"
+record_empty = "Noch keine Importeinträge"
 status_added = "Fertig"
 status_duplicate = "Schon im Regal"
 status_needs_password = "Passwort nötig"
@@ -668,11 +672,7 @@ reject_unreadable_other = "%{count} ließen sich nicht lesen"
 # 整机扫描。扫描只找不导：找到的候选摆成清单，读者勾选再导（勾选 = 亲手挑的，
 # 重名算更新）。已在书架的那几条默认不勾并标出来。
 cancel = "Abbrechen"
-url_import = "Per Link"
-url_title = "Aus einem Link importieren"
-url_placeholder = "Download-Link einfügen (http…)"
-url_hint = "Der Download läuft im Hintergrund; der Fortschritt erscheint im Regal. Der Titel kommt aus dem letzten Teil des Links."
-scan = "Suchen"
+scan = "Intelligente Suche"
 scan_title = "Bücher auf diesem Gerät finden"
 scan_running = "Suche läuft…"
 scan_found = "Suche läuft… %{n} gefunden"
@@ -704,6 +704,19 @@ no_results_hint = "Versuch ein anderes Wort — hier wird in Titeln und Autoren 
 # 「分享」递的是库里那一份副本的文件本身，只在有系统分享面板的那一端摆这一条（Android）。
 share = "Teilen"
 book_delete = "Löschen"
+# Lesestatus-Markierungen: vier feste Werte, Mehrfachauswahl; der Typ ist Tag in folio-model.
+tag = "Markieren"
+tag_hint = "Gib diesem Buch einen Status. Mehrere gleichzeitig möglich; Tippen außerhalb speichert."
+tag_unread = "Ungelesen"
+tag_reading = "Am Lesen"
+tag_finished = "Gelesen"
+tag_abandoned = "Abgebrochen"
+# Leseverlauf löschen: der Eintrag im Langdruck-Menü. Löscht „wie weit ich bin"; Anmerkungen bleiben.
+clear_history = "Leseverlauf löschen"
+clear_history_body = "Fortschritt, gelesene Kapitel und Lesezeit dieses Buches werden gelöscht. Anmerkungen bleiben. Lässt sich nicht rückgängig machen."
+clear_history_confirm = "Löschen"
+# Filterzeile im Regal: Überschrift der Chip-Reihe.
+filter_tag = "Status"
 # 分组（集合）：卡片菜单里那一节 + 架面顶部那几张组卡。
 group = "Gruppen"
 group_new = "Neue Gruppe"

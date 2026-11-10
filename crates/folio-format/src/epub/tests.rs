@@ -1630,6 +1630,117 @@ fn a_nonlinear_cover_page_becomes_the_first_chapter() {
     assert_eq!(flow.chapters[1].spine_href, "OEBPS/Text/chap1.xhtml");
 }
 
+/// `<guide type="toc">` 指的书内目录页也是「非线性不当章」的例外：它即使标了
+/// `linear="no"` 也要收成一章，读者才能在封面之后翻到目录，而不是直接落到扉页。
+///
+/// 《搜神记》就是这种写法（`part0000.xhtml` 标 `linear="no"`，guide 的 toc 指向
+/// `part0000.xhtml#toc`）；拿掉 `read_guide_reference` 里的 `toc` 分支或那一处
+/// `!is_toc_page`，这条红。
+#[test]
+fn a_nonlinear_guide_toc_page_becomes_a_chapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guidetoc.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>有书内目录页的书</dc:title></metadata>
+  <manifest>
+    <item id="cover" href="Text/cover_page.xhtml" media-type="application/xhtml+xml"/>
+    <item id="toc" href="Text/toc.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="cover" linear="no"/>
+    <itemref idref="toc" linear="no"/>
+    <itemref idref="c1"/>
+  </spine>
+  <guide>
+    <reference type="cover" title="Cover" href="Text/cover_page.xhtml"/>
+    <reference type="toc" title="Table of Contents" href="Text/toc.xhtml#toc"/>
+  </guide>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/cover_page.xhtml",
+                br#"<html><body><div><svg viewBox="0 0 1 1"><image xlink:href="../Images/cover.jpeg"/></svg></div></body></html>"#,
+            ),
+            (
+                "OEBPS/Text/toc.xhtml",
+                "<html><body><h1>目录</h1><ol><li><a href=\"chap1.xhtml\">正文</a></li></ol></body></html>"
+                    .as_bytes(),
+            ),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>正文</p></body></html>".as_bytes(),
+            ),
+        ],
+    );
+    let flow = flow_of(&path);
+    assert_eq!(flow.chapters.len(), 3, "封面与目录页都该收成章");
+    assert_eq!(
+        flow.chapters
+            .iter()
+            .map(|c| c.spine_href.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "OEBPS/Text/cover_page.xhtml",
+            "OEBPS/Text/toc.xhtml",
+            "OEBPS/Text/chap1.xhtml",
+        ],
+        "目录页要夹在封面和正文之间"
+    );
+    assert_eq!(
+        flow.chapters[1].title, "目录",
+        "标题从页面自己的 h1 取，不必在 NCX 里补一条"
+    );
+}
+
+/// guide 指向一份 `properties="nav"` 的导航文档时，仍然不把它当章：EPUB3 的 nav
+/// 是阅读系统的目录入口，不是给人顺序翻的正文页。破例只认「guide toc 指的书内
+/// 目录页」，不能把 nav 过滤那条绕过去。
+#[test]
+fn a_nav_document_is_not_kept_even_when_the_guide_points_at_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("guidetocnav.epub");
+    let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>guide 指向 nav 的书</dc:title></metadata>
+  <manifest>
+    <item id="nav" href="Text/nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="c1" href="Text/chap1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="nav" linear="no"/>
+    <itemref idref="c1"/>
+  </spine>
+  <guide><reference type="toc" title="Table of Contents" href="Text/nav.xhtml"/></guide>
+</package>"#;
+    write_epub(
+        &path,
+        &[
+            ("mimetype", b"application/epub+zip"),
+            ("META-INF/container.xml", CONTAINER.as_bytes()),
+            ("OEBPS/content.opf", opf.as_bytes()),
+            (
+                "OEBPS/Text/nav.xhtml",
+                "<html><body><h1>目录</h1><ol><li><a href=\"chap1.xhtml\">正文</a></li></ol></body></html>"
+                    .as_bytes(),
+            ),
+            (
+                "OEBPS/Text/chap1.xhtml",
+                "<html><body><p>正文</p></body></html>".as_bytes(),
+            ),
+        ],
+    );
+    let flow = flow_of(&path);
+    assert_eq!(flow.chapters.len(), 1, "nav 文档仍不该变成一章");
+    assert_eq!(flow.chapters[0].spine_href, "OEBPS/Text/chap1.xhtml");
+}
+
 /// spine 上写着读不动的内容（逐页 SVG 那一类）时，留一章说明而不是让章凭空少一页。
 ///
 /// 读者的下场本来是「这本书少了一章」，而那一件查不出原因。

@@ -132,7 +132,7 @@ pub(in crate::ui::features::settings) fn membership_page(cx: &App) -> Page {
 pub(in crate::ui::features::settings) fn gate_group(text_key: &'static str, cx: &App) -> Group {
     group(
         tr(cx, "page.membership"),
-        vec![Row::custom(move |cx: &App| {
+        vec![Row::custom(move |_, cx| {
             crate::ui::components::gate_banner(tr(cx, text_key), cx).into_any_element()
         })],
     )
@@ -143,7 +143,7 @@ pub(in crate::ui::features::settings) fn gate_group(text_key: &'static str, cx: 
 fn status_group(membership: &Membership, cx: &App) -> Group {
     let lifetime = membership.lifetime;
     let mut rows = vec![
-        Row::custom(|cx: &App| hero(cx).into_any_element()).keywords(&[
+        Row::custom(|_, cx| hero(cx).into_any_element()).keywords(&[
             "membership",
             "premium",
             "会员",
@@ -154,7 +154,7 @@ fn status_group(membership: &Membership, cx: &App) -> Group {
     ];
     if !lifetime {
         rows.push(
-            Row::custom(|cx: &App| cta_row(cx).into_any_element()).keywords(&[
+            Row::custom(|_, cx| cta_row(cx).into_any_element()).keywords(&[
                 "membership",
                 "buy",
                 "会员",
@@ -266,7 +266,7 @@ fn benefit_group(cx: &App) -> Group {
     group(
         tr(cx, "group.membership_benefits"),
         vec![
-            Row::custom(|cx: &App| benefits_row(cx).into_any_element()).keywords(&[
+            Row::custom(|_, cx| benefits_row(cx).into_any_element()).keywords(&[
                 "membership",
                 "benefits",
                 "会员",
@@ -360,7 +360,7 @@ fn device_group(_membership: &Membership, cx: &App) -> Group {
     group(
         tr(cx, "group.membership_devices"),
         vec![
-            Row::custom(|cx: &App| {
+            Row::custom(|_, cx| {
                 if activation::confirming(cx) {
                     release_panel(cx).into_any_element()
                 } else {
@@ -514,7 +514,7 @@ fn redeem_group(cx: &App) -> Group {
         // 空闲时不摆任何提示句：编号框与右边的兑换钮已经把这件事说完。
         // 在飞 / 结果 / 失败才补一句，落在同一张卡里。
         if redeem_status(cx) != Status::Idle {
-            rows.push(Row::custom(|cx: &App| {
+            rows.push(Row::custom(|_, cx| {
                 v_flex()
                     .w_full()
                     .items_center()
@@ -542,7 +542,7 @@ fn redeem_group(cx: &App) -> Group {
                 "爱发电",
             ]),
         );
-        rows.push(Row::custom(redeem_row));
+        rows.push(Row::custom(move |_, cx| redeem_row(cx)));
     }
     group(tr(cx, "membership.redeem_group"), rows)
 }

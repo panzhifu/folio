@@ -1323,7 +1323,7 @@ impl CompactSettings {
                     ),
             ),
             RowKind::Custom { title, render, .. } => {
-                let content = render(cx);
+                let content = render(window, cx);
                 let title = title.clone();
                 control_cell(
                     id("custom-row"),

@@ -55,6 +55,7 @@ pub mod types;
 
 pub use anchor::TextAnchor;
 pub use position::Locator;
+pub use types::Tag;
 
 #[cfg(test)]
 mod boundary_tests {

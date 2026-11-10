@@ -1,4 +1,4 @@
-//! 架面上那几张要读者答一句话的浮层：建组、从链接导入、扫描结果、切书库确认。
+//! 架面上那几张要读者答一句话的浮层：建组、扫描结果、切书库确认。
 //!
 //! 它们共用 `BottomSheet` 的档位与返回键行为（见 `ui::components::bottom_sheet`），
 //! 这一份只管每张卡里装什么、按下去做什么。
@@ -9,73 +9,95 @@ use crate::ui::services::cloud_upload;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::library::{Pick, suggested_dir};
+use folio_core::Tag;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    StatefulInteractiveElement, Styled, TestSupportExt as _, div, px,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, div, px,
 };
 
 use super::{GUTTER, ShelfView};
 
+/// 标记那张浮层的宽与整卡高：一行标题、一行提示、四颗短词按钮。宽 300 装得下
+/// 手机那 384 逻辑像素的视口还有余（四颗小按钮一行放不下时 `flex_wrap` 折两行，
+/// 卡片只偏几像素 —— 与 [`overlay::FORM_HEIGHT`] 那条「报的数与真实高对不上」
+/// 同一条代价），高按内容报一个定数供居中上抬。
+pub(in crate::ui::features::shelf) const TAG_WIDTH: f32 = 300.0;
+pub(in crate::ui::features::shelf) const TAG_HEIGHT: f32 = 148.0;
+
+/// 标签 → 它的本地化键。四个固定档各有一条，判据收在这一处。
+fn tag_key(tag: Tag) -> &'static str {
+    match tag {
+        Tag::Unread => "shelf.tag_unread",
+        Tag::Reading => "shelf.tag_reading",
+        Tag::Finished => "shelf.tag_finished",
+        Tag::Abandoned => "shelf.tag_abandoned",
+    }
+}
+
 impl ShelfView {
-    /// 多选删除前的确认。两端都用居中的那一张：它问的是一句话，不是一块要滚的清单；
-    /// 手机上底部弹层已经把底栏盖住，再抬一张只会多一层要读的东西。
-    pub(in crate::ui::features::shelf) fn selection_delete_popover(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let count = self.selected.len();
+    /// 标记那张浮层：固定四档的开关（未读 / 在读 / 读完 / 弃读），多选。
+    ///
+    /// 两端都是居中的那一张：它答的是一句话（「这本读到哪儿了」），不是一块要滚的
+    /// 清单；四颗小按钮也装得下手机那 384 逻辑像素的视口，不值得为它铺一套
+    /// 底部弹层的双容器。打勾读的是打开那一刻的库（[`Self::tag_entry`] 里的快照），
+    /// 点一格当场落库（[`Self::toggle_tag`]），关掉（点外面 / 返回）只收意图。
+    pub(in crate::ui::features::shelf) fn tag_popover(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some((book_id, snapshot)) = &self.tag_entry else {
+            return div().into_any_element();
+        };
         let shelf = cx.entity().clone();
-        let cancel = shelf.clone();
-        let confirm = shelf.clone();
-        let cancel_label = tr(cx, "shelf.cancel");
-        let confirm_label = tr(cx, "shelf.selection_delete_confirm");
+        let book_id = *book_id;
+        let snapshot = snapshot.clone();
+        // 四颗开关**就地搭好**：搭一颗要读一次文案（`cx` 的账），闭包里借不动它 ——
+        // 与卡片角标、扫描筛选那两处同一个做法。
+        let chips: Vec<AnyElement> = Tag::ALL
+            .iter()
+            .map(|tag| {
+                let selected = snapshot.contains(tag);
+                let chip_entity = shelf.clone();
+                let tag = *tag;
+                let key = format!("shelf-tag-{}", tag.as_str());
+                let label = tr(cx, tag_key(tag)).to_string();
+                Button::new(SharedString::from(key))
+                    .when(selected, |button| button.secondary())
+                    .when(!selected, |button| button.ghost())
+                    .small()
+                    .label(label.clone())
+                    .accessibility_label(label)
+                    .on_click(move |_, _, cx| {
+                        chip_entity.update(cx, |this, cx| this.toggle_tag(book_id, tag, cx))
+                    })
+                    .into_any_element()
+            })
+            .collect();
         let body = v_flex()
-            .id("shelf-selection-delete")
+            .id("shelf-tag-panel")
             .test_support()
-            .w(px(overlay::FORM_WIDTH))
-            .min_h(px(overlay::FORM_HEIGHT))
+            .w(px(TAG_WIDTH))
+            .min_h(px(TAG_HEIGHT))
             .gap_3()
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(tf(
-                cx,
-                "shelf.selection_delete_title",
-                &[("n", &count)],
-            )))
-            .child(muted_label(
-                tf(cx, "shelf.selection_delete_body", &[("n", &count)]),
-                cx,
-            ))
             .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        Button::new("shelf-selection-delete-cancel")
-                            .ghost()
-                            .label(cancel_label.clone().to_string())
-                            .accessibility_label(cancel_label)
-                            .on_click(move |_, _, cx| {
-                                cancel.update(cx, |this, cx| this.cancel_delete_selection(cx))
-                            }),
-                    )
-                    .child(
-                        Button::new("shelf-selection-delete-confirm")
-                            .danger()
-                            .label(confirm_label.clone().to_string())
-                            .accessibility_label(confirm_label)
-                            .on_click(move |_, _, cx| {
-                                confirm.update(cx, |this, cx| this.confirm_delete_selection(cx))
-                            }),
-                    ),
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(tr(cx, "shelf.tag")),
+            )
+            .child(muted_label(tr(cx, "shelf.tag_hint"), cx))
+            .child(
+                // 四颗开关横排：四个短词一行放得下，一行也读得出「这是一套档位」。
+                // 选中的实心（secondary），没选的描边（ghost）—— 与扫描筛选那一排
+                // chips 同一套摆法，读者不用学第二种。
+                h_flex().w_full().flex_wrap().gap_2().children(chips),
             )
             .into_any_element();
         overlay::centered(
-            "shelf-selection-delete-popover",
-            overlay::FORM_HEIGHT,
+            "shelf-tag-popover",
+            TAG_HEIGHT,
             &shelf,
-            |this, cx| this.cancel_delete_selection(cx),
+            |this, cx| this.close_tag_popover(cx),
             body,
         )
     }
@@ -147,79 +169,6 @@ impl ShelfView {
         )
     }
 
-    /// 「从链接导入」那一屏的内容。与建组那一屏同一形状，也只有容器不同。
-    pub(in crate::ui::features::shelf) fn url_form(
-        &self,
-        entry: Entity<InputState>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let entity = cx.entity().clone();
-        let close_entity = entity.clone();
-        let import_entity = entity.clone();
-        let cancel_label = tr(cx, "shelf.cancel");
-        let import_label = tr(cx, "shelf.url_import");
-        v_flex()
-            .id("shelf-url-panel")
-            .test_support()
-            .w_full()
-            .gap_3()
-            .child(
-                div()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(tr(cx, "shelf.url_title")),
-            )
-            .child(muted_label(tr(cx, "shelf.url_hint"), cx))
-            .child(div().w_full().child(Input::new(&entry).cleanable(true)))
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        Button::new("shelf-url-cancel")
-                            .ghost()
-                            .label(cancel_label.to_string())
-                            .accessibility_label(cancel_label)
-                            .on_click(move |_, _, cx| {
-                                close_entity.update(cx, |this, cx| this.close_url_panel(cx))
-                            }),
-                    )
-                    .child(
-                        Button::new("shelf-url-import")
-                            .primary()
-                            .label(import_label.to_string())
-                            .accessibility_label(import_label)
-                            .on_click(move |_, _, cx| {
-                                import_entity.update(cx, |this, cx| this.import_from_url(cx))
-                            }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// 「从链接导入」在桌面那一档：屏幕居中的一张浮层。
-    ///
-    /// 居中而不是钉在 ⋮ 那颗按钮底下：这一屏的入口在那条菜单里，而菜单点开这张卡的
-    /// 同一帧就散了 —— 钉在一个刚消失的元素上，读者看到的是卡从半空里长出来。
-    pub(in crate::ui::features::shelf) fn url_popover(
-        &self,
-        entry: Entity<InputState>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let shelf = cx.entity().clone();
-        let body = self.url_form(entry, cx);
-        overlay::centered(
-            "shelf-url-popover",
-            overlay::FORM_HEIGHT,
-            &shelf,
-            |this, cx| this.close_url_panel(cx),
-            div()
-                .w(px(overlay::FORM_WIDTH))
-                .min_h(px(overlay::FORM_HEIGHT))
-                .child(body)
-                .into_any_element(),
-        )
-    }
-
     /// 建组那一屏在手机上：同一份表单压进底部弹层。
     pub(in crate::ui::features::shelf) fn group_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
         let body = self.form_body(
@@ -232,22 +181,8 @@ impl ShelfView {
             "shelf-group-sheet",
             &self.group_sheet,
             overlay::SHEET_EXPANDED,
-            body,
-        )
-    }
-
-    /// 链接导入那一屏在手机上。
-    pub(in crate::ui::features::shelf) fn url_sheet(&self, cx: &mut Context<Self>) -> AnyElement {
-        let body = self.form_body(
-            &self.url_sheet,
-            self.url_entry.as_ref(),
-            cx,
-            |this, entry, cx| this.url_form(entry, cx),
-        );
-        overlay::sheet(
-            "shelf-url-sheet",
-            &self.url_sheet,
-            overlay::SHEET_EXPANDED,
+            // 输入框在卡片中部，键盘会盖到它：默认的那一抬要留着。
+            true,
             body,
         )
     }
@@ -273,6 +208,12 @@ impl ShelfView {
             "shelf-scan-sheet",
             &self.scan_sheet,
             overlay::SCAN_SHEET_EXPANDED,
+            // **不抬**：搜索框钉在弹层顶部，展开档又占 85% 视口，键盘出来时它本来就在
+            // 键盘上方；默认那一抬只会把整屏内容（含那颗输入框）往上顶一下 —— 读者报的
+            // 「输入框明明很高，键盘一弹还是往上蹦」就是它。与阅读页目录那一屏同一形状、
+            // 同一取舍（`reader::toc_panel::sheet_element` 的 `.ime_lift(false)`）。
+            // 清单自己滚，底下一排按钮打字时用不上，都不缺键盘让位。
+            false,
             body,
         )
     }

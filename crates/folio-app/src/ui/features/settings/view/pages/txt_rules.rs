@@ -184,7 +184,7 @@ fn gate_row(
 /// 要是哈希还是原来那 12 位，问题就说清了（没落盘 / 没重启 / 改动压根不影响分章）。
 /// 只在这张表真的会作用到分章时才摆 —— 出厂那份与读者那份撞出同一个哈希也是可能的。
 fn table_group(cx: &App) -> Group {
-    let reset = Row::custom(|cx: &App| {
+    let reset = Row::custom(|_, cx| {
         Button::new("rules-reset")
             .ghost()
             .small()
@@ -320,7 +320,7 @@ fn custom_group(cx: &App, edits: &Edits) -> Group {
                 })
             },
         ));
-        rows.push(Row::custom(move |cx: &App| {
+        rows.push(Row::custom(move |_, cx| {
             Button::new(format!("rules-drop-{index}"))
                 .ghost()
                 .small()
@@ -337,7 +337,7 @@ fn custom_group(cx: &App, edits: &Edits) -> Group {
                 .into_any_element()
         }));
     }
-    rows.push(Row::custom(|cx: &App| {
+    rows.push(Row::custom(|_, cx| {
         h_flex()
             .w_full()
             .child(

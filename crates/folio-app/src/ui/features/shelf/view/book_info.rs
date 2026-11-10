@@ -28,6 +28,7 @@ use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::form::{field, v_form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -36,7 +37,7 @@ use gpui_kit::{
     Styled, StyledImage, Subscription, TestSupportExt as _, WeakEntity, Window, div, img, px,
 };
 
-use crate::ui::components::{TopBar, hairline};
+use crate::ui::components::TopBar;
 use crate::ui::foundation::error::report;
 use crate::ui::foundation::images::cover_image;
 use crate::ui::services::l10n::{tf, tr};
@@ -414,7 +415,7 @@ impl Render for BookInfoView {
                                         ),
                                     ),
                             )
-                            .child(hairline(cx))
+                            .child(Separator::horizontal())
                             // 这一本自带的书目，加格式与大小两行。摆在这里是为了「这本是不是
                             // 那一套的第 3 本 / 是不是那本 6.9 MB 的」这类问题当场有答案。
                             .child(

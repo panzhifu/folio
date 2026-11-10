@@ -58,7 +58,7 @@ fn create_rows(cx: &App) -> Vec<Row> {
         )
         .description(tr(cx, "field.backup_include_files.desc"))
         .keywords(CREATE_FIND),
-        Row::custom(create_block).keywords(CREATE_FIND),
+        Row::custom(move |_, cx| create_block(cx)).keywords(CREATE_FIND),
     ]
 }
 
@@ -143,7 +143,7 @@ fn list_rows(cx: &App) -> Vec<Row> {
 
 fn note_row(cx: &App, key: &'static str) -> Row {
     let text = tr(cx, key);
-    Row::custom(move |cx| muted_label(text.clone(), cx).into_any_element()).keywords(LIST_FIND)
+    Row::custom(move |_, cx| muted_label(text.clone(), cx).into_any_element()).keywords(LIST_FIND)
 }
 
 /// 一行备份：时间 + 大小/范围 + 删除。要删的那一行整行换成确认面板。
@@ -153,7 +153,7 @@ fn entry_row(entry: Entry, pending: Option<PathBuf>) -> Row {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "backup".to_string());
-    Row::custom(move |cx| {
+    Row::custom(move |_, cx| {
         let asked = pending.as_deref() == Some(path.as_path());
         if asked {
             return delete_panel(entry.clone(), cx);
@@ -274,7 +274,7 @@ fn location_rows(cx: &App) -> Vec<Row> {
     let path = folio_core::infra::paths::backups_dir();
     let title = tr(cx, "backup.folder");
     vec![
-        Row::custom_titled(title, move |cx| {
+        Row::custom_titled(title, move |_, cx| {
             let path = path.clone();
             h_flex()
                 .w_full()

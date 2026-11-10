@@ -42,6 +42,7 @@ mod reading;
 mod schema;
 pub mod stats;
 mod sync;
+mod tags;
 mod translations;
 // 类型住进了 folio-model；这里沿用旧路径，5 个查询模块的 `super::types::{…}` 一行不动。
 pub use folio_model::types;

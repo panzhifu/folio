@@ -51,6 +51,10 @@ pub(in crate::ui::features::shelf) struct Labels {
     /// 「分享这本书」那一条。摆不摆由 [`crate::ui::platform::HAS_SHARE_SHEET`] 决定，
     /// 但文案两端都取一次：取与摆分在两处，判据就只有一条。
     share: SharedString,
+    /// 「标记」：开那一张居中的标记浮层（固定四档，多选）。
+    tag: SharedString,
+    /// 「清除阅读记录」：清进度、已读章与时长，批注不动。破坏性动作，垫在删除上面。
+    clear_history: SharedString,
     delete: SharedString,
     /// 分组那一节的节头那一行字（不可点）。
     group: SharedString,
@@ -67,6 +71,8 @@ impl Labels {
             select: tr(cx, "shelf.select"),
             info: tr(cx, "shelf.info_title"),
             share: tr(cx, "shelf.share"),
+            tag: tr(cx, "shelf.tag"),
+            clear_history: tr(cx, "shelf.clear_history"),
             delete: tr(cx, "shelf.book_delete"),
             group: tr(cx, "shelf.group"),
             new_group: tr(cx, "shelf.group_new"),
@@ -96,9 +102,11 @@ pub(in crate::ui::features::shelf) fn build(
     let info = shelf.clone();
     let select = shelf.clone();
     let share = shelf.clone();
+    let tag = shelf.clone();
     let create = shelf.clone();
+    let clear = shelf.clone();
     let delete = shelf.clone();
-    // 先摆信息与分组那一节，最后才垫上删除：`fold` 是因为组的条数是运行时才知道的。
+    // 先摆信息、标记与分组那一节，最后才垫上两格破坏性的：`fold` 是因为组的条数是运行时才知道的。
     let menu = menu
         .min_w(px(MIN_WIDTH))
         .item(
@@ -127,6 +135,15 @@ pub(in crate::ui::features::shelf) fn build(
                     }),
             )
         })
+        // 「标记」紧跟在分享之后：它与信息一样是「看一看这本的账」，只是这一条开的是
+        // 一张状态浮层，落库走 [`ShelfView::toggle_tag`]，一格一写。
+        .item(
+            PopupMenuItem::new(labels.tag.clone())
+                .icon(IconName::Tag)
+                .on_click(move |_, _, cx| {
+                    tag.update(cx, |this, cx| this.open_tag_popover(book_id, cx));
+                }),
+        )
         .when(!groups.is_empty(), |menu| {
             menu.item(PopupMenuItem::label(labels.group.clone()))
         });
@@ -150,6 +167,13 @@ pub(in crate::ui::features::shelf) fn build(
             }),
     )
     .separator()
+    .item(
+        PopupMenuItem::new(labels.clear_history.clone())
+            .icon(IconName::Eraser)
+            .on_click(move |_, window, cx| {
+                clear.update(cx, |this, cx| this.open_clear_history(book_id, window, cx));
+            }),
+    )
     .item(
         PopupMenuItem::new(labels.delete.clone())
             .icon(IconName::Trash)

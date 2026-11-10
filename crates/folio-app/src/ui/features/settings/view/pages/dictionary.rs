@@ -17,7 +17,7 @@ use crate::ui::services::dictionary;
 use crate::ui::services::library::Pick;
 
 pub(in crate::ui::features::settings) fn dictionary_page(cx: &App) -> Page {
-    let installed = Row::custom(installed_list).keywords(&[
+    let installed = Row::custom(move |_, cx| installed_list(cx)).keywords(&[
         "dictionary",
         "stardict",
         "词典",
@@ -27,7 +27,7 @@ pub(in crate::ui::features::settings) fn dictionary_page(cx: &App) -> Page {
         "离线",
         "offline",
     ]);
-    let import = Row::custom(import_control).keywords(&[
+    let import = Row::custom(move |_, cx| import_control(cx)).keywords(&[
         "dictionary",
         "import",
         "stardict",

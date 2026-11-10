@@ -183,7 +183,7 @@ fn usage_rows() -> Vec<Row> {
     const FIND: &[&str] = &[
         "storage", "space", "占用", "存储", "空间", "usage", "disk", "容量",
     ];
-    vec![Row::custom(usage_block).keywords(FIND)]
+    vec![Row::custom(move |_, cx| usage_block(cx)).keywords(FIND)]
 }
 
 /// 那一整块：读数在上，它的分解跟着下来。
@@ -377,7 +377,7 @@ fn cleanup_rows(cx: &App) -> Vec<Row> {
     }
     if rows.is_empty() {
         return vec![
-            Row::custom(move |cx| {
+            Row::custom(move |_, cx| {
                 muted_label(tr(cx, "usage.nothing_to_clean"), cx).into_any_element()
             })
             .keywords(CLEANUP_FIND),
@@ -404,7 +404,7 @@ const CLEANUP_FIND: &[&str] = &[
 /// 一颗动作钮那一行。常态是「名字 + 说明 + 右端那格字节 + 那颗钮」；摊开确认时**整行换成
 /// 面板** —— 「点一下就删掉三百张缩略图」不该靠读者记住那颗钮在哪一侧。
 fn action_row(job: Job, area: Area) -> Row {
-    Row::custom(move |cx| {
+    Row::custom(move |_, cx| {
         let view = storage::handle(cx);
         let pending = view
             .as_ref()
@@ -629,7 +629,7 @@ const FOLDER_FIND: &[&str] = &[
 fn path_row(cx: &App, key: &'static str, path: PathBuf) -> Row {
     let title = tr(cx, key);
     let id = format!("storage-open-{key}");
-    Row::custom_titled(title, move |cx| {
+    Row::custom_titled(title, move |_, cx| {
         let path = path.clone();
         h_flex()
             .w_full()
@@ -649,7 +649,7 @@ fn path_row(cx: &App, key: &'static str, path: PathBuf) -> Row {
 
 /// 同一行的标题，右边换成一句现成的话（没有路径可开的时候）。
 fn named_note(cx: &App, key: &'static str, note: impl Fn(&App) -> SharedString + 'static) -> Row {
-    Row::custom_titled(tr(cx, key), move |cx| {
+    Row::custom_titled(tr(cx, key), move |_, cx| {
         muted_label(note(cx), cx).into_any_element()
     })
     .keywords(FOLDER_FIND)

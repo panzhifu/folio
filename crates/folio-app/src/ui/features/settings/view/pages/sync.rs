@@ -38,7 +38,7 @@ fn server_group(cx: &App) -> Group {
     let provider = ConfigHolder::sync(cx).provider;
     let mut rows = vec![
         // 最上面那颗胶囊：三档配置一眼可见，点哪档就切哪档，下面的字段跟着换。
-        Row::custom(provider_switch).keywords(&[
+        Row::custom(move |_, cx| provider_switch(cx)).keywords(&[
             "provider", "webdav", "baidu", "aliyun", "网盘", "同步", "后端",
         ]),
         Row::toggle(
@@ -89,7 +89,7 @@ fn server_group(cx: &App) -> Group {
             // 百度那一头的凭据不在这里填：与「网盘取书」共用一份登录，少一处要维护的
             // token。这一行只说清它落在哪个目录。
             rows.push(
-                Row::custom(move |cx| {
+                Row::custom(move |_, cx| {
                     muted_label(tr(cx, "field.sync_baidu_hint"), cx).into_any_element()
                 })
                 .keywords(&["baidu", "百度", "网盘", "登录", "token"]),
@@ -98,7 +98,7 @@ fn server_group(cx: &App) -> Group {
         SyncProvider::Aliyun => {
             // 与百度同一条：凭据在「网盘取书」那一屏，这里只说落哪个目录。
             rows.push(
-                Row::custom(move |cx| {
+                Row::custom(move |_, cx| {
                     muted_label(tr(cx, "field.sync_aliyun_hint"), cx).into_any_element()
                 })
                 .keywords(&["aliyun", "阿里云盘", "网盘", "登录", "token"]),
@@ -182,7 +182,7 @@ fn action_group(cx: &App) -> Group {
     group(
         tr(cx, "group.sync_state"),
         vec![
-            Row::custom(move |cx| {
+            Row::custom(move |_, cx| {
                 let entity = sync::handle(cx);
                 let (status, busy) = entity
                     .as_ref()

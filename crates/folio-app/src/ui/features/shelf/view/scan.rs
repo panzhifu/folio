@@ -52,7 +52,7 @@ use gpui_kit::{
 
 use gpui_kit::assets::IconName;
 
-use crate::ui::components::{muted_label, scroll_guard};
+use crate::ui::components::muted_label;
 use crate::ui::services::app_store;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
@@ -755,11 +755,6 @@ impl ShelfView {
                     .id("shelf-scan-panel")
                     // 回归门按 id 认这一屏画没画出来（与架面那张状态卡同一套）。
                     .test_support()
-                    // 扫的那几秒也一样挡着架面：两档同一个停靠，别一路挡一路不挡。
-                    .occlude()
-                    // 这一格还没得滚，但手指压上去也不该带动身后的架面 —— 浮层上的一笔
-                    // 滚动到此为止（见 `components::scroll_guard`）。
-                    .child(scroll_guard("shelf-scan-scroll"))
                     .size_full()
                     .items_center()
                     .justify_center()
@@ -823,21 +818,10 @@ impl ShelfView {
                 v_flex()
                     .id("shelf-scan-panel")
                     .test_support()
-                    // 这一格 `.occlude()` 挡的是**身后的架面**：命中测试走到这一格就 `break`
-                    // （`window.rs` 的 `hit_test`），身后的 hitbox 不进 `mouse_hit_test.ids`。
-                    // 卡外面那一片照旧归浮层自己的点外关闭：那颗 catcher 在更后面，只有落在
-                    // 卡内的点击才会被这一格挡掉，而那本来就该挡。
-                    //
-                    // 它挡点击，**不担保滚动**：`should_handle_scroll` 判真与否还看 hitbox 有没有
-                    // 把这一格算进去。所以滚动归属另有一条闸 —— 下面那颗 `scroll_guard` 在清单
-                    // 处理完这一笔之后 `stop_propagation`，身后的架面与弹层外框都收不到（Flutter
-                    // 的 arena 里「内层 Scrollable 赢、外层收不到」）。
-                    .occlude()
+                    // 挡点击与吞滚动都由 `overlay` 的容器层统一给（`guarded`），
+                    // 这里只排内容。
                     .flex_1()
                     .min_h_0()
-                    // **必须排在清单之前**：鼠标监听按绘制顺序登记、冒泡相倒着走 —— 先画才
-                    // 让它在清单自己的滚动处理之后跑（见 `components::scroll_guard`）。
-                    .child(scroll_guard("shelf-scan-scroll"))
                     // 顶上那一行：左边按文件名搜，右边那颗漏斗点开是一张筛选浮层。
                     .child(self.scan_toolbar(cx))
                     .child(

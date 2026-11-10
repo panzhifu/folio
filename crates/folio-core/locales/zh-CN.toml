@@ -363,8 +363,7 @@ library_dir = "书库位置"
 "transfer" = "Wi-Fi 传书"
 
 "transfer.desc" = "同一 Wi-Fi 下的浏览器打开下面的地址，就能把书直接传进书架。服务开到关掉为止，重启不会自己开。"
-"transfer.off" = "开关打开后，这里会显示能打开的地址与配对码。"
-"transfer.pin" = "配对码：%{pin}"
+"transfer.off" = "开关打开后，这里会显示能打开的地址。"
 "transfer.no_url" = "没探到局域网地址 —— 请在浏览器里输入这台设备的 IP（端口见开关旁的日志）。"
 "library_dir.pick" = "选择文件夹…"
 toc_density = "排列密度"
@@ -648,12 +647,17 @@ search_placeholder = "搜索书名或作者"
 # 右上角那颗三点按钮：本体不做事，点开是一条导入方式的菜单，文案挂在
 # 无障碍标签与桌面的 tooltip 上。
 more = "导入方式"
-import = "导入"
+import = "本地导入"
+network_import = "网络导入"
+network_hint = "同一 Wi-Fi 下，用另一台设备扫描下面的二维码，或打开这个地址，就能把书传进书架。关掉这张卡，服务就停。"
+network_copy = "复制地址"
+network_no_url = "没探到局域网地址 —— 请确认手机和对方设备在同一 Wi-Fi，或稍后重试。"
 # 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）只有一句标题：进度交给每行名字下面那条 bar，卡头不摆数字。
 status_importing = "正在导入"
 # 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
 # 数已经在行里了）；卡头不再摆成功 / 没进来的汇总数。
 record_title = "导入记录"
+record_empty = "暂无导入记录"
 status_added = "成功"
 status_duplicate = "已在架上"
 status_needs_password = "要口令"
@@ -682,11 +686,7 @@ reject_unreadable_other = "%{count} 本读不动"
 # 整机扫描。扫描只找不导：找到的候选摆成清单，读者勾选再导（勾选 = 亲手挑的，
 # 重名算更新）。已在书架的那几条默认不勾并标出来。
 cancel = "取消"
-url_import = "链接导入"
-url_title = "从链接导入"
-url_placeholder = "粘贴书籍的下载链接（http…）"
-url_hint = "下载在后台进行，进度摆在架面上；书名取自链接的末段。"
-scan = "扫描"
+scan = "智能扫描"
 scan_title = "在设备里找书"
 scan_running = "正在扫描…"
 scan_found = "正在扫描… 已找到 %{n} 本"
@@ -718,6 +718,19 @@ no_results_hint = "换个词试试 —— 这里搜的是书名和作者，不�
 # 「分享」递的是库里那一份副本的文件本身，只在有系统分享面板的那一端摆这一条（Android）。
 share = "分享"
 book_delete = "删除"
+# 阅读状态标签：固定四档（未读/在读/读完/弃读），多选，类型在 folio-model 的 Tag。
+tag = "标记"
+tag_hint = "给这本书挂个状态，可以同时挂几个。点卡片外面的地方就落库。"
+tag_unread = "未读"
+tag_reading = "在读"
+tag_finished = "读完"
+tag_abandoned = "弃读"
+# 清除阅读记录：长按菜单里那一格。清的是「读到哪儿了」，批注与标签是读者留下的，不清。
+clear_history = "清除阅读记录"
+clear_history_body = "这本书的进度、已读章与阅读时长会一起清掉，批注保留。清除找不回来。"
+clear_history_confirm = "清除"
+# 架面筛选那一排：标签 chips 的行头。
+filter_tag = "状态"
 # 分组（集合）：卡片菜单里那一节 + 架面顶部那几张组卡。
 group = "分组"
 group_new = "新建分组"

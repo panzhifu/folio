@@ -2276,6 +2276,7 @@ dependencies = [
  "jni 0.22.4",
  "libc",
  "log",
+ "qrcode",
  "read-fonts 0.46.0",
  "serde_json",
  "skera",
@@ -2318,6 +2319,7 @@ dependencies = [
  "futures-util",
  "hayro",
  "image",
+ "libc",
  "md-5",
  "notify",
  "quick-xml 0.42.0",
@@ -6580,6 +6582,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+dependencies = [
+ "image",
 ]
 
 [[package]]

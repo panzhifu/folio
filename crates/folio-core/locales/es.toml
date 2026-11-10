@@ -351,8 +351,7 @@ library_dir = "Carpeta de la biblioteca"
 "transfer" = "Transferencia por Wi-Fi"
 
 "transfer.desc" = "Abre la dirección de abajo en un navegador de la misma red Wi-Fi y envía libros directo a la estantería. El servidor corre hasta que lo apagues — nunca arrastra solo."
-"transfer.off" = "Activa el interruptor para ver la dirección y el código de emparejamiento."
-"transfer.pin" = "Código de emparejamiento: %{pin}"
+"transfer.off" = "Activa el interruptor para ver la dirección."
 "transfer.no_url" = "No se encontró una dirección de red local — escribe la IP de este dispositivo en el navegador (el puerto está en el registro)."
 "library_dir.pick" = "Elegir carpeta…"
 toc_density = "Densidad de filas"
@@ -634,12 +633,17 @@ search_placeholder = "Buscar por título o autor"
 # 右上角那颗三点按钮：本体不做事，点开是一条导入方式的菜单，文案挂在
 # 无障碍标签与桌面的 tooltip 上。
 more = "Formas de importar"
-import = "Importar"
+import = "Importación local"
+network_import = "Importación por red"
+network_hint = "En la misma Wi-Fi, escanea el código QR con otro dispositivo o abre la dirección para enviar libros a la estantería. Al cerrar esta tarjeta se detiene el servicio."
+network_copy = "Copiar dirección"
+network_no_url = "No se encontró una dirección de red local: comprueba que ambos dispositivos estén en la misma Wi-Fi e inténtalo de nuevo."
 # 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）只有一句标题：进度交给每行名字下面那条 bar，卡头不摆数字。
 status_importing = "Importando"
 # 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
 # 数已经在行里了）；卡头不再摆成功 / 没进来的汇总数。
 record_title = "Historial de importación"
+record_empty = "Aún no hay registros de importación"
 status_added = "Listo"
 status_duplicate = "Ya en la estantería"
 status_needs_password = "Requiere contraseña"
@@ -668,11 +672,7 @@ reject_unreadable_other = "%{count} no se pudieron leer"
 # 整机扫描。扫描只找不导：找到的候选摆成清单，读者勾选再导（勾选 = 亲手挑的，
 # 重名算更新）。已在书架的那几条默认不勾并标出来。
 cancel = "Cancelar"
-url_import = "Desde un enlace"
-url_title = "Importar desde un enlace"
-url_placeholder = "Pega el enlace de descarga (http…)"
-url_hint = "La descarga corre en segundo plano; el progreso se ve en el estante. El título sale del último tramo del enlace."
-scan = "Escanear"
+scan = "Escaneo inteligente"
 scan_title = "Buscar libros en este dispositivo"
 scan_running = "Escaneando…"
 scan_found = "Escaneando… %{n} encontrados"
@@ -704,6 +704,19 @@ no_results_hint = "Prueba con otra palabra — aquí se busca en títulos y auto
 # 「分享」递的是库里那一份副本的文件本身，只在有系统分享面板的那一端摆这一条（Android）。
 share = "Compartir"
 book_delete = "Eliminar"
+# Etiquetas de estado de lectura: cuatro valores fijos, selección múltiple; el tipo es Tag en folio-model.
+tag = "Marcar"
+tag_hint = "Ponle un estado a este libro. Puedes poner varios a la vez; tocar fuera guarda."
+tag_unread = "Sin leer"
+tag_reading = "Leyendo"
+tag_finished = "Terminado"
+tag_abandoned = "Abandonado"
+# Borrar historial de lectura: la entrada del menú de pulsación larga. Borra «hasta dónde llegué»; las notas quedan.
+clear_history = "Borrar historial de lectura"
+clear_history_body = "El progreso, los capítulos leídos y el tiempo de lectura de este libro se borrarán. Las anotaciones se conservan. No se puede deshacer."
+clear_history_confirm = "Borrar"
+# Fila de filtrado en la estantería: encabezado de las fichas.
+filter_tag = "Estado"
 # 分组（集合）：卡片菜单里那一节 + 架面顶部那几张组卡。
 group = "Grupos"
 group_new = "Grupo nuevo"

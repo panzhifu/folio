@@ -7,17 +7,18 @@
 //! core 的其余部分（管线、任务、存储）照旧是 std 形状，公共签名不漏 `Future`。
 //! 「core 除 transfer 外不依赖异步运行时」是模块纪律，将来嫌软可以拆成独立 crate。
 //!
-//! 流程：浏览器开 `http://<设备IP>:<port>/?pin=XXXX` → 单页（拖拽 / 多选，XHR
+//! 流程：浏览器开 `http://<设备IP>:<port>/` → 单页（拖拽 / 多选，XHR
 //! 逐文件）→ multipart **流式**落进 `inbox_dir`（块进块写，不进内存）→ 每个文件
 //! 完成即 `on_file(path)` → app 侧把路径包成 [`crate::ingest::import::PathsSource`] 提交
 //! 导入队列 → 导入成功后清掉收件箱里的原件，失败保留待查。
 //!
-//! 安全：八位配对码，URL 不带对一律 403；同一个地址连错配额用完后按指数退避锁起来
-//! （429 + `Retry-After`），锁着的时候连对的码也挡；比较走常数时间；配对码不落日志。
-//! 局域网里的陌生设备因此最多能看见一个上传页，放不进一个字节，也试不出几个码。
+//! 安全：**不设配对码** —— 同一 Wi-Fi 里能连上这个端口的设备就能传书，所以这台服务
+//! 只该在读者亲手打开的那段时间开着（启停在 app 侧，不写进配置、重启不自动开）。
+//! 按对端地址记的那本失败账仍留着，但只服务下面的局域网同步握手；传书侧只在那个
+//! 地址已经进了罚期时挡一下（429 + `Retry-After`）。
 //!
 //! 同一台服务器还挂着**局域网同步**的另一半（同账号的两台设备互拉缺的书与进度），
-//! 它住在 [`lan`] 里：那条路要的是「读」，而它的门是账号证明而不是配对码 —— id 在局域网里
+//! 它住在 [`lan`] 里：那条路要的是「读」，而它的门是账号证明 —— id 在局域网里
 //! 是广播出去的、抄得来的，所以「是不是同一个账号」必须由那对 nonce 上的双向证明来回答。
 //! 两组路由共用一个端口、共用一本按地址记的失败账，读者在设置页上看到的仍是同一个地址。
 
@@ -30,12 +31,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt as _;
 
 use axum::Router;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Multipart, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Multipart, State};
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use serde::Deserialize;
 
 use crate::error::{Error, IoResultExt as _, Result};
 use crate::infra::paths;
@@ -50,10 +50,6 @@ const UPLOAD_PAGE: &str = include_str!("transfer_page.html");
 /// 单个文件的上传上限。1 GiB 是「没人真的传比这更大的书」的界，挡住的是
 /// 恶意或失控的上传把磁盘灌满，不是正常读者。
 const MAX_UPLOAD: usize = 1024 * 1024 * 1024;
-
-/// 配对码的位数。八位是「读者能手打进浏览器」与「局域网里没人试得完」之间的那一档：
-/// 一亿个组合，再叠上下面那套退避，一台陌生设备一天也摸不到万分之几。
-const PIN_DIGITS: u32 = 8;
 
 /// 一个地址连错几次以内不罚锁。前几次是手滑输错，罚它等待等于惩罚读者。
 const FREE_MISTAKES: u32 = 5;
@@ -71,12 +67,12 @@ const MAX_TRACKED: usize = 256;
 /// 多久没再出错过的那个地址，从账上抹掉。
 const STALE: Duration = Duration::from_secs(60 * 60);
 
-/// 传书服务的配置。`pin` 为空就现场生成八位 —— 每次启动都换，界面上大字显示。
+/// 传书服务的配置。同一 Wi-Fi 内不设口令：浏览器打开地址就能传书（见模块头那条
+/// 安全说明），因此只该在读者亲手打开的那段时间开着。
 #[derive(Debug, Clone)]
 pub struct TransferConfig {
     /// 期望的端口。被占就顺延（最多试 10 个），真实的以 [`TransferServer::addr`] 为准。
     pub port: u16,
-    pub pin: String,
     /// 收件箱：上传的字节先落这里。
     pub inbox_dir: PathBuf,
     /// 局域网同步开不开。**`None` 就是那五条路由一概 404** —— 传书与局域网同步是两个决定，
@@ -87,7 +83,6 @@ pub struct TransferConfig {
 /// 一条活着的传书服务。`stop()` 关停（拒绝新连接、收完手上那批）；`Drop` 兜底。
 pub struct TransferServer {
     addr: SocketAddr,
-    pin: String,
     notify: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -99,11 +94,6 @@ impl TransferServer {
         config: TransferConfig,
         on_file: Arc<dyn Fn(PathBuf) + Send + Sync>,
     ) -> Result<Self> {
-        let pin = if config.pin.trim().is_empty() {
-            generate_pin()
-        } else {
-            config.pin.trim().to_string()
-        };
         // 端口在同步侧定下来：占用顺延，真实的地址从 listener 上读，不靠猜。
         let mut listener = None;
         let mut last_err = None;
@@ -130,18 +120,19 @@ impl TransferServer {
         let (notify, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let inbox = config.inbox_dir.clone();
         let lan = config.lan.clone();
-        let thread_pin = pin.clone();
         let thread = std::thread::Builder::new()
             .name("folio-transfer".to_string())
-            .spawn(move || serve(listener, inbox, thread_pin, on_file, lan, shutdown_rx))
+            .spawn(move || serve(listener, inbox, on_file, lan, shutdown_rx))
             .map_err(|err| Error::Io {
                 path: PathBuf::from("folio-transfer"),
                 source: Box::new(err),
             })?;
         tracing::info!("transfer: 传书服务起在 {addr}");
+        // 顺手把探到的局域网地址记一行：真机上「地址点不开」最常见的原因就是这一格
+        // 空着（或者报错了网卡），日志里有它，下一次不必再靠猜。
+        tracing::info!("transfer: 局域网地址 {:?}", lan_address());
         Ok(Self {
             addr,
-            pin,
             notify: Some(notify),
             thread: Some(thread),
         })
@@ -152,17 +143,13 @@ impl TransferServer {
         self.addr
     }
 
-    /// 本次服务的配对码。
-    pub fn pin(&self) -> &str {
-        &self.pin
-    }
-
-    /// 局域网里能打开这个服务的 URL（探测默认路由的出口地址；一个都探不到就空 ——
-    /// 界面只好提示读者自己输设备的 IP）。
+    /// 局域网里能打开这个服务的 URL；一个都探不到就空 —— 界面只好提示读者自己输
+    /// 设备的 IP。**只报一条**（Wi-Fi / 有线那条）：多网卡时其余通常是蜂窝或虚拟
+    /// 网桥，摆出来读者点到的是打不开的链接。不带查询参数：扫二维码或手输都省一步。
     pub fn urls(&self) -> Vec<String> {
-        lan_addresses()
+        lan_address()
             .into_iter()
-            .map(|ip| format!("http://{ip}:{}/?pin={}", self.addr.port(), self.pin))
+            .map(|ip| format!("http://{ip}:{}/", self.addr.port()))
             .collect()
     }
 
@@ -192,7 +179,6 @@ impl Drop for TransferServer {
 fn serve(
     listener: TcpListener,
     inbox_dir: PathBuf,
-    pin: String,
     on_file: Arc<dyn Fn(PathBuf) + Send + Sync>,
     lan: Option<LanConfig>,
     notify: tokio::sync::oneshot::Receiver<()>,
@@ -213,7 +199,6 @@ fn serve(
         .merge(lan::routes())
         .with_state(Arc::new(TransferState {
             inbox_dir,
-            pin,
             guard: PinGuard::default(),
             on_file,
             // 开局域网同步就在这一刻把会话表建起来；没开就是 `None`，那五条路由一概 404。
@@ -227,7 +212,7 @@ fn serve(
         let listener =
             tokio::net::TcpListener::from_std(listener).expect("listener 迁进 tokio 不该失败");
         // 限速按**对端地址**记，所以要把 connect info 接进服务里 —— 没有这一层，
-        // 处理器只拿得到 URL，而 URL 里的配对码正是攻击者要猜的东西。
+        // 处理器只拿得到 URL，而局域网同步握手判罚期要用的正是对端地址。
         let _ = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -241,19 +226,13 @@ fn serve(
 
 struct TransferState {
     inbox_dir: PathBuf,
-    pin: String,
     guard: PinGuard,
     on_file: Arc<dyn Fn(PathBuf) + Send + Sync>,
     /// 局域网同步那一半的运行状态。`None` = 没开，那五条路由一概 404。
     ///
-    /// 与 `guard` 同一本账：证明反复不过的设备与猜配对码的设备是同一类嫌疑犯，
-    /// 分成两本账只会让其中一本漏挂限流。
+    /// 与 `guard` 同一本账：握手反复出不了证明的设备由那一侧记账，传书侧只在同一
+    /// 地址已经进了罚期时跟着挡一下。
     lan: Option<Arc<lan::LanState>>,
-}
-
-#[derive(Deserialize)]
-struct PinQuery {
-    pin: Option<String>,
 }
 
 /// 一个地址的配对码账：**连错几个**加**上一次错是多久以前**。
@@ -373,34 +352,23 @@ fn penalty(wrong: u32) -> Option<Duration> {
     )
 }
 
-/// 配对码与限速一起判。两个入口（页面与上传）共用这一份，免得哪一侧漏挂。
-fn authorize(
-    state: &TransferState,
-    from: IpAddr,
-    given: Option<&str>,
-) -> std::result::Result<(), Refusal> {
-    if let Gate::Locked(remaining) = state.guard.gate(from, Instant::now()) {
-        return Err(Refusal::Locked(remaining));
-    }
-    if secret_ok(given.unwrap_or(""), &state.pin) {
-        state.guard.note_right(from);
-        Ok(())
-    } else {
-        state.guard.note_wrong(from, Instant::now());
-        Err(Refusal::BadPin)
+/// 罚期一起判：局域网同步那本账（`PinGuard`）锁着的地址，传书这边也别放进来。
+/// 两个入口（页面与上传）共用这一份，免得哪一侧漏挂。
+fn authorize(state: &TransferState, from: IpAddr) -> std::result::Result<(), Refusal> {
+    match state.guard.gate(from, Instant::now()) {
+        Gate::Locked(remaining) => Err(Refusal::Locked(remaining)),
+        Gate::Proceed => Ok(()),
     }
 }
 
-/// 两种拒绝：错的码，和被锁着。
+/// 唯一的拒绝：这个地址还在罚期里。
 enum Refusal {
-    BadPin,
     Locked(Duration),
 }
 
 impl Refusal {
     fn into_response(self) -> Response {
         match self {
-            Self::BadPin => StatusCode::FORBIDDEN.into_response(),
             // 秒数向上取整，且至少一秒：报 0 等于叫客户端立刻再打一趟。
             Self::Locked(remaining) => (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -414,28 +382,12 @@ impl Refusal {
     }
 }
 
-/// 比配对码：**常数时间**，不短路。
-///
-/// 先比长度泄的是**长度**，而长度是格式本身（界面上就摆着八位），不是秘密；逐字节的
-/// `|=` 而不是 `==` 才是重点 —— 短路比较的耗时能告诉攻击者前几位猜对了。
-fn secret_ok(given: &str, want: &str) -> bool {
-    let (given, want) = (given.as_bytes(), want.as_bytes());
-    if given.len() != want.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (a, b) in given.iter().zip(want) {
-        diff |= a ^ b;
-    }
-    diff == 0
-}
-
 /// 拒绝一个上传之前最多读掉多少请求体。
 ///
 /// 读掉是为了让服务端 `close()` 时接收队列是空的 —— 队列里还压着没读的字节时，
 /// 内核回的是 RST 而不是 FIN，客户端那边还在写，于是它看到的是 `broken pipe`
-/// 而不是那句 403（测试里偶发的红就是它）。上限是给「拿着 1 GB 文件敲错码」兜底的：
-/// 超过它就随连接一起丢掉，那种量级本来也不该为了一句 403 再读一遍。
+/// 而不是那句 429（测试里偶发的红就是它）。上限是给「拿着 1 GB 文件撞进罚期」兜底的：
+/// 超过它就随连接一起丢掉，那种量级本来也不该为了一句 429 再读一遍。
 const REFUSAL_DRAIN: u64 = 8 * 1024 * 1024;
 
 /// 把请求体读掉（最多 `limit` 字节），只为让连接能干净地关。
@@ -458,13 +410,12 @@ async fn drain_at_most(multipart: &mut Multipart, limit: u64) {
     }
 }
 
-/// 上传页：配对码对、而且这个地址没在罚期里，才给得出这一页。
+/// 上传页：这个地址没在罚期里就给。
 async fn upload_page(
     State(state): State<Arc<TransferState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Query(query): Query<PinQuery>,
 ) -> Response {
-    match authorize(&state, peer.ip(), query.pin.as_deref()) {
+    match authorize(&state, peer.ip()) {
         Ok(()) => Html(UPLOAD_PAGE).into_response(),
         Err(refusal) => refusal.into_response(),
     }
@@ -478,12 +429,11 @@ async fn upload_page(
 async fn upload(
     State(state): State<Arc<TransferState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Query(query): Query<PinQuery>,
     mut multipart: Multipart,
 ) -> Response {
-    if let Err(refusal) = authorize(&state, peer.ip(), query.pin.as_deref()) {
+    if let Err(refusal) = authorize(&state, peer.ip()) {
         // 拒绝之前先把请求体读掉（见 [`REFUSAL_DRAIN`]）：不读就答，连接会被 RST 掉，
-        // 客户端拿不到这句 403、只看到 broken pipe。
+        // 客户端拿不到这句 429、只看到 broken pipe。
         drain_at_most(&mut multipart, REFUSAL_DRAIN).await;
         return refusal.into_response();
     }
@@ -573,52 +523,102 @@ fn sanitize_file_name(raw: &str) -> Option<String> {
     }
 }
 
-/// 现场生成配对码，每次启动一个。
+/// 探测局域网里能访问本机的那个地址。
 ///
-/// 熵的来源与 `sync::new_device_id` 同一套：`RandomState` 的种子由 OS 给。不能拿
-/// `subsec_nanos` 直接当码 —— Linux 上系统时钟是微秒粒度，末尾三位恒为 0，而
-/// `% 10^8` 摊不开那个分布，界面上相邻两次启动的码就成了可推的（旧实现是
-/// `% 10^4`，实际只有几千个可能值）。
-fn generate_pin() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+/// 两条腿都要：
+///
+/// - **网卡枚举**：Android 上 Wi-Fi 与蜂窝同时在线时，默认网络可能是蜂窝 —— 只靠
+///   「connect 一个公网地址看走哪张卡」探到的是运营商的 `10.x`，同一 Wi-Fi 里的设备
+///   根本连不上。所以枚举每张网卡的 IPv4，**Wi-Fi / 以太网排最前**，其它垫后。
+/// - **路由出口**：UDP connect 到公共 DNS（不发包，只让内核选路由出口）。桌面与
+///   单网卡机器上这一条最准，作为兜底。
+///
+/// **只交最优的那一条**：多网卡时其余通常是蜂窝 / 虚拟网桥，报出去只会让读者点到
+/// 一个打不开的链接（真机上第二行那条就是这么坏的）。一个都探不到就交 `None` ——
+/// 界面据此提示「读者自己输 IP」。
+fn lan_address() -> Option<String> {
+    // (优先级, 地址)。0 = 有线 / 无线网卡，1 = 其它网卡，2 = 路由探到的出口。
+    let mut ranked: Vec<(u8, String)> = Vec::new();
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u128(nanos);
-    hasher.write_u128(!nanos ^ u128::from(std::process::id()));
-    // 取模的偏置在 2^64 → 10^8 这一档是亿分之一的量级，不值得为它换一套算法。
-    let space = 10u64.checked_pow(PIN_DIGITS).unwrap_or(u64::MAX);
-    format!(
-        "{:0width$}",
-        hasher.finish() % space,
-        width = PIN_DIGITS as usize
-    )
-}
+    for (name, ip) in interface_ipv4_addrs() {
+        ranked.push((rank_of(&name), ip));
+    }
 
-/// 探测局域网里能访问本机的地址：往公共 DNS 发一次 **UDP connect**（不发包，
-/// 只让内核选路由出口），本端地址就是同网段读者能访问的那个。两个探测目标
-/// 跨国内外各一个，谁路由得通用谁；都失败就交空 —— 读者自己输 IP 的提示
-/// 由界面出。
-fn lan_addresses() -> Vec<String> {
-    let mut out = Vec::new();
     for probe in ["223.5.5.5:80", "8.8.8.8:80"] {
-        let Ok(socket) = UdpSocket::bind("[::]:0") else {
-            break;
+        // socket 的族要跟目标一致：AF_INET6 的 socket 去 connect IPv4 地址，Linux /
+        // Android 直接回 `EAFNOSUPPORT`（dual-stack 只对 v4-mapped 地址成立，而
+        // `ToSocketAddrs` 把 "223.5.5.5:80" 解析成的是裸 v4）。
+        let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
+            continue;
         };
         if socket.connect(probe).is_ok()
             && let Ok(local) = socket.local_addr()
         {
             let ip = local.ip().to_string();
-            if !out.contains(&ip) {
-                out.push(ip);
+            // 没有默认路由时 `local_addr` 可能还是全零：那不是能打开的地址。
+            if ip != "0.0.0.0" {
+                ranked.push((2, ip));
             }
         }
     }
+
+    // 稳定排序：同优先级里保持枚举顺序。
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked
+        .into_iter()
+        .map(|(_, ip)| ip)
+        .find(|ip| !ip.is_empty())
+}
+
+/// 网卡名的优先级：有线 / 无线在前，蜂窝与虚拟网卡垫后。
+fn rank_of(name: &str) -> u8 {
+    const LAN: &[&str] = &["wlan", "wl", "eth", "en", "usb", "rndis", "ap"];
+    const WAN: &[&str] = &["rmnet", "ccmni", "pdp", "tun", "ppp", "clat"];
+    if LAN.iter().any(|prefix| name.starts_with(prefix)) {
+        0
+    } else if WAN.iter().any(|prefix| name.starts_with(prefix)) {
+        2
+    } else {
+        1
+    }
+}
+
+/// 本机所有可用的 IPv4 地址 `(接口名, 点分地址)`：环回、全零、链路本地都不要。
+///
+/// 用 `getifaddrs` 而不是「connect 一个公网地址看走哪张卡」：后者在 Android 的
+/// 双网卡下答的是「默认网络是谁」，而读者要的是「同一个 Wi-Fi 里该连哪个 IP」。
+#[cfg(unix)]
+fn interface_ipv4_addrs() -> Vec<(String, String)> {
+    use std::ffi::CStr;
+
+    let mut out = Vec::new();
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return out;
+        }
+        let mut cur = head;
+        while !cur.is_null() {
+            let item = &*cur;
+            if !item.ifa_addr.is_null() && (*item.ifa_addr).sa_family as i32 == libc::AF_INET {
+                let addr = &*(item.ifa_addr as *const libc::sockaddr_in);
+                let ip = std::net::Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+                if !ip.is_loopback() && !ip.is_unspecified() && !ip.is_link_local() {
+                    let name = CStr::from_ptr(item.ifa_name).to_string_lossy().into_owned();
+                    out.push((name, ip.to_string()));
+                }
+            }
+            cur = item.ifa_next;
+        }
+        libc::freeifaddrs(head);
+    }
     out
+}
+
+/// Windows 没有 `getifaddrs`：只留路由出口那一条（桌面单网卡够用）。
+#[cfg(not(unix))]
+fn interface_ipv4_addrs() -> Vec<(String, String)> {
+    Vec::new()
 }
 
 fn now_secs() -> u64 {
@@ -632,16 +632,12 @@ fn now_secs() -> u64 {
 mod tests {
     use std::net::IpAddr;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use tracing_subscriber::Registry;
-    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-
     use super::{
-        FIRST_LOCK, FREE_MISTAKES, Gate, MAX_LOCK, MAX_TRACKED, PIN_DIGITS, PinGuard, Refusal,
-        TransferConfig, TransferServer, TransferState, authorize, generate_pin, penalty,
-        sanitize_file_name, secret_ok,
+        FIRST_LOCK, FREE_MISTAKES, Gate, MAX_LOCK, MAX_TRACKED, PinGuard, Refusal, TransferConfig,
+        TransferServer, TransferState, authorize, penalty, sanitize_file_name,
     };
 
     /// 路径穿越与花式名字到不了收件箱外面；正经名字原样保留。
@@ -664,10 +660,10 @@ mod tests {
         );
     }
 
-    /// 端到端：`port 0` 起服务，ureq 手拼 multipart 上传 —— 收件箱落盘、
-    /// 回调收到、错配对码 403。
+    /// 端到端：`port 0` 起服务，ureq 手拼 multipart 上传 —— 不带任何配对码就能
+    /// 收件箱落盘、回调收到、页面能打开。
     #[test]
-    fn the_server_receives_uploads_behind_the_pin() {
+    fn the_server_receives_uploads_without_a_pin() {
         let tmp = tempfile::tempdir().unwrap();
         let inbox = tmp.path().join("inbox");
         let received: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
@@ -675,7 +671,6 @@ mod tests {
         let server = TransferServer::start(
             TransferConfig {
                 port: 0,
-                pin: "2468".into(),
                 inbox_dir: inbox.clone(),
                 lan: None,
             },
@@ -685,15 +680,6 @@ mod tests {
         let base = format!("http://{}", server.addr());
 
         let client = ureq::AgentBuilder::new().build();
-        // 错配对码：页面 403。
-        assert!(
-            matches!(
-                client.get(&format!("{base}/?pin=0000")).call(),
-                Err(ureq::Error::Status(403, _))
-            ),
-            "页面也不给错的配对码看"
-        );
-
         let boundary = "----foliotestboundary";
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"三体.epub\"\r\nContent-Type: application/octet-stream\r\n\r\n{}\r\n--{boundary}--\r\n",
@@ -702,25 +688,19 @@ mod tests {
         // 闭包只回状态码。`ureq::Error::Status` 里揣着整个 `Response`，照原样把它当 `Err`
         // 交回来就是 clippy::result_large_err（那一格的 `Ok` 侧本来也是拿来数状态码的）；
         // 而这条测试从头到尾要的只是「几号状态」，所以把两条路折成一个 `u16`。
-        let post = |pin: &str| -> u16 {
-            match client
-                .post(&format!("{base}/upload?pin={pin}"))
-                .set(
-                    "Content-Type",
-                    &format!("multipart/form-data; boundary={boundary}"),
-                )
-                .send(body.as_bytes())
-            {
-                Ok(resp) => resp.status(),
-                Err(ureq::Error::Status(code, _)) => code,
-                Err(other) => panic!("上传不该走到传输错误：{other}"),
-            }
+        let status = match client
+            .post(&format!("{base}/upload"))
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={boundary}"),
+            )
+            .send(body.as_bytes())
+        {
+            Ok(resp) => resp.status(),
+            Err(ureq::Error::Status(code, _)) => code,
+            Err(other) => panic!("上传不该走到传输错误：{other}"),
         };
-        // 错配对码 403，一个字节都不落。
-        assert_eq!(post("0000"), 403);
-        assert!(std::fs::read_dir(&inbox).unwrap().next().is_none());
-        // 对配对码：落盘 + 回调。
-        assert_eq!(post("2468"), 200);
+        assert_eq!(status, 200, "不带配对码也该收得下");
         assert_eq!(
             std::fs::read(inbox.join("三体.epub")).unwrap(),
             "这是假装的 epub 内容".as_bytes(),
@@ -732,10 +712,10 @@ mod tests {
             "on_file 每个文件回调一次"
         );
 
-        // 页面在对的配对码下能打开。
+        // 页面也能直接打开。
         assert!(
             client
-                .get(&format!("{base}/?pin=2468"))
+                .get(&format!("{base}/"))
                 .call()
                 .unwrap()
                 .into_string()
@@ -744,74 +724,6 @@ mod tests {
             "上传页是一张带文件选择的表单"
         );
         server.stop();
-    }
-
-    /// 错配对码时**几 MB 的身体**也要拿到 403，而不是被连接重置。
-    ///
-    /// 服务端不读请求体就回答时，`close()` 那一下接收队列里还压着没读的字节，内核回的是
-    /// RST 而不是 FIN —— 客户端还在写，看到的就是 `broken pipe`。小身体（那张 100 字节
-    /// 的假 epub）碰运气，全量并行跑时偶发；这里几 MB 每次都能撞上，所以它是这条口径
-    /// 的稳定闸门。
-    #[test]
-    fn a_large_upload_with_a_wrong_pin_still_gets_the_403_page() {
-        let tmp = tempfile::tempdir().unwrap();
-        let inbox = tmp.path().join("inbox");
-        let server = TransferServer::start(
-            TransferConfig {
-                port: 0,
-                pin: "2468".into(),
-                inbox_dir: inbox.clone(),
-                lan: None,
-            },
-            Arc::new(|_| {}),
-        )
-        .unwrap();
-        let base = format!("http://{}", server.addr());
-        let client = ureq::AgentBuilder::new().build();
-        let boundary = "----folioBigBody";
-        let mut body = Vec::new();
-        body.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.bin\"\r\n\r\n"
-            )
-            .as_bytes(),
-        );
-        body.resize(body.len() + 4 * 1024 * 1024, b'x');
-        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-
-        let status = match client
-            .post(&format!("{base}/upload?pin=0000"))
-            .set(
-                "Content-Type",
-                &format!("multipart/form-data; boundary={boundary}"),
-            )
-            .send(&body[..])
-        {
-            Ok(resp) => resp.status(),
-            Err(ureq::Error::Status(code, _)) => code,
-            Err(other) => {
-                panic!("大身体 + 错配对码不该走到传输错误（服务端先关了连接）：{other}")
-            }
-        };
-        assert_eq!(status, 403);
-        assert!(
-            std::fs::read_dir(&inbox).unwrap().next().is_none(),
-            "错配对码一个字节都不该落进收件箱"
-        );
-        server.stop();
-    }
-
-    /// 配对码逐位比，不是前缀比：短一位、长一位、末尾不同都不算对。
-    #[test]
-    fn a_prefix_of_the_pin_is_not_the_pin() {
-        assert!(secret_ok("12345678", "12345678"));
-        assert!(
-            !secret_ok("1234567", "12345678"),
-            "少一位不是同一个码，前缀不算通过"
-        );
-        assert!(!secret_ok("123456789", "12345678"), "多一位也不算");
-        assert!(!secret_ok("12345670", "12345678"), "最后一位不同要能查出来");
-        assert!(!secret_ok("", "12345678"), "URL 不带 pin 一律不算对");
     }
 
     /// 罚锁的阶梯：免费额度内不罚，进锁后每多错一次翻倍，封顶一档。
@@ -884,54 +796,28 @@ mod tests {
         }
         assert!(matches!(guard.gate(from, t0), Gate::Locked(_)));
     }
-
-    /// 同一个意思在**接线**上再钉一遍：放行对码的那一趟要真的去销账。
-    ///
-    /// 上面那条只叫 `PinGuard` 自己的方法，把 `authorize` 里的 `note_right` 删掉它也不红；
-    /// 这一条走的是处理器用的那同一个函数。
+    /// 罚期一起判：握手那本账锁着的地址，传书侧的两个处理器也该挡下来。
     #[test]
-    fn a_right_code_clears_the_debt_through_the_authorizing_path() {
-        let state = state("12345678");
+    fn a_locked_address_is_refused_by_authorize() {
+        let state = state();
         let from: IpAddr = "10.0.0.7".parse().unwrap();
-        for n in 1..=FREE_MISTAKES {
-            assert!(
-                matches!(
-                    authorize(&state, from, Some("00000000")),
-                    Err(Refusal::BadPin)
-                ),
-                "第 {n} 次手滑只该给 403"
-            );
+        assert!(authorize(&state, from).is_ok(), "没进罚期一律放行");
+        let t0 = Instant::now();
+        for _ in 0..=FREE_MISTAKES {
+            state.guard.note_wrong(from, t0);
         }
         assert!(
-            authorize(&state, from, Some("12345678")).is_ok(),
-            "还没进锁的对码要能过"
-        );
-        for n in 1..=FREE_MISTAKES + 1 {
-            assert!(
-                matches!(
-                    authorize(&state, from, Some("00000000")),
-                    Err(Refusal::BadPin)
-                ),
-                "销过账之后第 {n} 次还该只给 403：上一轮那几次不该跟着算"
-            );
-        }
-        assert!(
-            matches!(
-                authorize(&state, from, Some("00000000")),
-                Err(Refusal::Locked(_))
-            ),
-            "重新数满才进锁"
+            matches!(authorize(&state, from), Err(Refusal::Locked(_))),
+            "罚期里的地址传书也别放进来"
         );
     }
 
     /// 一对处理器共用的那份状态，只为在测试里直接调 `authorize`。
-    fn state(pin: &str) -> TransferState {
+    fn state() -> TransferState {
         TransferState {
             inbox_dir: PathBuf::new(),
-            pin: pin.to_string(),
             guard: PinGuard::default(),
             on_file: Arc::new(|_| {}),
-            // 这一对助手只测配对码与限速，用不到局域网同步那一半。
             lan: None,
         }
     }
@@ -975,190 +861,5 @@ mod tests {
             Some("1"),
             "报 0 等于叫客户端立刻再打一趟"
         );
-    }
-
-    /// 端到端的爆破：20 趟错码里大部分是 429，而**对的码**在罚期里同样被挡。
-    #[test]
-    fn a_storm_of_wrong_pins_gets_locked_out() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = TransferServer::start(
-            TransferConfig {
-                port: 0,
-                pin: "12345678".into(),
-                inbox_dir: tmp.path().join("inbox"),
-                lan: None,
-            },
-            Arc::new(|_| {}),
-        )
-        .unwrap();
-        let base = format!("http://{}", server.addr());
-        let client = ureq::AgentBuilder::new().build();
-
-        let code = |resp: std::result::Result<ureq::Response, ureq::Error>| -> u16 {
-            match resp {
-                Ok(response) => response.status(),
-                Err(ureq::Error::Status(status, response)) => {
-                    if status == 429 {
-                        assert!(
-                            response.header("retry-after").is_some(),
-                            "429 必须带 Retry-After"
-                        );
-                    }
-                    status
-                }
-                Err(other) => panic!("不该走到传输错误：{other}"),
-            }
-        };
-
-        let mut codes = Vec::new();
-        for n in 0..20 {
-            let pin = format!("{:08}", 10_000_000 + n);
-            codes.push(code(client.get(&format!("{base}/?pin={pin}")).call()));
-        }
-        let compared = codes.iter().filter(|c| **c == 403).count();
-        let locked = codes.iter().filter(|c| **c == 429).count();
-        assert!(
-            compared <= (FREE_MISTAKES as usize) + 3,
-            "真的去比配对码的次数要有封顶，实际 {compared} 趟：{codes:?}"
-        );
-        assert!(
-            locked >= 10,
-            "20 趟里大半该被锁掉，实际 {locked} 趟：{codes:?}"
-        );
-        // 上传那一趟挂的是同一个限速，不能只挡页面。
-        codes.push(code(
-            client
-                .post(&format!("{base}/upload?pin=00000000"))
-                .set("Content-Type", "multipart/form-data; boundary=----x")
-                .send(b"----x--".as_slice()),
-        ));
-        assert_eq!(*codes.last().unwrap(), 429, "上传也要吃锁");
-        assert!(
-            std::fs::read_dir(tmp.path().join("inbox"))
-                .unwrap()
-                .next()
-                .is_none(),
-            "被锁住的那趟一个字节都不该落进收件箱"
-        );
-        assert_eq!(
-            code(client.get(&format!("{base}/?pin=12345678")).call()),
-            429,
-            "锁着的时候放行对的码，等于给爆破者递「这条通了」的信号"
-        );
-        server.stop();
-    }
-
-    /// 启动那一行只报地址：**配对码不落日志**。日志会进 feedback 快照、会被读者
-    /// 原样贴出来，那等于把门口钥匙挂在门外。
-    #[test]
-    fn starting_the_server_does_not_log_the_pin() {
-        const PIN: &str = "20193746";
-        let tmp = tempfile::tempdir().unwrap();
-        let seen = captured(|| {
-            let server = TransferServer::start(
-                TransferConfig {
-                    port: 0,
-                    pin: PIN.into(),
-                    inbox_dir: tmp.path().join("inbox"),
-                    lan: None,
-                },
-                Arc::new(|_| {}),
-            )
-            .unwrap();
-            // 对照：同一趟里发一条**故意**带码的日志，确认这支探针真的收得到字。
-            // 少了这一条，下面的断言在「探针什么都没收到」时也是绿的。
-            tracing::info!("对照组：配对码 {PIN}");
-            server.stop();
-        });
-        assert!(
-            seen.iter().any(|line| line.contains("传书服务起在")),
-            "启动那一行该在账上：{seen:?}"
-        );
-        assert!(
-            seen.iter().any(|line| line.contains("对照组")),
-            "探针什么都没收到，那后面那条断言是空的：{seen:?}"
-        );
-        for line in seen.iter().filter(|line| !line.contains("对照组")) {
-            assert!(!line.contains(PIN), "日志漏出配对码：{line}");
-        }
-    }
-
-    /// 生成的码是八位数字，而且不是「时钟低位」那种一猜就中的东西。
-    #[test]
-    fn generated_pins_are_eight_digits_and_differ() {
-        let mut codes: Vec<String> = (0..20).map(|_| generate_pin()).collect();
-        for code in &codes {
-            assert_eq!(
-                code.len(),
-                PIN_DIGITS as usize,
-                "位数是界面上能手打的那几格：{code}"
-            );
-            assert!(
-                code.bytes().all(|byte| byte.is_ascii_digit()),
-                "只出数字：{code}"
-            );
-        }
-        codes.sort();
-        codes.dedup();
-        assert_eq!(codes.len(), 20, "20 次生成撞了重：熵大概只来自时钟");
-    }
-
-    /// 装一支只收消息文本的探针，跑一遍 `probes`，返回真落了笔的那些字。
-    ///
-    /// 用 `set_default`（线程局部），不碰进程级 subscriber：并发用例互不影响，
-    /// 也不会把日志格式层抢走。
-    fn captured(probes: impl FnOnce()) -> Vec<String> {
-        // 订阅者**在进程级只装一次**，不用线程局部的 `set_default`。
-        //
-        // 线程局部那版在这套测试里会偶发丢行：并行跑时别的测试也在装上/摘掉自己的
-        // 局部订阅者，而 `tracing` 的「这个调用点要不要派发」是一张**全局**兴趣缓存，
-        // 局部订阅者计数回到 0 时会被重建 —— 于是同一线程上的两个 `info!` 调用点可能
-        // 一个派发、一个被判成 never。实测症状：`stop` 那行收得到、`start` 那行收不到；
-        // 模块内并行 60 次红 13 次，串行 20 次全绿。全局只装一次就没有这场赛跑。
-        static SEEN: std::sync::OnceLock<Arc<Mutex<Vec<String>>>> = std::sync::OnceLock::new();
-        let seen = SEEN.get_or_init(|| {
-            let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-            let subscriber = Registry::default().with(Echo(seen.clone()));
-            // 已经有全局订阅者（别处装过）就沿用它 —— 那时下面「对照组」那条断言会红，
-            // 红得明白，比静默放行好。
-            let _ = tracing::subscriber::set_global_default(subscriber);
-            tracing::callsite::rebuild_interest_cache();
-            seen
-        });
-        // 只取本趟窗口里的行。别的测试并发打进来的日志也落在这条链上，所以下面的断言
-        // 一律按**内容**过滤（这几个配对码是本条测试独有的）。
-        seen.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        probes();
-        std::mem::take(
-            &mut *seen
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-    }
-
-    /// 只记账、不输出的那层。
-    struct Echo(Arc<Mutex<Vec<String>>>);
-
-    impl<S: tracing::Subscriber> Layer<S> for Echo {
-        fn on_event(&self, event: &tracing::Event<'_>, _cx: Context<'_, S>) {
-            let mut line = String::new();
-            event.record(&mut EchoMessage(&mut line));
-            self.0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(line);
-        }
-    }
-
-    struct EchoMessage<'a>(&'a mut String);
-
-    impl tracing::field::Visit for EchoMessage<'_> {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.0.push_str(&format!("{value:?}"));
-            }
-        }
     }
 }

@@ -47,6 +47,9 @@ notify.workspace = true
 # 同步 HTTP（生产已随传输层搬去 folio-net；transfer 的测试还要用它调自己的服务器）。
 ureq.workspace = true
 url.workspace = true
+# 传书服务报的局域网地址要枚举网卡（`transfer::lan_addresses` 的 getifaddrs）：
+# 只靠 UDP 默认路由探，Android 上会探到蜂窝那张卡的运营商地址。libc 本来就在锁里。
+libc.workspace = true
 # Wi-Fi 传书服务器（`transfer`）。tokio 只许在这个模块里用 —— 见模块文档的边界。
 tokio.workspace = true
 axum.workspace = true

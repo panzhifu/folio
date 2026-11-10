@@ -1,18 +1,9 @@
-//! 通用小件：发丝线、次要说明文字、空状态。
+//! 通用小件：次要说明文字、空状态。
 //!
 //! 它们只回答「这一块长什么样」，不知道自己在哪一屏上。颜色全从 `cx.theme()` 取。
 
 use gpui_kit::component::{ActiveTheme, v_flex};
-use gpui_kit::{App, IntoElement, ParentElement, SharedString, Styled, div, px};
-
-/// 一条发丝线（0.5 物理像素），颜色取主题的 `border`。
-///
-/// 只在**两个同为 `background` 色的区域**之间用 —— 同色块之间没有边界感，
-/// 靠这一条线分出上下。区域自己带边框时优先用组件的 `border_b_1()`，
-/// 因为那条线归边界拥有者画，两处各画一遍会变成两条并排的实线。
-pub fn hairline(cx: &App) -> impl IntoElement {
-    div().w_full().h(px(0.5)).bg(cx.theme().border)
-}
+use gpui_kit::{App, IntoElement, ParentElement, SharedString, Styled, div};
 
 /// 一行次要说明文字。用于「这一条是元数据，不是主角」的位置：标题栏里的书名、
 /// 状态行、空状态的补充说明。

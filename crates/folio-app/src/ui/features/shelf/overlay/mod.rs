@@ -1,4 +1,4 @@
-//! 架面那三块「要读者答一句话」的浮层的**容器**：建组、从链接导入、扫描结果。
+//! 架面那两块「要读者答一句话」的浮层的**容器**：建组、扫描结果。
 //!
 //! 同一份内容，两种容器：桌面与平板上是一张 [`Popover`]，手机的 compact 档上是同一块
 //! 内容压进 [`BottomSheet`]。换容器换的不是好看，是那张卡钉不钉得住：手机上 ⋮ 那颗按钮
@@ -13,15 +13,18 @@
 //! 回调里只有 `&mut App`。`.child()` 收的是搭完的那一块，一次搭好、挂在弹窗层里，
 //! 两件事就都成立。
 //!
-//! 三块弹层各握一份 [`BottomSheetState`]，不是共用一份：共用一份的话，A 屏正在往下沉的
+//! 两块弹层各握一份 [`BottomSheetState`]，不是共用一份：共用一份的话，A 屏正在往下沉的
 //! 那半程被 B 屏接管，读者看到的是 A 的内容原地换成 B。退场动画各归各的那一份才对得上
 //! 「我刚关掉的是哪一屏」。
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::{Anchor, AnyElement, Context, Entity, IntoElement, ParentElement, Styled, div, px};
+use gpui_kit::{
+    Anchor, AnyElement, Context, ElementId, Entity, InteractiveElement as _, IntoElement,
+    ParentElement, Styled, div, px,
+};
 
-use crate::ui::components::{BottomSheet, BottomSheetState};
+use crate::ui::components::{BottomSheet, BottomSheetState, scroll_guard};
 
 use super::view::ShelfView;
 
@@ -32,8 +35,7 @@ use super::view::ShelfView;
 /// 内边距（24 像素的一半）。
 const POPOVER_PAD: f32 = 12.0;
 
-/// 两张「答一句话」的表单卡（建组、从链接导入）的宽与内容高：两张共用一个数，
-/// 因为形状一样 —— 一句标题、一行提示、一行输入、两颗按钮。卡片本身按 `min_h` 给，
+/// 「答一句话」的表单卡（建组）的宽与内容高。卡片本身按 `min_h` 给，
 /// 提示那一行在某些语言里会多折一行，长出来的那一点只让卡偏离正中几像素。
 pub(in crate::ui::features::shelf) const FORM_WIDTH: f32 = 420.0;
 pub(in crate::ui::features::shelf) const FORM_HEIGHT: f32 = 152.0;
@@ -101,6 +103,26 @@ pub(in crate::ui::features::shelf) fn popover(
         .into_any_element()
 }
 
+/// 给卡片内容套一层「滚动到此为止」：`occlude` 挡点击、`scroll_guard` 吞滚动。
+///
+/// 两块必须一起给：`occlude` 只让身后的 hitbox 不进命中测试，而滚动归谁看的是
+/// `should_handle_scroll`；没有 `scroll_guard` 那一格，读者在卡上滑一下，身后的
+/// 架面照样跟着滚（真机上读者报的原话）。id 由调用方的 key 派生，同一屏两张卡
+/// 不会撞。
+///
+/// 收在这里而不是每张卡自己写：架面上这几张浮层全是「答一句话」的卡，内容本身
+/// 不滚，一件件补漏迟早漏掉某一张（网络导入那张就这么漏的）。
+fn guarded(key: &'static str, body: AnyElement) -> AnyElement {
+    div()
+        .relative()
+        .occlude()
+        .child(scroll_guard(ElementId::Name(
+            format!("{key}-scroll").into(),
+        )))
+        .child(body)
+        .into_any_element()
+}
+
 /// 把一张浮层挂在**内容区的正中央**。
 ///
 /// 一层铺满的 flex 容器把那颗零尺寸的触发器推到正中，卡片本体由 `Popover` 画在弹窗层里、
@@ -129,7 +151,7 @@ pub(in crate::ui::features::shelf) fn centered(
             -(height + POPOVER_PAD * 2.0) / 2.0,
             shelf,
             close,
-            body,
+            guarded(key, body),
         )))
         .into_any_element()
 }
@@ -140,15 +162,23 @@ pub(in crate::ui::features::shelf) fn centered(
 /// [`BottomSheetState::is_idle`]，不是 `is_open()`：退场那半程 `is_open()` 已经是 `false`
 /// 而卡片还浮在屏幕上，那时断掉内容就等于看着它空着沉下去。判内容留不留的活儿在调用方
 /// （`ShelfView` 那一侧握着内容），这里只负责装。
+///
+/// `lift_ime` 是「键盘出来时整层往上抬不让位」（[`BottomSheet::ime_lift`]）的开关：
+/// 输入框在弹层**底部或中部**的表单（建组、从链接导入）开着 —— 键盘真的会盖住输入框；
+/// 输入框钉在弹层**顶部**的那几张（扫描清单）关掉 —— 展开档又高，键盘本来就够不到它，
+/// 再抬一次只是让整屏内容往上跳一下（阅读页目录那一屏同一形状、同一取舍）。
 pub(in crate::ui::features::shelf) fn sheet(
     key: &'static str,
     state: &Entity<BottomSheetState>,
     expanded: f32,
+    lift_ime: bool,
     body: Option<AnyElement>,
 ) -> AnyElement {
-    let sheet = BottomSheet::new(state, key).expanded(expanded);
+    let sheet = BottomSheet::new(state, key)
+        .expanded(expanded)
+        .ime_lift(lift_ime);
     match body {
-        Some(body) => sheet.child(body).into_any_element(),
+        Some(body) => sheet.child(guarded(key, body)).into_any_element(),
         None => sheet.into_any_element(),
     }
 }

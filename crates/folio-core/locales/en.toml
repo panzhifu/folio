@@ -375,8 +375,7 @@ library_dir = "Library folder"
 "transfer" = "Wi-Fi transfer"
 
 "transfer.desc" = "Open the address below in a browser on the same Wi-Fi to push books straight to the shelf. The server runs until you turn it off — it never starts on its own."
-"transfer.off" = "Turn the switch on to see the address and the pairing code."
-"transfer.pin" = "Pairing code: %{pin}"
+"transfer.off" = "Turn the switch on to see the address."
 "transfer.no_url" = "No LAN address found — type this device's IP in your browser (port is in the log)."
 "library_dir.pick" = "Choose folder…"
 toc_density = "Row density"
@@ -659,12 +658,17 @@ search_placeholder = "Search titles or authors"
 # The top-right kebab: the button itself does nothing, it opens a menu of the
 # ways to import. This line is the accessibility label and the desktop tooltip.
 more = "Ways to import"
-import = "Import"
+import = "Local import"
+network_import = "Network import"
+network_hint = "On the same Wi-Fi, scan the QR code below with another device, or open the address, to send books into your shelf. Closing this card stops the service."
+network_copy = "Copy address"
+network_no_url = "No local network address found — make sure both devices are on the same Wi-Fi and try again."
 # 导入状态那张卡（摆在屏幕正中，与建组、链接导入那几张同一个容器）只有一句标题：进度交给每行名字下面那条 bar，卡头不摆数字。
 status_importing = "Importing"
 # 导入记录那一张卡：一行一本书。下面这组是**不带数**的状态词干（一行就是一本书，
 # 数已经在行里了）；卡头不再摆成功 / 没进来的汇总数。
 record_title = "Import history"
+record_empty = "No import records yet"
 status_added = "Done"
 status_duplicate = "Already on shelf"
 status_needs_password = "Needs a password"
@@ -693,11 +697,7 @@ reject_unreadable_other = "%{count} could not be read"
 # Device-wide scan. Scan only finds: candidates land on a checklist, the reader
 # picks and imports (checking = hand-picked, same name means update).
 cancel = "Cancel"
-url_import = "From link"
-url_title = "Import from a link"
-url_placeholder = "Paste a book download link (http…)"
-url_hint = "Downloading runs in the background; progress shows on the shelf. The title comes from the link's last segment."
-scan = "Scan"
+scan = "Smart scan"
 scan_title = "Find books on this device"
 scan_running = "Scanning…"
 scan_found = "Scanning… %{n} found"
@@ -732,6 +732,19 @@ no_results_hint = "Try another word — this searches titles and authors, not th
 # end that has a system share sheet (Android).
 share = "Share"
 book_delete = "Delete"
+# Reading status tags: four fixed values, multi-select; the type lives in folio-model as Tag.
+tag = "Mark"
+tag_hint = "Give this book a status. You can set several at once; tapping outside saves."
+tag_unread = "Unread"
+tag_reading = "Reading"
+tag_finished = "Finished"
+tag_abandoned = "Abandoned"
+# Clear reading history: the long-press entry. It clears "how far I got"; annotations stay.
+clear_history = "Clear reading history"
+clear_history_body = "This book's progress, read chapters and reading time will be cleared. Annotations are kept. This cannot be undone."
+clear_history_confirm = "Clear"
+# The tag filter row on the shelf: header of the chip row.
+filter_tag = "Status"
 # Groups (collections): the section in the card menu + the group tiles at the top of the shelf.
 group = "Groups"
 group_new = "New group"

@@ -18,13 +18,13 @@ use crate::ui::platform;
 use crate::ui::services::user_fonts::{self, Status};
 
 pub(in crate::ui::features::settings) fn store_row() -> Row {
-    Row::custom(store_control).keywords(&[
+    Row::custom(move |_, cx| store_control(cx)).keywords(&[
         "font", "download", "store", "字体", "下载", "霞鹜", "文楷", "思源", "OFL",
     ])
 }
 
 pub(in crate::ui::features::settings) fn installed_row() -> Row {
-    Row::custom(installed_list).keywords(&["font", "installed", "字体", "已装", "我的"])
+    Row::custom(move |_, cx| installed_list(cx)).keywords(&["font", "installed", "字体", "已装", "我的"])
 }
 
 /// 商店那一行：导入入口 + 每款字体一张卡。

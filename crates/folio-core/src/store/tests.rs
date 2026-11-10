@@ -468,12 +468,18 @@ fn deleting_a_book_gives_its_pages_back() {
 fn adding_the_same_path_twice_updates_in_place() {
     let store = Store::in_memory().unwrap();
     let first = store.add_book(&path("a.md"), &meta("旧标题")).unwrap();
-    let second = store.add_book(&path("a.md"), &meta("新标题")).unwrap();
+    let mut fresh = meta("新标题");
+    // 重扫那一路解析的是哈希名副本，无内嵌书名的格式会把标题回落成文件主名
+    // （一串哈希）。conflict 臂刷新的只能是「文件的事实」，标题作者不许跟着盖。
+    fresh.authors = vec!["另一个人".into()];
+    fresh.size = 4321;
+    let second = store.add_book(&path("a.md"), &fresh).unwrap();
     assert_eq!(first, second, "同一路径不该变成两本书");
     let books = store.list_books().unwrap();
     assert_eq!(books.len(), 1);
-    assert_eq!(books[0].title, "新标题");
-    assert_eq!(books[0].authors, vec!["作者甲", "作者乙"]);
+    assert_eq!(books[0].title, "旧标题", "重扫不盖标题");
+    assert_eq!(books[0].authors, vec!["作者甲", "作者乙"], "重扫不盖作者");
+    assert_eq!(books[0].size, 4321, "事实列照常刷新");
 }
 
 /// 落库的**索引**原样往返：章表（标题 + 条目名）、CSS、目录、封面、图片元数据，

@@ -22,6 +22,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use folio_core::Tag;
 use folio_core::store::ShelfItem;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::motion::{Easing, Spring, Stagger, StaggerOrigin, Timing, spring};
@@ -36,10 +37,38 @@ use gpui_kit::{
 };
 
 use crate::ui::foundation::images::cover_image;
-use crate::ui::services::l10n::tf;
+use crate::ui::services::l10n::{tf, tr};
 
 use super::super::view::ShelfView;
 use super::book_menu;
+
+/// 封面左上角那几颗标签角标的字号（逻辑像素）：`text_xs` 那一档的值，
+/// 手写在这里是因为角标要按它定自己的高与内边距。
+const TAG_BADGE_FONT: f32 = 11.0;
+
+/// 标签 → 角标的配色。四个档各认一个语义色：在读是主题主色，读完用 accent，
+/// 弃读用 danger，未读落 muted —— 一颗角标要的是「一眼分得开」，不是四档各配一套。
+fn tag_colors(tag: Tag, cx: &App) -> (gpui_kit::Hsla, gpui_kit::Hsla) {
+    let theme = cx.theme();
+    match tag {
+        Tag::Unread => (theme.muted, theme.muted_foreground),
+        Tag::Reading => (theme.primary, theme.primary_foreground),
+        Tag::Finished => (theme.accent, theme.accent_foreground),
+        Tag::Abandoned => (theme.danger, theme.danger_foreground),
+    }
+}
+
+/// 标签 → 角标的本地化文案。与标记浮层那四颗按钮同一个键（`sheets::tag_key`），
+/// 两侧不共用一个函数是因为键的判据薄得只剩一个 match，抄一份比跨两个模块可见
+/// 更便宜 —— 改档位名时两边一起改，编译器都盯得住（`Tag::ALL` 穷尽 match）。
+fn tag_label(tag: Tag) -> &'static str {
+    match tag {
+        Tag::Unread => "shelf.tag_unread",
+        Tag::Reading => "shelf.tag_reading",
+        Tag::Finished => "shelf.tag_finished",
+        Tag::Abandoned => "shelf.tag_abandoned",
+    }
+}
 
 /// 封面格的宽高比（宽 ÷ 高），出版物的通行比例。
 ///
@@ -128,6 +157,9 @@ pub(in crate::ui::features::shelf) struct Card {
     pub(in crate::ui::features::shelf) authors: SharedString,
     pub(in crate::ui::features::shelf) cover: Option<Arc<Image>>,
     pub(in crate::ui::features::shelf) opened_at: Option<i64>,
+    /// 这一本挂着的标签（重查那一趟随 [`ShelfView::tags`] 一起取的），封面左上角的
+    /// 角标读它。至多画两颗：一颗已经说得出「我在读什么」，四颗全画会盖住封面。
+    pub(in crate::ui::features::shelf) tags: Vec<Tag>,
     /// 这一格的元素 id 与 group 键。**重查那一趟拼一次**，不在每帧的 item 闭包里
     /// `format!`：`uniform_list` 每帧都会把可见的那几排重造一遍。
     pub(in crate::ui::features::shelf) group: SharedString,
@@ -232,6 +264,7 @@ impl ShelfView {
             title: item.title.into(),
             authors: item.authors.join(AUTHOR_SEP).into(),
             cover,
+            tags: self.tags.get(&item.id).cloned().unwrap_or_default(),
             group: format!("shelf-card-{}", item.id).into(),
             cover_id: format!("shelf-cover-{}", item.id).into(),
         }
@@ -347,6 +380,29 @@ impl ShelfView {
         let press_in = cx.entity().clone();
         let press_out = cx.entity().clone();
         let press_away = cx.entity().clone();
+        // 标签角标**就地搭好**：搭一颗要读一次文案与主题色（都是 `cx` 的账），而闭包里
+        // 借不动它 —— 与扫描筛选那一排 chips 同一个做法，先收集成 vec 再挂上树。
+        // 多选态里不画：那颗勾在右上角，左上角再压一排小字是两层信息打架。
+        let tag_badges: Vec<AnyElement> = if selecting || card.tags.is_empty() {
+            Vec::new()
+        } else {
+            card.tags
+                .iter()
+                .take(2)
+                .map(|tag| {
+                    let (bg, fg) = tag_colors(*tag, cx);
+                    div()
+                        .rounded(px(4.))
+                        .px_1()
+                        .py(px(1.))
+                        .bg(bg)
+                        .text_color(fg)
+                        .text_size(px(TAG_BADGE_FONT))
+                        .child(tr(cx, tag_label(*tag)))
+                        .into_any_element()
+                })
+                .collect()
+        };
         // 菜单每次打开都重建一遍，闭包要一份自己的文案拷贝。
         let labels = labels.clone();
         // 组名与元素 id 用同一个串：指着的是整张卡，抬起来的却只有封面那一格，
@@ -444,6 +500,20 @@ impl ShelfView {
                                 .text_center()
                                 .text_color(muted_fg)
                                 .child(title.clone()),
+                        )
+                    })
+                    // 标签角标钉在封面左上角：与右上角那颗多选勾对角摆，两颗不打架。
+                    // 挂着的至多画两颗 —— 一颗已经说得出「我在读什么」，全画会盖住封面。
+                    .when(!tag_badges.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(6.))
+                                .left(px(6.))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .children(tag_badges),
                         )
                     })
                     .when(selecting && selected, |this| {

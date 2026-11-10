@@ -71,6 +71,9 @@ axum = { version = "0.8", features = ["multipart"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+# 网络导入卡上把 Wi-Fi 传书地址画成二维码。用 qrcode 的 `image` feature（同锁里那份
+# image 0.25，不产生第二个图像栈），其余默认特性（svg / pic）关掉——这里只要位图。
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
 # PNG 编码：只给 `folio_format::pdf` 那条栅格化用（hayro 交回的是像素，页的契约是
 # PNG 字节）。**不新增任何包**：`image` 自己就依赖 png 0.18.1，这里面只有一条直接边。
 # 为什么不走 `image::codecs::png`：同一张 1810×2048 的页，这一层实测 10 ms / 566 KB，

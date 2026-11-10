@@ -37,7 +37,6 @@
   const drop = document.getElementById('drop');
   const pick = document.getElementById('pick');
   const log = document.getElementById('log');
-  const pin = new URLSearchParams(location.search).get('pin') || '';
 
   drop.addEventListener('click', () => pick.click());
   ['dragover', 'dragenter'].forEach(ev =>
@@ -64,7 +63,7 @@
       const state = row(file.name, 'busy', '传输中…');
       const body = new FormData();
       body.append('file', file, file.name);
-      fetch('/upload?pin=' + encodeURIComponent(pin), { method: 'POST', body })
+      fetch('/upload', { method: 'POST', body })
         .then(resp => {
           if (resp.ok) { state.textContent = '✓ 已收到'; state.parentElement.className = 'ok'; }
           else { state.textContent = '✗ 失败（' + resp.status + '）'; state.parentElement.className = 'err'; }

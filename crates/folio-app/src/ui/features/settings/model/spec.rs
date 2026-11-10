@@ -12,7 +12,7 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::{AnyElement, App, SharedString};
+use gpui_kit::{AnyElement, App, SharedString, Window};
 
 use crate::ui::services::l10n::tr;
 
@@ -51,6 +51,10 @@ pub(crate) struct Row {
 /// `Rc<dyn Fn(SharedString, &mut App)>` 那一族会被 clippy 报 `type_complexity`，
 /// 而这一格在四个地方重复，起个名字比数它的复杂度便宜。
 pub(crate) type Setter<A> = Rc<dyn Fn(A, &mut App)>;
+
+/// 自定义行渲染器那一格：与 [`Setter`] 同一条理由，装了两参闭包的 `Rc` 写全了
+/// 同样会报 `type_complexity`。
+pub(crate) type CustomRender = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
 /// 行的控件种类。真源是 [`crate::ui::services::config::ConfigHolder`]，
 /// 这里只是把「读哪个字段、写哪个字段」钉死。
@@ -120,7 +124,9 @@ pub(crate) enum RowKind {
         /// 网格、预览这类**宽**内容要整条铺开；默认的左右两栏会把三列主题卡挤进控件那
         /// 一栏里。手机端不受这一格影响（它本来就把标题摆在上方）。
         vertical: bool,
-        render: Rc<dyn Fn(&App) -> AnyElement>,
+        /// 拿得到当前窗口：内容的版式要按窗口宽窄分档（外观页的预览卡，平板跟桌面
+        /// 一档、手机另档），那个判据 `SizeClass::of(window)` 只认窗口。
+        render: CustomRender,
     },
 }
 
@@ -263,7 +269,7 @@ impl Row {
     }
 
     pub(in crate::ui::features::settings) fn custom(
-        render: impl Fn(&App) -> AnyElement + 'static,
+        render: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
     ) -> Self {
         Self {
             title: SharedString::default(),
@@ -280,7 +286,7 @@ impl Row {
 
     pub(in crate::ui::features::settings) fn custom_titled(
         title: SharedString,
-        render: impl Fn(&App) -> AnyElement + 'static,
+        render: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
     ) -> Self {
         Self {
             title: SharedString::default(),
@@ -299,7 +305,7 @@ impl Row {
     /// 默认的「标题在左、控件在右」只适合一个开关或一个下拉框。
     pub(in crate::ui::features::settings) fn custom_block(
         title: SharedString,
-        render: impl Fn(&App) -> AnyElement + 'static,
+        render: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
     ) -> Self {
         Self {
             title: SharedString::default(),

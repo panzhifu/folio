@@ -98,7 +98,7 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
     group(
         tr(cx, "update.group"),
         vec![
-            Row::custom_titled(tr(cx, "update.group"), move |cx| {
+            Row::custom_titled(tr(cx, "update.group"), move |_, cx| {
                 let handle = update::handle(cx);
                 let status = handle
                     .as_ref()
@@ -145,7 +145,7 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
             // 「更新日志」独立一格，**不挂在检查后面**：读者到这一页要问的是「我手上这版改了
             // 什么」，那件事不需要先跑一次版本比较。正文按 `v{当前版本}` 那条 tag 取，
             // 所以装了 0.1.1 而最新是 0.2.0 时，这里讲的仍是 0.1.1。
-            Row::custom_titled(tr(cx, "update.notes"), move |cx| {
+            Row::custom_titled(tr(cx, "update.notes"), move |_, cx| {
                 // 规格里那两层的闭包都要 `'static`，所以借用在这一格就换成一份拥有权；
                 // 每一帧一份、每一次点击一份，`Entity` 的 clone 只是一次引用计数。
                 let card = card.clone();
@@ -194,7 +194,7 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
             //
             // **隐私那句话摆在按下之前**：日志里有《书名》与落盘路径（`import:` 那些行带的
             // 就是它们，见 `folio-core/src/ingest/import/pipeline.rs:974`），事后告知等于没告知。
-            Row::custom_titled(tr(cx, "feedback.title"), move |cx| {
+            Row::custom_titled(tr(cx, "feedback.title"), move |_, cx| {
                 let status = feedback::handle(cx)
                     .map(|entity| entity.read(cx).status().clone())
                     .unwrap_or_default();

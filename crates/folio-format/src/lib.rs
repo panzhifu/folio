@@ -196,11 +196,18 @@ pub use ext::{ChapterExt, FlowDocExt, FormatExt, PageTextExt};
 /// 变成「按 OPF spine 读」，章数、章序、章内文本与 locator 全变 —— 不 bump 的话
 /// 进度与批注会落在错的章。同 v8 口径：整库重扫，开书时逐本付。
 ///
+/// v15：**可重排 EPUB2 的 `<guide type="toc">` 目录页收成一章**（即使 spine 上标了
+/// `linear="no"`；见 `format::epub::KEEP_NONLINEAR`）。Kindle 导出的书常把排好版的
+/// 目录页当非线性内容，此前被整个滤掉，封面之后直接落到扉页（《搜神记》）。
+/// 只有「有 guide toc、该页在 spine 里、且被标成非线性」的书多一章，后面章号整体
+/// 后移一格；没命中的书章表逐项不变。同 v3 / v6 口径：不 bump 的话命中书的进度会
+/// 安静地指到隔壁那一章，所以整库重扫一次，开书时逐本付。
+///
 /// **这一格从此只管引擎，不管数据**：改 `assets/novel-rules.*.json` 里的任何一条模式或
 /// 阈值不必 bump —— [`rules_hash`] 那一格会说「规则表换了」，老库在开书时逐本重扫，
 /// 不必为一套正则发一版。要 bump 的仍然是动那台引擎：四条否决门的编排、号怎么读、
 /// 切点怎么落（`novel::detect`），因为那是「同一份表算出什么」变了。
-pub const INDEX_VERSION: i64 = 14;
+pub const INDEX_VERSION: i64 = 15;
 
 /// 这一格式的索引算自哪一份小说规则表 —— 交出**此刻生效**那一份的内容哈希。
 ///
