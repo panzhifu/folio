@@ -23,8 +23,8 @@ use super::{
     HeadDims, dir_of, extension_of, fragment_of, image_dims, image_dims_from_head,
     is_decodable_bitmap, resolve_href, shrink_image, stem_of,
 };
-use crate::ext::ChapterExt;
 use crate::Result;
+use crate::ext::ChapterExt;
 
 pub struct EpubAdapter;
 

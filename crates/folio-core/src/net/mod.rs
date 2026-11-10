@@ -1,9 +1,11 @@
 //! 出网与入网：folio 与外部世界打交道的两条路。
 //!
-//! - [`remote`] —— 远端传输的**协议与编排**（WebDAV 的 PROPFIND / GET / PUT 规则，
-//!   以及一个同步 `Transport` 抽象）。协议规则与实现分开，所以它们离线可测。
+//! - [`remote`] —— 远端传输的**协议与编排**。传输抽象与 WebDAV 已独立成
+//!   [`folio_net`] crate（「换 crate 不换形状」：这里沿用旧路径，消费方一行不改）。
+//!   协议规则与实现分开，所以它们离线可测。
 //! - [`translate`] —— 选区翻译：引擎 trait 与三只引擎（Google 免 key、OpenAI 兼容、
-//!   DeepL）的请求/响应解析。走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测
+//!   DeepL）的请求/响应解析。机制已独立成 [`folio_ai`] crate（与 [`ai`] 同 crate，
+//!   「同一件事的两张脸」）；走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测
 //!   （假传输 + fixture）。
 //! - [`ai`] —— 选区问 AI 与切章规则草案：**一层** provider（OpenAI 兼容的
 //!   `chat/completions`），地址与密钥共用 [`translate`] 那一档，错误分档与响应解析的形状
@@ -30,7 +32,11 @@ pub mod cloud;
 pub mod lansync;
 pub mod opds;
 pub mod redeem;
-pub mod remote;
 pub mod transfer;
 pub mod translate;
 pub mod update;
+
+// 传输层已独立成 `folio-net` crate（Transport / RemoteStore / Sink / WebDAV）。
+// 旧路径沿用：`folio_core::net::remote::*` 与 crate 内的 `crate::net::remote::*`
+// 都解析到它，消费方（含 `error.rs` 的 `#[from]`）一行不改。
+pub use folio_net as remote;

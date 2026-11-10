@@ -40,7 +40,6 @@ use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
 };
 
-
 use crate::css::ua;
 
 /// 一章扫出来的几样东西。

@@ -124,8 +124,11 @@ pub fn civil_from_days(epoch_day: i64) -> CivilDate {
 /// `day` 允许越界（32 日 = 下个月 1 日，0 日 = 上个月最后一天）：调用方算月份边界时
 /// 靠这一条做进位，所以从月初起再加天数，而不是要求合法日期。
 pub fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let first = NaiveDate::from_ymd_opt(year, month.clamp(1, 12), 1)
-        .unwrap_or(if year < 0 { NaiveDate::MIN } else { NaiveDate::MAX });
+    let first = NaiveDate::from_ymd_opt(year, month.clamp(1, 12), 1).unwrap_or(if year < 0 {
+        NaiveDate::MIN
+    } else {
+        NaiveDate::MAX
+    });
     let date = first
         .checked_add_signed(TimeDelta::days(i64::from(day) - 1))
         .unwrap_or(first);
@@ -149,7 +152,9 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 
 /// 日序号是星期几。0 = 周一 … 6 = 周日（1970-01-01 是周四，所以偏 3）。
 pub fn weekday_monday0(epoch_day: i64) -> usize {
-    date_from_epoch_day(epoch_day).weekday().num_days_from_monday() as usize
+    date_from_epoch_day(epoch_day)
+        .weekday()
+        .num_days_from_monday() as usize
 }
 
 /// 日序号 → `YYYY-MM-DD`。

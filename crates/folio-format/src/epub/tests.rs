@@ -4,12 +4,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ext::ChapterExt;
 use super::read_with;
 use crate::css::computed::{ComputedStyle, Length, TextAlign, cascade};
 use crate::css::{Origin, RuleSet};
 use crate::detect;
 use crate::dom::Dom;
+use crate::ext::ChapterExt;
 use crate::fixtures::{CONTAINER, published_shape_epub, write_epub};
 use crate::{
     Chapter, Content, DocMeta, DocumentProvider, FlowDoc, Format, ParseBudget, dir_of, resolve_href,

@@ -1,82 +1,23 @@
 /target
-
-# 本地真书样本一律不入库。
-# tests/fixtures/local/ 放你自己拥有的书，只用于本机冒烟与观感验收；
-# 提交它们等于公开再分发，private 仓库和事后删除都改变不了这个性质。
-# 需要可提交的样本时，用 tests/fixtures/oss/ 里由测试自己合成的 EPUB。
 /tests/fixtures/local/
-
-# 本机专属的 agent 权限设置，不该跟着仓库走。
 .qoder/settings.local.json
-
-# skills CLI 每装一条技能都会给它能认的每个 agent 目录各做一份 symlink，指向
-# .agents/skills/ 里那份真身。读取路径只有那一份（见 AGENTS.md 的技能一节），
-# 这些副本进了版本库就是第二真相源，而且指的还是别的机器上的相对路径。
 /.claude/
 /.qoder/skills/
-
-# `impeccable` 自带的那份字体索引：1,100,013 字节，正卡在 jj 快照新文件的 1 MiB
-# 上限之外，`jj status` 一直在拒绝收它（要收就得提 `snapshot.max-new-file-size`，
-# 那是改仓库行为来迁就一个第三方技能的资产）。它不是代码也不是本仓库的判断 ——
-# 技能重装一次就自己回到盘上（`npx skills add pbakaus/impeccable`），所以让它留在
-# 本机。代价写清楚：新克隆里这一格是缺的，跑 impeccable 自己的脚本要先重装一次技能。
 /.agents/skills/impeccable/scripts/data/font-index.json
-
-# spike 证据截图是整张桌面抓取，含其他窗口内容，只留在本机。
-/docs/assets-*.png
-
-# 界面实测截图（统计页那三张图的量屏产物）同样不入库。
-# 这一批只量**当时那一帧的观感**：改了布局就立刻过期，而像素没法复核，留在版本库里
-# 就是一份没人能验证的第二真相源。实测出来的结论写在代码注释与测试断言里 ——
-# 那两处才是能被人重跑一遍的东西。
-/screenshots/
-
-# 编辑器的会话产物（每次会话一份带随机 id 的设计稿快照）。
-# 它写的是**当时**的设计意图，与 plans/ 里那份会被持续维护的正式稿是两回事 ——
-# 提交进来就等于在版本库里留一个必然过期的第二真相源，日后没人分得清哪份算数。
-/.zcode/
-
-# 借鉴用的上游仓库克隆（LaTeX 等），只读、体积大，一律不入库。
-# 里面放什么、怎么重新拉取见 reference/README.md。
+/docs
+/.zcode
 /reference/
-
-# 设计稿目录只留本机（9fa3354 起从仓库移除，有意不再跟踪）。
-# 代码注释里引用的 plans/听书.md、plans/facts.md 等以本机这份为准；
-# 新克隆要整目录找回：`git show 9fa3354^:plans` 或 `git archive 9fa3354^ plans | tar -x`。
-# 它必须留在 ignore 里：jj 会把未被 ignore 的文件全收进当前 change，规则一撤，
-# 整目录就被卷进下一笔提交。
-/plans/
-
-# Android 产物一律不入库。
-# jniLibs/*.so 是 cargo-ndk 每次构建重新生成的（debug 版单份就有 400M+），
-# gradle 的 build/ 与 .gradle/ 是它的缓存，local.properties 里写的是本机的 SDK 绝对路径 ——
-# 这四样都能在别的机器上由 `cargo ndk` + `./gradlew` 重建出来，提交只会让仓库膨胀且必然冲突。
 crates/folio-app/android/app/src/main/jniLibs/
 crates/folio-app/android/**/build/
 crates/folio-app/android/.gradle/
 crates/folio-app/android/local.properties
-
-# 封面与缩略图的磁盘缓存。文件名是内容的哈希（`<书库>/covers/<哈希>.png`、
-# `<书库>/.thumbs/<像素数>/<哈希>.jpg`，见 `crates/folio-core/src/infra/paths.rs`），
-# 由 `content/format/cover.rs` 与 `content/format/thumb.rs` 在需要时现生成，
-# 整目录删掉只需重跑生成 —— 测试或应用只要拿 `tests/fixtures/oss/` 当书库根跑一次就会出现这一对，
-# 提交进来就是第二真相源，而且每次跑测试都可能换一张。
 /tests/fixtures/oss/covers/
 /tests/fixtures/oss/.thumbs/
-
-# 签 release APK 用的 keystore 与它的口令文件绝不入库。
-# 这两样一旦进版本库，任何拿到仓库副本的人都能**以 folio 的名义发更新**，而且这件事换不掉：
-# 换 keystore 等于所有已装用户必须卸载重装（系统按签名判「是不是同一个应用」，签名对不上就不给
-# 覆盖安装）。真正的防线是把它们放在仓库之外，这三条只是防手滑的兜底。
-# 本机的存放位置与备份约定见 `plans/更新与发布.md` §六。
 *.keystore
 *.jks
 keystore.properties
-
-# doc/design 的设计稿生成器一跑就留下这份字节码缓存（generate.py import _kit.py 的产物）。
-# 源文件在库里、缓存随时由解释器再生，入库只是一份随时可能与源不同步的噪音。
-__pycache__/
-
-# 百度网盘 OAuth 的构建期凭据（方案 A：只喂给 cargo 的环境变量，不进仓库）。
-# 值从百度开放平台的控制台取；这个文件由 `scripts/build-android.sh` 读进来。
 .baidu-creds
+/cloudbase
+/cloudfunctions
+/.cloudbase
+/cloudbaserc.json

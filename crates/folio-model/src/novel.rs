@@ -127,7 +127,9 @@ mod tests {
 
     /// serde 表示是契约（model 的第三条规矩）：core 的配置把这一层 `#[serde(flatten)]`
     /// 进 `novel` 一节，这里的键名与省略行为一变，读者手里的配置文件就解不开。
-    /// 这条对拍锁的是 flatten 之后的**实际形状**：缺省格省略、自定义条目整段展开。
+    /// 这条对拍锁的是 flatten 之后的**实际形状**：读取时缺省格靠 `#[serde(default)]`
+    /// 补齐；写出时 `None` 落成 `null` —— `#[serde(default)]` 管读不管写，这与搬进
+    /// model 之前 folio-format 那份 `Marker` 逐字节一致，配置文件零迁移。
     #[test]
     fn the_flattened_config_shape_round_trips() {
         let edits = Edits {
@@ -164,9 +166,10 @@ mod tests {
             back["extra"][0]["kind"], "regex",
             "小写键名是配置文件里看得见的那一格"
         );
-        assert!(
-            back["extra"][0].get("text").is_none(),
-            "None 不写进 JSON（default 空档在文件里不占格子）"
+        assert_eq!(
+            back["extra"][0]["text"],
+            serde_json::Value::Null,
+            "None 落成 null：[serde(default)] 只管读取时缺格，写出时不省略"
         );
     }
 

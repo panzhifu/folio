@@ -93,8 +93,8 @@ use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, FontBytes, FontRef,
     Format, HeadDims, ImageRes, image_dims, image_dims_from_head, shrink_image, stem_of,
 };
-use crate::ext::ChapterExt;
 use crate::Result;
+use crate::ext::ChapterExt;
 
 /// 封面上限与 EPUB / FB2 同一条口径。
 const COVER_MAX_EDGE: u32 = 512;
@@ -1160,8 +1160,8 @@ mod tests {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
 
-    use crate::ext::ChapterExt;
     use super::{MobiAdapter, Rewrite, header, rawml, rewrite_html};
+    use crate::ext::ChapterExt;
     use crate::{Content, DocumentProvider, Format};
 
     /// 一张真 PNG（喂 `image_dims` 与封面缩放用）。

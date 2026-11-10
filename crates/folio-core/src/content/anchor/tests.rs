@@ -6,8 +6,8 @@
 
 use std::ops::Range;
 
-use crate::content::anchor::TextAnchorExt;
 use crate::PageTextExt;
+use crate::content::anchor::TextAnchorExt;
 use crate::content::anchor::{
     CONTEXT_CHARS, CharLines, Confidence, Relocated, TextAnchor, TextMap, line_at_offset,
     line_at_offset_indexed, line_at_y, line_chars, line_offset, relocate,

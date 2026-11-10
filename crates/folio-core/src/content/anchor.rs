@@ -31,8 +31,6 @@
 
 use std::ops::Range;
 
-
-
 use crate::content::dom::Dom;
 use crate::layout::{Layout, LineFragment};
 

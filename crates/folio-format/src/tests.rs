@@ -1,10 +1,10 @@
 //! href 的 fragment 拆分、目录条目在 SQLite 那一列上的往返，以及分章位置的存法。
 
-use crate::ext::FormatExt;
 use super::{
     Chapter, ChapterLocator, ChapterText, Format, HeadDims, TocEntry, fragment_of,
     image_dims_from_head, locator_for, media_extension, shrink_image,
 };
+use crate::ext::FormatExt;
 
 /// 造一张真位图 —— `shrink_image` 要真的解码+重编，够 header 的假字节过不了。
 fn png(width: u32, height: u32) -> Vec<u8> {

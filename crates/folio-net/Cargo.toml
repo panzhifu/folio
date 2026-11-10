@@ -1,0 +1,24 @@
+[package]
+name = "folio-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 出网的地层：传输抽象（Transport / RemoteStore / Sink）与 WebDAV 协议的读取层。
+# 从 folio-core::net::remote 原样搬来（「换 crate 不换形状」：core 经模块别名沿用
+# 旧路径，所有消费方一行不改）。这一层只认识「把请求发出去、把响应拿回来」，
+# 不认识书库、配置与业务错误词汇 —— 它自己的 `Error` 与 `Result` 就在这里。
+
+[dependencies]
+folio-base.workspace = true
+base64.workspace = true
+quick-xml.workspace = true
+ureq.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# 假传输（`dav::Mock`）：folio-core 的网盘测试与传书测试共用这一个。
+[features]
+test-support = []

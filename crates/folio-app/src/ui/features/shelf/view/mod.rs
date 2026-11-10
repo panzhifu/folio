@@ -40,9 +40,9 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use folio_core::FormatExt;
 use folio_core::net::remote::Transport;
 use folio_core::store::Collection;
-use folio_core::FormatExt;
 use folio_core::{
     Cancel, Format, ImportOutcome, ImportReport, Imported, PathsSource, Store, TaskEvent,
     UrlSource, submit_import,

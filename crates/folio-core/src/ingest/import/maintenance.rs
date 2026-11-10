@@ -9,7 +9,6 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use folio_format::ext::FormatExt;
 use crate::content::format::Format;
 use crate::error::IoResultExt as _;
 use crate::infra::paths;
@@ -17,6 +16,7 @@ use crate::infra::task::StageCtx;
 use crate::ingest::identity;
 use crate::store::BookRow;
 use crate::store::Store;
+use folio_format::ext::FormatExt;
 
 /// 一趟补齐：给「还没有内容身份」的行算哈希，并把旧名字的副本改成哈希名。
 ///

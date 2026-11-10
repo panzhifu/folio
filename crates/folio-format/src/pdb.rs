@@ -30,8 +30,8 @@ use std::path::Path;
 use super::palmdb::PalmDb;
 use super::text::{self, PlainFamily};
 use super::{Content, DocMeta, DocumentProvider, Format, stem_of};
-use crate::ext::ChapterExt;
 use crate::Result;
+use crate::ext::ChapterExt;
 
 /// PalmDoc 头至少要有这么多字节（压缩方式 + 未用 + 正文长度 + 记录数 + 记录大小 + 加密方式 + 未用）。
 const HEADER_MIN: usize = 16;

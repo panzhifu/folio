@@ -1,0 +1,19 @@
+[package]
+name = "folio-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# AI 问答与选区翻译：把一段书本文交给一个外部模型、拿回一段文字（「同一件事的
+# 两张脸」，共享传输、错误分档与语言名）。从 folio-core::net 的 ai / translate
+# 原样搬来（「换 crate 不换形状」：core 经 shim 沿用旧路径）。这一层不认识配置
+# 文件 —— 选项由调用方拆成纯字段递进来。
+
+[dependencies]
+folio-net.workspace = true
+folio-base.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

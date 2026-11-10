@@ -1,0 +1,26 @@
+[package]
+name = "folio-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 排版引擎：Dom + StyledDom → 扁平的 BlockBox / LineBox 两张表。从
+# folio-core::layout 原样搬来（「换 crate 不换形状」：core 经模块别名沿用旧路径）。
+# 零 GPUI 依赖的硬边界在这里延续；本 crate 不认识配置文件 —— 对读者偏好只要求
+# `Serialize`（core 把整份 config::Reader 直接递进来）。
+
+[dependencies]
+folio-format.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+unicode-linebreak.workspace = true
+unicode-script.workspace = true
+
+[dev-dependencies]
+# 真书用例（`tests.rs` 里那几条「开真书」的门）要经 folio-core 的统一文档接口开书。
+# dev-dependency 的环是 cargo 明许的形状：follio-core 正常依赖本 crate，本 crate 只在
+# 测试里回头依赖它。
+folio-core.workspace = true

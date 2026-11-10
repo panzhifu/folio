@@ -5,24 +5,20 @@
 //! 与 `engine_input_contract.rs` 同一套扫法：剥掉 `//` 行注释后按子串匹配 ——
 //! `use crate::store::X` 与内联的 `crate::store::X` 一视同仁，注释里提到不算。
 //!
-//! 白名单是**已知欠账**，每条注明由哪一刀还（`doc/后端架构评审与优化.md`）；
-//! 还清一条删一条，删空之后这条门就是严格的。新增越界直接红，不许再进白名单。
+//! 白名单曾记**已知欠账**，每条注明由哪一刀还；还清一条删一条，现在已删空，
+//! 这条门是严格的。新增越界直接红，不许再进白名单。
 
 use std::path::{Path, PathBuf};
 
 /// (分区目录, 被禁的路径前缀, 白名单: (相对 src 的文件路径, 欠账说明))
 const BANS: &[(&str, &[&str], &[(&str, &str)])] = &[
     // 内容区只往「下」依赖（folio-format / folio-model / infra），不认识存储与导入。
-    (
-        "content",
-        &["crate::store", "crate::ingest"],
-        &[],
-    ),
+    ("content", &["crate::store", "crate::ingest"], &[]),
     // 存储层不认识网络协议：同步 DTO 归 sync，SQL 只吃数据形状。
     ("store", &["crate::net"], &[]),
-    // infra 是叶子，被所有人依赖而不依赖任何功能分区；组合根与错误聚合
-    // 搬到 crate 根之后（刀 5），这里剩下的应该只有 config 的 account 一处
-    // （account 不在禁单里，见 infra/mod.rs 头注释的 settings 层欠账）。
+    // infra 是叶子，被所有人依赖而不依赖任何功能分区。组合根与错误聚合搬到
+    // crate 根（刀 5）、novel / ImageScale 归位 folio-model（刀 6）之后，
+    // 这一格已无欠账，白名单为空。
     (
         "infra",
         &[
@@ -32,10 +28,7 @@ const BANS: &[(&str, &[&str], &[(&str, &str)])] = &[
             "crate::content",
             "crate::layout",
         ],
-        &[
-            // 刀 6 还：novel / ImageScale 类型搬 folio-model。
-            ("infra/config.rs", "novel 与 ImageScale 还引用 content/store 类型"),
-        ],
+        &[],
     ),
 ];
 

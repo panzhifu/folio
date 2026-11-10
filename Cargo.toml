@@ -5,6 +5,9 @@ members = [
     "crates/folio-base",
     "crates/folio-model",
     "crates/folio-format",
+    "crates/folio-net",
+    "crates/folio-ai",
+    "crates/folio-render",
     "crates/folio-core",
     "crates/folio-app",
 ]
@@ -20,8 +23,11 @@ license = "MIT"
 [workspace.dependencies]
 folio-base = { path = "crates/folio-base" }
 folio-model = { path = "crates/folio-model" }
-folio-core = { path = "crates/folio-core" }
 folio-format = { path = "crates/folio-format" }
+folio-net = { path = "crates/folio-net" }
+folio-ai = { path = "crates/folio-ai" }
+folio-render = { path = "crates/folio-render" }
+folio-core = { path = "crates/folio-core" }
 
 # 走 git main 而不是 crates.io：上游每周发版，发布版落后一到两周，且主题目录
 # `themes/` 只存在于源码树里（发布出去的 crate 不带）。Cargo.lock 记录具体 commit，

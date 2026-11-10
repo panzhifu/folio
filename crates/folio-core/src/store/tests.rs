@@ -5,10 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ChapterExt;
-use crate::FlowDocExt;
 use crate::AnnotationStyle;
 use crate::BookSettings;
+use crate::ChapterExt;
+use crate::FlowDocExt;
 use crate::Reader;
 use crate::Store;
 use crate::content::format::{

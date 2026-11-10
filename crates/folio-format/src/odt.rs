@@ -31,8 +31,8 @@ use super::{
 // 归约产物的转义与「本章引用了哪几张登记过的图」只有一份实现（见 `super::escape_text`
 // 与 `super::chapter_images` 那两条注释）。
 use super::{chapter_images, escape_attr, escape_into};
-use crate::ext::ChapterExt;
 use crate::Result;
+use crate::ext::ChapterExt;
 
 pub struct OdtAdapter;
 

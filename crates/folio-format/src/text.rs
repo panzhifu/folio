@@ -19,8 +19,8 @@ use std::path::Path;
 use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, TocEntry, stem_of,
 };
-use crate::ext::ChapterExt;
 use crate::Result;
+use crate::ext::ChapterExt;
 use crate::novel;
 
 /// 按规则表分章的 `.txt`（纯文本电子书的主要形态）。
@@ -259,8 +259,8 @@ pub(crate) mod test_support {
     use std::path::PathBuf;
 
     use crate::dom::Dom;
-    use crate::text_map::TextMap;
     use crate::ext::ChapterExt;
+    use crate::text_map::TextMap;
     use crate::{Chapter, DocMeta, FlowDoc};
 
     /// 把内容写进临时文件，经公开的 `open()` 读回来，并按位置把每一章的正文取上。

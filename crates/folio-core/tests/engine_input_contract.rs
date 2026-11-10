@@ -12,15 +12,16 @@
 
 use std::path::{Path, PathBuf};
 
-/// 引擎的三层已经分居两个 crate：排版本体（`layout`）在 folio-core，样式与 DOM
+/// 引擎的三层已经分居三个 crate：排版本体（`layout`）独立成 folio-render，样式与 DOM
 /// （`css/`、`dom.rs`）随 folio-format 抽取搬了过去 —— 它们是**排版用的样式层**，
 /// 与「哪个 provider 读容器」无关，所以契约跟着边界走，扫描一并覆盖过去。
 /// `content/document/` 不在其列：那是格式差异的出口。
 ///
 /// 这条断言本身就是「路径写错了会红」（「一个 .rs 都没有」就是路径错了，不是过了）。
-/// 它在 `content/` 分区与 folio-format 抽取之后各红过一次，都是它该做的事。
+/// 它在 `content/` 分区、folio-format 抽取与 folio-render 独立之后各红过一次，
+/// 都是它该做的事。
 const ENGINE_DIRS: &[(&str, &str)] = &[
-    ("folio-core", "src/layout"),
+    ("folio-render", "src"),
     ("folio-format", "src/css"),
     ("folio-format", "src/dom.rs"),
 ];

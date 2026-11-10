@@ -11,12 +11,12 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::Store;
-use folio_format::ext::ChapterExt;
 use crate::Result;
 use crate::content::format::{
     Chapter, ChapterLocator, ChapterText, Content, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
     locator_for,
 };
+use folio_format::ext::ChapterExt;
 
 /// `books.css` 列的载荷。正文出库之后样式表同样「库里只存位置」：
 /// 导入索引只记容器里的 href 清单（[`CssStored::At`]），打开时回容器现取；

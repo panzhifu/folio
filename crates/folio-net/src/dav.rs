@@ -1,0 +1,667 @@
+//! WebDAV 协议：该发什么、回来的东西怎么读。
+//!
+//! 这一层不含 socket，也不含 gpui，所以每条规则都能离线测。注释写的大多不是「RFC 怎么说」，
+//! 而是「各家实现和 RFC 不一致时我们站哪边」—— 后者才是以后想改却不该随手改的那个东西。
+
+use std::sync::Arc;
+
+use base64::Engine as _;
+use quick_xml::Reader;
+use quick_xml::events::Event;
+
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::VecDeque;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::Mutex;
+
+use super::{
+    Cancel, Error, Method, RemoteStore, Request, Response, Result, Sink, Source, Transport,
+    redact_url,
+};
+
+/// PROPFIND 的请求体。
+///
+/// 只取这五个属性，且全部在 `DAV:` 命名空间里：`resourcetype` 里的 `<collection/>` 用来判
+/// 目录（比只看 `href` 尾斜杠可靠，有些服务器对目录不给尾斜杠），`getcontentlength` 给下载
+/// 进度定分母，`displayname` 给中文书名用（路径末段有时带扩展名或被重写过），
+/// `getetag` 与 `getlastmodified` 留给备份合并判断「远端这份变过没有」。
+const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/><d:displayname/><d:getetag/></d:prop></d:propfind>"#;
+
+/// 一个远端入口：Base URL 加凭据。
+///
+/// 凭据在这里只是字符串。落盘、读钥匙串都是上层的事，本层既不存也不写，所以拿到它的地方
+/// 只可能是内存里那一小段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    /// 构造时补成以 `/` 结尾，于是拼路径只需要加、不需要判分隔符。
+    pub base: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl Endpoint {
+    pub fn new(
+        base: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        let mut base = base.into();
+        if !base.ends_with('/') {
+            base.push('/');
+        }
+        Self {
+            base,
+            username: username.into(),
+            password: password.into(),
+        }
+    }
+
+    /// Base URL 里「主机之后那一段」。反解 `href` 要拿它当基准：不少服务器把 WebDAV 挂在
+    /// 子路径下（`https://host/dav/books/`），而它返回的 `href` 是带这段的绝对路径。
+    fn path_prefix(&self) -> &str {
+        let after_scheme = self
+            .base
+            .split_once("://")
+            .map_or(self.base.as_str(), |(_, rest)| rest);
+        match after_scheme.find('/') {
+            Some(i) => &after_scheme[i..],
+            None => "/",
+        }
+    }
+
+    /// Basic 认证头。一期只发 Basic：值是 `user:pass` 的 base64，可逆，所以这条头只在
+    /// https 下有意义 —— 这一点得由界面说清，本层没法替它加密。
+    fn basic_header(&self) -> String {
+        let pair = format!("{}:{}", self.username, self.password);
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(pair.as_bytes())
+        )
+    }
+
+    /// 把相对路径拼成请求 URL；`dir` 为真时补尾斜杠（集合查询）。
+    fn url(&self, path: &str, dir: bool) -> String {
+        let mut url = self.base.clone();
+        url.push_str(&encode_path(path));
+        if dir && !url.ends_with('/') {
+            url.push('/');
+        }
+        url
+    }
+}
+
+/// 列表里的一行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// 显示名：`displayname` 优先，没有就从路径末段取。
+    pub name: String,
+    /// 相对 Base 的路径：已百分号解码、用 `/` 分隔、不带尾斜杠。上层只认这个。
+    pub path: String,
+    pub is_dir: bool,
+    /// 字节数。拿不到就是拿不到，别把它当「一定是这个大小」用。
+    pub size: Option<u64>,
+    /// 原样留着，不解析：`getlastmodified` 各家写法不齐（RFC 1123、ISO 8601、带不带时区的
+    /// 都有），而一期只有「按名字排」这一种排序需求，为一个显示字段拖进日期库不值。
+    pub modified: Option<String>,
+    pub etag: Option<String>,
+}
+
+/// 对一个入口做 DAV 操作。传输是注入进来的，所以 core 这边不需要任何 runtime 就能测完。
+pub struct Client {
+    endpoint: Endpoint,
+    transport: Arc<dyn Transport>,
+}
+
+impl Client {
+    pub fn new(endpoint: Endpoint, transport: Arc<dyn Transport>) -> Self {
+        Self {
+            endpoint,
+            transport,
+        }
+    }
+
+    /// 列一层。`path` 为空就是根。
+    pub fn list(&self, path: &str) -> Result<Vec<Entry>> {
+        let resp = self
+            .transport
+            .request(propfind_request(&self.endpoint, path))?;
+        check_status(&resp, &[207, 200])?;
+        let raw = parse_multistatus(&String::from_utf8_lossy(&resp.body))?;
+        let entries = children(&self.endpoint, path, &raw);
+        tracing::debug!(
+            "dav: 列出 {:?} → 服务器回 {} 条，收成 {} 条",
+            path,
+            raw.len(),
+            entries.len()
+        );
+        Ok(entries)
+    }
+
+    /// 读一个小对象（备份那份 JSON）。整本书走 [`Client::download`]，不要读进内存。
+    pub fn get(&self, path: &str) -> Result<Vec<u8>> {
+        let resp = self
+            .transport
+            .request(self.authed(Method::Get, path, false))?;
+        check_status(&resp, &[200, 206])?;
+        Ok(resp.body)
+    }
+
+    /// 写一个小对象。父目录必须已存在，所以流程上是 `mkdir` 在前。
+    pub fn put(&self, path: &str, body: Vec<u8>) -> Result<()> {
+        let mut req = self.authed(Method::Put, path, false);
+        // 声明成 octet-stream 而不是 json：这里的内容是我们自己写的，不需要服务器解释，
+        // 而各家对 octet-stream 的接受度是唯一一个能当常量用的东西。
+        req.headers
+            .push(("Content-Type".into(), "application/octet-stream".into()));
+        req.body = body;
+        let resp = self.transport.request(req)?;
+        check_status(&resp, &[201, 204, 200])
+    }
+
+    /// 建集合（目录）。
+    ///
+    /// 「已经存在」在协议上没有统一说法（405 / 409 / 423 都见得到），而备份流程要的是
+    /// 「这个目录可用」，不是「我亲手建了它」，所以这三种都算成功。
+    pub fn mkdir(&self, path: &str) -> Result<()> {
+        let resp = self
+            .transport
+            .request(self.authed(Method::Mkcol, path, true))?;
+        if matches!(resp.status, 201 | 200 | 405 | 409 | 423) {
+            return Ok(());
+        }
+        check_status(&resp, &[207])
+    }
+
+    /// 下载到一个 [`Sink`]。字节怎么落地（临时文件、改名、清理）是 sink 的事。
+    pub fn download(&self, path: &str, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64> {
+        let got = self
+            .transport
+            .download(self.authed(Method::Get, path, false), sink, cancel);
+        match &got {
+            Ok(bytes) => tracing::debug!("dav: 下载 {:?} → {bytes} 字节", path),
+            // 取消与真失败在界面上是两种表现（一个安静地回到原页，一个报错），
+            // 日志里也要分得开。
+            Err(Error::Cancelled) => tracing::debug!("dav: 下载 {:?} 被取消", path),
+            Err(err) => tracing::warn!("dav: 下载 {:?} 失败：{err}", path),
+        }
+        got
+    }
+
+    fn authed(&self, method: Method, path: &str, dir: bool) -> Request {
+        let header = self.endpoint.basic_header();
+        let req =
+            Request::new(method, self.endpoint.url(path, dir)).header("Authorization", header);
+        tracing::debug!("dav: {} {}", method.as_str(), redact_url(&req.url));
+        req
+    }
+}
+
+impl RemoteStore for Client {
+    fn list(&self, path: &str) -> Result<Vec<Entry>> {
+        Client::list(self, path)
+    }
+
+    fn get(&self, path: &str) -> Result<Vec<u8>> {
+        Client::get(self, path)
+    }
+
+    fn put(&self, path: &str, body: Vec<u8>) -> Result<()> {
+        Client::put(self, path, body)
+    }
+
+    fn mkdir(&self, path: &str) -> Result<()> {
+        Client::mkdir(self, path)
+    }
+
+    fn download(&self, path: &str, sink: &mut dyn Sink, cancel: &Cancel) -> Result<u64> {
+        Client::download(self, path, sink, cancel)
+    }
+
+    /// 书文件按流发：`Client::put` 收一整块 `Vec`，那是给同步快照那种几 KB 的
+    /// 小对象用的；一本几百 MB 的书走这条。
+    fn put_file(
+        &self,
+        path: &str,
+        source: &mut dyn Source,
+        size: u64,
+        _cancel: &Cancel,
+    ) -> Result<u64> {
+        let mut req = self.authed(Method::Put, path, false);
+        req.headers
+            .push(("Content-Type".into(), "application/octet-stream".into()));
+        let mut reader = super::SourceReader(source);
+        let resp = self.transport.upload(req, &mut reader, size)?;
+        check_status(&resp, &[201, 204, 200])?;
+        Ok(size)
+    }
+}
+
+/// 组装一次 `Depth: 1` 的 PROPFIND。
+///
+/// `Depth` 是建议而不是命令，网盘类实现尤其会无视它并递归返回整棵树 —— 所以「只取一层」
+/// 最终由 [`children`] 按相对路径的段数裁，而不是指望这个头。
+fn propfind_request(endpoint: &Endpoint, path: &str) -> Request {
+    let url = endpoint.url(path, true);
+    tracing::debug!("dav: PROPFIND {} (Depth: 1)", redact_url(&url));
+    Request::new(Method::Propfind, url)
+        .header("Authorization", endpoint.basic_header())
+        .header("Depth", "1")
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .body(PROPFIND_BODY.as_bytes().to_vec())
+}
+
+/// 状态码 → 成功，或者一条说得出下一步的错。
+///
+/// 207 Multi-Status 才是 PROPFIND 的成功，不是 200。401 要分「Basic 没过去」和「这台只认
+/// Digest」：两者的修法完全不同，混成一条等于让用户对着密码框盲猜。
+fn check_status(resp: &Response, ok: &[u16]) -> Result<()> {
+    if ok.contains(&resp.status) {
+        return Ok(());
+    }
+    match resp.status {
+        401 => {
+            let challenge = resp
+                .header("www-authenticate")
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if challenge.contains("digest") && !challenge.contains("basic") {
+                Err(Error::DigestRequired)
+            } else {
+                Err(Error::Unauthorized { status: 401 })
+            }
+        }
+        403 => Err(Error::Forbidden { status: 403 }),
+        404 => Err(Error::NotFound),
+        // 对 PROPFIND 回 405 说明这个端点根本不是 WebDAV —— 最常见是把网页地址或 API 根
+        // 填成了 Base。这时候报「找不到」或「未授权」会把人带到别处去查。
+        405 => Err(Error::NotWebDav),
+        other => Err(Error::Unexpected { status: other }),
+    }
+}
+
+/// 一条 `<response>` 的原始内容，还没变成 [`Entry`]。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Raw {
+    href: String,
+    display: String,
+    size: Option<u64>,
+    modified: String,
+    etag: String,
+    is_dir: bool,
+    /// 这个资源**自己**的状态（直接挂在 `<response>` 下的那个 `<status>`）。
+    /// 服务器会把查不到的资源也塞回来，靠这个字段筛掉。
+    status: Option<u16>,
+}
+
+/// 正在读的是哪个标量属性。
+///
+/// 这个标记**只在对应的结束标签处清掉**，不在文本事件里清：一个值会被拆成多个事件送来 ——
+/// 实体引用（`&amp;`、`&#20013;`）在 quick-xml 里根本不是文本事件，而是独立的
+/// `Event::GeneralRef`。一见值就清标记的结果是只留下头一段，长书名会被截断，
+/// 而书名里的 `&` 会整段消失（两条都是实测，见 `entity_in_a_display_name_survives_whole`）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Href,
+    Status,
+    Display,
+    Modified,
+    Etag,
+}
+
+/// 把一个文本片段落到当前条目上。文本事件与实体引用事件共用这一条路径。
+fn feed_text(cur: &mut Option<Raw>, field: Option<Field>, in_prop: bool, prop: &str, text: &str) {
+    match field {
+        // 值可能散在多个事件里，所以一律累加。
+        Some(Field::Href) => push(cur, |r| r.href.push_str(text)),
+        Some(Field::Status) => {
+            let code = status_code(text);
+            push(cur, |r| r.status = code.or(r.status));
+        }
+        Some(Field::Display) => push(cur, |r| r.display.push_str(text)),
+        Some(Field::Modified) => push(cur, |r| r.modified.push_str(text)),
+        Some(Field::Etag) => push(cur, |r| r.etag.push_str(text)),
+        // 这三个属性没有独立的结构标签可认，只能靠 `<prop>` 里记下的元素名。
+        None if in_prop && prop == "getcontentlength" => {
+            let size = text.trim().parse::<u64>().ok();
+            push(cur, |r| r.size = size.or(r.size));
+        }
+        None => {}
+    }
+}
+
+/// 解 207 Multi-Status。
+///
+/// 命名空间前缀一律不看：`<d:response>` 与 `<response>`（默认命名空间写法）都收，
+/// 真实服务器上两种输出都撞得到。
+///
+/// 这里**不开** `trim_text`：值里的空白有意义 —— `蜗牛 & 熊` 会被拆成三个事件，
+/// 逐事件裁剪正好把 `&` 两侧的空格剪掉。空白噪声改在最后取值时一次 `trim` 处理。
+fn parse_multistatus(xml: &str) -> Result<Vec<Raw>> {
+    let mut reader = Reader::from_reader(xml.as_bytes());
+
+    let mut out: Vec<Raw> = Vec::new();
+    let mut cur: Option<Raw> = None;
+    // 属性表内外的意义完全不同：`<prop>` 里面的元素名才是属性名，外面的是结构元素。
+    let mut in_prop = false;
+    let mut field: Option<Field> = None;
+    let mut prop = String::new();
+
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| Error::Malformed(e.to_string()))?
+        {
+            Event::Eof => break,
+            Event::Start(e) => {
+                let name = e.name();
+                let local = local_name(name.as_ref());
+                match local {
+                    "response" => cur = Some(Raw::default()),
+                    "href" if cur.is_some() && !in_prop => field = Some(Field::Href),
+                    "status" if cur.is_some() && !in_prop => field = Some(Field::Status),
+                    "displayname" if in_prop => field = Some(Field::Display),
+                    "getlastmodified" if in_prop => field = Some(Field::Modified),
+                    "getetag" if in_prop => field = Some(Field::Etag),
+                    "collection" if in_prop => {
+                        if let Some(r) = cur.as_mut() {
+                            r.is_dir = true;
+                        }
+                    }
+                    "prop" => in_prop = true,
+                    _ if in_prop => prop = local.to_string(),
+                    _ => {}
+                }
+            }
+            // `<d:collection/>` 这种自闭合写法才是常态。
+            Event::Empty(e) => {
+                let name = e.name();
+                if in_prop
+                    && local_name(name.as_ref()) == "collection"
+                    && let Some(r) = cur.as_mut()
+                {
+                    r.is_dir = true;
+                }
+            }
+            Event::Text(e) => {
+                let text = text_of_str(e.as_ref());
+                feed_text(&mut cur, field, in_prop, &prop, &text);
+            }
+            // 实体引用是独立事件，`as_ref()` 给的是 `&` 与 `;` 之间那截（`amp`、`#20013`），
+            // 所以拼回 `&…;` 再走同一个反转义。认不出的实体（`&nbsp;` 这类）保留原文：
+            // 名字里多个看得见的 `&nbsp;` 是能看见的问题，静默少一截书名是不能发现的。
+            Event::GeneralRef(e) => {
+                let text = text_of_str(&format!("&{};", e.as_ref()));
+                feed_text(&mut cur, field, in_prop, &prop, &text);
+            }
+            Event::End(e) => {
+                let name = e.name();
+                match local_name(name.as_ref()) {
+                    "response" => {
+                        if let Some(raw) = cur.take() {
+                            out.push(raw);
+                        }
+                    }
+                    "prop" => in_prop = false,
+                    "href" | "status" | "displayname" | "getlastmodified" | "getetag" => {
+                        field = None
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// 把原始条目收成「这一层的内容」：反解 `href`、扔掉查不到的、砍掉深层的。
+/// 只留**被查询那一层**的内容。
+///
+/// `Entry.path` 始终是相对 Base 的完整路径（上层拿它去 GET / PUT），但收哪些、不收哪些
+/// 要看查询的是哪一层：根目录是「一段」，子目录是「以 `listed/` 开头且后面再没有斜杠」。
+/// `Depth: 1` 不被尊重时整棵树都会回来，按段数裁比按条数或时间猜可靠。
+fn children(endpoint: &Endpoint, listed: &str, raw: &[Raw]) -> Vec<Entry> {
+    let prefix = endpoint.path_prefix();
+    let listed = listed.trim_matches('/');
+    let mut out = Vec::new();
+    for r in raw {
+        if let Some(code) = r.status
+            && !(200..300).contains(&code)
+        {
+            // 「远端少了一个文件」的两种成因之一：服务器把查不到的资源也塞回 207 里。
+            tracing::debug!("dav: 资源 {} 自己回了 {code}，不收", r.href);
+            continue;
+        }
+        let Some((path, had_slash)) = relative_path(prefix, &r.href) else {
+            // 另一种：`href` 的基准对不上（代理前缀、虚拟目录）。这条日志是唯一的线索。
+            tracing::debug!("dav: 认不出 {} 相对基准 {prefix} 的路径，不收", r.href);
+            continue;
+        };
+        // 相对路径为空就是被查询的集合自己 —— 它出现在返回里是协议规定的，但它不属于
+        // 「这一层的内容」，留着它列表里就会多出一行指向父层。
+        if path.is_empty() {
+            continue;
+        }
+        let direct_child = if listed.is_empty() {
+            path.split('/').count() == 1
+        } else {
+            path.strip_prefix(listed)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
+        };
+        if !direct_child {
+            continue;
+        }
+        let name = match (r.display.trim().is_empty(), path.split('/').next_back()) {
+            (true, Some(tail)) => tail.to_string(),
+            (true, None) => path.clone(),
+            (false, _) => r.display.trim().to_string(),
+        };
+        out.push(Entry {
+            name,
+            path,
+            is_dir: r.is_dir || had_slash,
+            size: r.size,
+            modified: blank_to_none(&r.modified),
+            etag: blank_to_none(&r.etag),
+        });
+    }
+    out
+}
+
+/// `href` → （相对路径, 原本是否带尾斜杠）。认不出基准时返回 `None`，由调用方丢弃这一条。
+///
+/// 这是整个客户端最容易错的一步：`href` 是**编码态**的，而基准各家不同 —— 绝对路径
+/// (`/dav/books/a.epub`)、直接给相对 (`a.epub`)、前面多一段代理前缀 (`/proxy/dav/books/…`)
+/// 三种都真实存在，所以按「先试前缀 → 再试它本来就是相对 → 最后在任何位置找一次前缀」
+/// 依次退让。
+fn relative_path(prefix: &str, href: &str) -> Option<(String, bool)> {
+    let decoded = percent_decode(href);
+    // 少数实现会把查询串或片段带回来，它们不属于路径。
+    let clean = decoded
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(decoded.as_str())
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let had_slash = clean.ends_with('/');
+    let rest = if let Some(r) = clean.strip_prefix(prefix) {
+        r
+    } else if !clean.starts_with('/') {
+        clean
+    } else {
+        // 代理前缀：`prefix` 出现在 href 里但不是开头。找得到就按它裁，找不到就丢。
+        let at = clean.find(prefix)?;
+        &clean[at + prefix.len()..]
+    };
+    let rest = rest.trim_matches('/').replace('\\', "/");
+    Some((rest, had_slash))
+}
+
+/// 路径逐段百分号编码，`/` 保留成分隔符。
+///
+/// 中文书名、空格、`#`、`%` 在真实书库里是常态而不是边角情况：`#` 不编码会被当成片段起点，
+/// `?` 会被当成查询开始，`%` 不编码会让「这段到底编过没」无法判断。所以是白名单制 ——
+/// 名单外一律转义，而不是只处理「看着危险」的那几个。
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        if is_path_safe(ch) {
+            out.push(ch);
+        } else {
+            for byte in ch.encode_utf8(&mut [0u8; 4]).as_bytes() {
+                out.push('%');
+                out.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+/// URL 路径里允许原样出现的字符。`/` 在名单里是因为它是分隔符而不是内容。
+fn is_path_safe(ch: char) -> bool {
+    matches!(
+        ch,
+        'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' | '/'
+    )
+}
+
+/// 百分号解码。非法的 `%` 序列（后面不是两个十六进制位）原样保留：书名里会出现字面的 `%`，
+/// 而有些服务器偏偏不给它编码，此时把整条当错误扔掉就等于少一本书。
+///
+/// `+` **不**解码成空格 —— 那是表单编码的规矩，URL 路径里的空格是 `%20`。
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push(hi as u8 * 16 + lo as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 从 `"HTTP/1.1 404 Not Found"` 里取那个三位数。
+fn status_code(text: &str) -> Option<u16> {
+    text.split_whitespace()
+        .filter(|w| w.len() == 3 && w.bytes().all(|b| b.is_ascii_digit()))
+        .find_map(|w| w.parse().ok())
+}
+
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+fn text_of_str(raw: &str) -> String {
+    quick_xml::escape::unescape(raw)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+fn push(cur: &mut Option<Raw>, f: impl FnOnce(&mut Raw)) {
+    if let Some(r) = cur {
+        f(r);
+    }
+}
+
+fn blank_to_none(s: &str) -> Option<String> {
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// 一个「第一次 poll 就给出结果」的假传输，用来把 [`Client`] 的整套动作测完而不碰网络。
+///
+/// 挂在 `test-support` feature 后面：本 crate 自己的测试与 folio-core 的网盘测试
+/// （cloud 那一族）共用这一个假传输 —— 谁要测 WebDAV 的动作，谁就开它。
+#[cfg(any(test, feature = "test-support"))]
+pub struct Mock {
+    /// 依次给出的响应；用尽之后还被调用就直接 panic —— 用例写错要炸在这里，而不是静默
+    /// 拿到一个空响应，把断言变成永真。
+    answers: Mutex<VecDeque<Response>>,
+    pub seen: Mutex<Vec<Request>>,
+    chunks: Vec<Vec<u8>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Mock {
+    pub fn new(responses: Vec<Response>) -> Self {
+        Self {
+            answers: Mutex::new(responses.into()),
+            seen: Mutex::new(Vec::new()),
+            chunks: vec![b"abc".to_vec(), b"defg".to_vec()],
+        }
+    }
+
+    pub fn last_request(&self) -> Request {
+        self.seen
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("假传输没有收到任何请求")
+    }
+
+    /// 这一趟收到的全部请求（按发出顺序）。多步上传要逐条看。
+    pub fn requests(&self) -> Vec<Request> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    fn answer(&self, req: Request) -> Result<Response> {
+        self.seen.lock().unwrap().push(req);
+        self.answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| Error::Malformed("假传输的响应已用尽：用例少给了一个".into()))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Transport for Mock {
+    fn request(&self, req: Request) -> super::Result<Response> {
+        self.answer(req)
+    }
+
+    /// 照 [`Transport::download`] 的契约实现：块之间检查取消，结束时 `finish` 与 `abort`
+    /// 恰好调一个。真实实现守着同一条，所以这条契约在这里被当协议测。
+    fn download(&self, req: Request, sink: &mut dyn Sink, cancel: &Cancel) -> super::Result<u64> {
+        // 先让 `download` 也能被「没给响应」的用例测到，再决定要不要写块。
+        self.answer(req)?;
+        let mut written = 0u64;
+        for chunk in &self.chunks {
+            if cancel.triggered() {
+                sink.abort();
+                return Err(Error::Cancelled);
+            }
+            match sink.write(chunk) {
+                Ok(()) => written += chunk.len() as u64,
+                Err(e) => {
+                    sink.abort();
+                    return Err(Error::Io(e));
+                }
+            }
+        }
+        match sink.finish() {
+            Ok(()) => Ok(written),
+            Err(e) => {
+                sink.abort();
+                Err(Error::Io(e))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

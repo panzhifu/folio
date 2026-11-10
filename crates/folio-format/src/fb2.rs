@@ -17,8 +17,8 @@ use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
     decode_base64, image_dims, shrink_image, stem_of,
 };
-use crate::ext::ChapterExt;
 use crate::Result;
+use crate::ext::ChapterExt;
 
 /// 封面上限与 EPUB 同一条口径（见 `epub` 里的 `COVER_MAX_EDGE`）：书架用缩略图，
 /// 原图随时能从文件里再解一次，不该在库里留第二份。

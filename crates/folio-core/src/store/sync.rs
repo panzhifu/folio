@@ -14,8 +14,8 @@ use crate::content::anchor::TextAnchor;
 use crate::infra::book_settings::BookSettings;
 use crate::position::Locator;
 use crate::sync::{
-    AnnotationRecord, BookEntry, BookSnapshot, BookmarkRecord, LocalSnapshot, Plan,
-    PositionRecord, SNAPSHOT_VERSION, SettingsRecord, Snapshot, Tombstone, TombstoneKind,
+    AnnotationRecord, BookEntry, BookSnapshot, BookmarkRecord, LocalSnapshot, Plan, PositionRecord,
+    SNAPSHOT_VERSION, SettingsRecord, Snapshot, Tombstone, TombstoneKind,
 };
 
 impl Store {

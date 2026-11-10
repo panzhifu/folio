@@ -442,4 +442,3 @@ fn purge_rotated_removes_only_the_rotated_siblings() {
     let missing = dir.path().join("没有这里");
     assert_eq!(purge_rotated(&missing.join("folio.log")), (0, 0));
 }
-

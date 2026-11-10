@@ -15,9 +15,9 @@
 //! 正文上不为书签画狗耳：位置痕迹的可见性由列表屏与顶栏开关承担，往字形边上叠
 //! 装饰是绘制那一层的另一个决定。
 
+use folio_core::TextAnchorExt;
 use folio_core::content::anchor::{TextAnchor, line_at_offset, line_chars, relocate};
 use folio_core::store::Bookmark;
-use folio_core::TextAnchorExt;
 use gpui_kit::{Context, SharedString};
 
 use crate::ui::features::reader::model::session::ReaderSession;

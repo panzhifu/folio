@@ -341,8 +341,8 @@ mod tests {
     //! 批注读侧：重定位、按章分组、Markdown 导出。只依赖公开 API，
     //! 排版一律用真 `Dom` + `TextMap` 建，不假造坐标表。
 
-    use crate::content::anchor::TextAnchorExt;
     use crate::ChapterExt;
+    use crate::content::anchor::TextAnchorExt;
     use crate::content::anchor::{Confidence, TextAnchor, TextMap};
     use crate::content::annotation::{
         AnnotationExportFormat, annotations_by_chapter, annotations_export, annotations_html,

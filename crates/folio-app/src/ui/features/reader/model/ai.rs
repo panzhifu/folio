@@ -13,10 +13,10 @@
 //! 第二遍，就不会出现「选中的是这句、问出去的是那句」。排版没跟上那一帧（`is_current()`
 //! 假）与批注落库同一立场 —— 这次问不成，而不是拿着上一章的文本去问。
 
+use folio_core::PageTextExt;
 use folio_core::infra::task::{Priority, TaskEvent, TaskHandle};
 use folio_core::net::ai::{Ask, Asked, configured, selection_prompt};
 use gpui_kit::{App, AppContext as _, Context, Pixels, Point};
-use folio_core::PageTextExt;
 
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;

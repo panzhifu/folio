@@ -464,8 +464,8 @@ fn unsupported_text(path: &Path, why: &str) -> crate::Error {
 mod tests {
     use std::path::Path;
 
-    use crate::ext::FormatExt;
     use super::{DjvuAdapter, open_document, page_of_url};
+    use crate::ext::FormatExt;
     use crate::{Content, DocumentProvider, Format, PageSource};
 
     fn fixture(name: &str) -> std::path::PathBuf {

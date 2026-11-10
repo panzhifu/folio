@@ -266,12 +266,12 @@ pub fn locate_progress(chapters: &[Chapter], ratio: f32) -> Option<(usize, usize
 }
 #[cfg(test)]
 mod tests {
-    use crate::ChapterExt;
     use super::{
         Link, Placement, SPAN_AHEAD_SCREENS, SPAN_BEHIND_SCREENS, SPAN_MAX_AHEAD, SPAN_WINDOW,
         chapter_gap, char_measure, locate_progress, progress_at, resolve_link, stack, toc_hrefs,
         window_range,
     };
+    use crate::ChapterExt;
     use crate::content::format::Chapter;
     use crate::infra::config::Reader;
 

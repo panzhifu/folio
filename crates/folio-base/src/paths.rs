@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! 配置  ~/.config/folio            config.json、themes/
-//! 数据  ~/.local/share/folio       书库数据库、logs/、books/
+//! 数据  ~/.local/share/folio       书库数据库、logs/、books/、cache/
 //! ```
 //!
 //! `FOLIO_CONFIG_DIR` / `FOLIO_DATA_DIR` 存在时优先生效：测试要把配置读写关在
@@ -245,13 +245,51 @@ pub fn inbox_dir() -> PathBuf {
     data_dir().join("inbox")
 }
 
-/// 漫画解压缓存：`<数据根>/cache/comics`。整目录删掉只需重解一次 ——
+/// 缓存区：`<数据根>/cache`。放删掉只费一次重算的东西——它是缓存，不是数据，
+/// 备份不装它（[`backups_dir`] 的清单），占用统计按它认领字节。
+pub fn cache_dir() -> PathBuf {
+    data_dir().join("cache")
+}
+
+/// 漫画解压缓存：`<缓存区>/comics`。整目录删掉只需重解一次 ——
 /// 它是缓存，不是数据，与 [`thumbs_dir`] 同一档。
 ///
 /// 路径的**名字**归这里（与 `logs`、`books` 同一条规矩：别处不许拼路径），而
 /// `comic_cache` 仍管它在测试里被指到哪儿。
 pub fn comics_cache_dir() -> PathBuf {
-    data_dir().join("cache").join("comics")
+    cache_dir().join("comics")
+}
+
+/// 软件的四个落点，一次拿齐。
+///
+/// 书副本、配置、日志、缓存这四格是「整个应用摆在磁盘上的形状」，启动横幅、诊断
+/// dump、存储屏要的是同一份；一处拿齐而不是各问各的函数，为的是这四格**互不嵌套**
+/// 的约定在类型上有名字——`usage` 那本磁盘账靠前缀认领字节，四格一散，谁钻进谁
+/// 就没人看了。更细的区（收件箱、词典、字体…）仍走它们自己的函数，这里不收。
+///
+/// 四格各问各的解析链（环境变量 → 宿主报的目录 → 操作系统标准位置），这里只是
+/// 收拢，不复制任何顺序逻辑。
+pub struct AppDirs {
+    /// 书副本区：`<数据根>/books`，应用自己收下的那份书本文件。书库根是读者在
+    /// 设置里确认过的目录，core 不知道它——那把尺是 [`staging_dir`] / [`covers_dir`]
+    /// 那一族（收一个 `root` 参数）。
+    pub books: PathBuf,
+    /// 配置位置：`config.json`、themes/。
+    pub config: PathBuf,
+    /// 日志位置：`folio.log` 与它的轮转。
+    pub logs: PathBuf,
+    /// 缓存位置：删了只费一次重算的东西。
+    pub cache: PathBuf,
+}
+
+/// 四个落点一次拿齐（[`AppDirs`]）。
+pub fn app_dirs() -> AppDirs {
+    AppDirs {
+        books: books_dir(),
+        config: config_dir(),
+        logs: log_dir(),
+        cache: cache_dir(),
+    }
 }
 
 /// 书架卡片那一档的宽（像素）。
@@ -263,9 +301,9 @@ pub const THUMB_LIST_PX: u32 = 96;
 #[cfg(test)]
 mod tests {
     use super::{
-        APP_DIR, THUMB_CARD_PX, THUMB_LIST_PX, comics_cache_dir, config_dir, config_path,
-        covers_dir, data_dir, db_path, inbox_dir, log_dir, resolved, root, staging_dir, themes_dir,
-        thumb_dir, thumbs_dir,
+        APP_DIR, THUMB_CARD_PX, THUMB_LIST_PX, app_dirs, books_dir, cache_dir, comics_cache_dir,
+        config_dir, config_path, covers_dir, data_dir, db_path, inbox_dir, log_dir, resolved, root,
+        staging_dir, themes_dir, thumb_dir, thumbs_dir,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -351,6 +389,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 四个落点一次拿齐：每格与它自己的函数一致，且**两两不嵌套**。`usage` 那本
+    /// 磁盘账靠前缀认领字节，任何一格钻进另一格，分类就只能靠判序侥幸。
+    #[test]
+    fn app_dirs_holds_the_four_top_level_spots() {
+        let dirs = app_dirs();
+        assert_eq!(dirs.books, books_dir());
+        assert_eq!(dirs.config, config_dir());
+        assert_eq!(dirs.logs, log_dir());
+        assert_eq!(dirs.cache, cache_dir());
+        let spots = [
+            ("books", &dirs.books),
+            ("config", &dirs.config),
+            ("logs", &dirs.logs),
+            ("cache", &dirs.cache),
+        ];
+        for (first_name, first) in &spots {
+            for (second_name, second) in &spots {
+                if first_name != second_name {
+                    assert!(
+                        !first.starts_with(second) && !second.starts_with(first),
+                        "{first_name} 与 {second_name} 不该互相嵌套"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 缓存区收敛后路径不变：`comics` 仍挂在 `<数据根>/cache` 底下，老库写到
+    /// 这个位置的解压产物一个都不用搬。
+    #[test]
+    fn the_cache_area_keeps_its_old_path() {
+        assert_eq!(cache_dir(), data_dir().join("cache"));
+        assert_eq!(comics_cache_dir(), data_dir().join("cache").join("comics"));
     }
 
     /// 空串按「没设」处理，否则 `FOLIO_CONFIG_DIR=` 会把配置指到当前目录。

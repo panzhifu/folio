@@ -27,8 +27,8 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
 
-use folio_format::ext::ChapterExt;
 use crate::Result;
+use folio_format::ext::ChapterExt;
 
 mod annotations;
 mod bookmarks;

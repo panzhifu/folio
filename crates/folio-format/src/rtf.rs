@@ -35,9 +35,9 @@ use super::{
     Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, FlowDoc, Format, ImageRes,
     extension_of, image_dims, stem_of,
 };
-use crate::ext::ChapterExt;
 use crate::IoResultExt as _;
 use crate::Result;
+use crate::ext::ChapterExt;
 
 /// 标题判据里「这一段的字数已经不像标题了」的上限。
 const MAX_HEADING_CHARS: usize = 60;
@@ -1368,11 +1368,11 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
-    use crate::ext::ChapterExt;
     use super::{
         RtfAdapter, body_font_size, ends_sentence, heading_in_style, heading_in_text,
         heading_level, parse,
     };
+    use crate::ext::ChapterExt;
     use crate::{Content, DocMeta, DocumentProvider, FlowDoc, Format};
 
     fn write_rtf(dir: &Path, name: &str, body: &str) -> PathBuf {

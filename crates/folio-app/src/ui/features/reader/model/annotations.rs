@@ -27,9 +27,9 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
-use folio_core::content::anchor::TextMap;
 use folio_core::PageTextExt;
 use folio_core::TextAnchorExt;
+use folio_core::content::anchor::TextMap;
 use folio_core::content::annotation::{ResolvedAnnotation, resolve_annotations};
 use folio_core::store::{ANNOTATION_COLORS, Annotation, AnnotationStyle};
 use gpui_kit::component::Theme;

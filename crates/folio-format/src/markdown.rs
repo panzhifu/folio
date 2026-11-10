@@ -13,8 +13,8 @@ use std::path::Path;
 use markdown::{CompileOptions, Constructs, Options, ParseOptions};
 
 use super::{Chapter, ChapterLocator, Content, DocMeta, DocumentProvider, Format};
-use crate::ext::ChapterExt;
 use crate::Result;
+use crate::ext::ChapterExt;
 use crate::text::{PlainFamily, read_with, section_source};
 
 pub struct MarkdownAdapter;

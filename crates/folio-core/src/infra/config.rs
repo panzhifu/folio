@@ -32,7 +32,7 @@ use crate::infra::paths;
 use folio_model::types::AnnotationStyle;
 
 pub use folio_base::logging::Logging;
-pub use folio_format::css::ImageScale;
+pub use folio_model::reading::ImageScale;
 
 /// 配置文件的**格式版本**。加字段、改某个键的含义时 +1。
 ///
@@ -1544,7 +1544,8 @@ impl AliyunDrive {
 }
 
 /// `.txt` 小说分章规则的**读者那一层差量**：叠在出厂那张表之上（关掉的条目、自己加的条目、
-/// 改过的阈值），形状与合成的规则住在 [`crate::content::format::novel::rules`]。
+/// 改过的阈值）。形状住在 [`folio_model::novel`]，出厂表与合成/编译引擎住在
+/// `folio_format::novel::rules` —— 配置不该为了两个类型去认 `content` 那一层。
 ///
 /// 存差量而不是整份表，是为了「以后出厂表加了新条目，读者那份不会把表冻在他改动那一刻」——
 /// 整份存的话那条链就断了，而他没碰过的那些数还会按老值盖回去。
@@ -1561,7 +1562,7 @@ pub struct Novel {
     /// 差量摊平在这一节下（`novel.off` / `novel.extra` / `novel.gates`），
     /// 不再多一层 `rules` 的名字：这一节除了那张表没有别的东西。
     #[serde(flatten)]
-    pub edits: crate::content::format::novel::rules::Edits,
+    pub edits: folio_model::novel::Edits,
 }
 
 impl Novel {
@@ -1590,7 +1591,7 @@ impl Novel {
                 .text
                 .map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty());
-            kept.push(crate::content::format::novel::rules::Marker {
+            kept.push(folio_model::novel::Marker {
                 name,
                 pattern,
                 text,

@@ -11,15 +11,16 @@
 // `fallback = "en"` 与 gpui-kit 组件层一致，这样缺一条日文文案时框架和我们回落到同一种语言。
 rust_i18n::i18n!("locales", fallback = "en");
 
-// ── 四个区。分区的判据是「谁依赖谁」，写在各自的 mod.rs 里 ──
+// ── 分区。判据是「谁依赖谁」，写在各自的 mod.rs 里 ──
 //
 //     content/   内容与文档：文档接口 / 锚点 / 命中 / 批注（DOM 与 CSS 来自 folio-format）
-//     layout/    排版引擎（行盒、分片、失效键与两级缓存）
 //     store/     SQLite：书目、进度、批注、集合、统计
 //     ingest/    书怎么进来：导入管线、扫描、监听、身份、校验
-//     net/       出网与入网：WebDAV、Wi-Fi 传书
+//     net/       出网与入网：网盘、OPDS、传书、同步（传输层与 AI/翻译已独立成
+//                folio-net / folio-ai，旧路径经别名沿用）
 //     infra/     横切：配置、日志、路径、错误、作业、服务、量具、时间
 //
+// 排版引擎已独立成 folio-render（旧路径 `folio_core::layout` 经模块别名沿用）。
 // 依赖方向是单向的：`content` 可以依赖 `infra`，但不依赖 `store` / `ingest`；
 // `ingest` 同时碰容器、文件系统与数据库（那是它的职责）；`infra` 谁都不依赖。
 // 这条方向是「引擎能在没有数据库的情况下跑」与「core 能被 cargo test 全量覆盖」的前提。
@@ -33,7 +34,6 @@ pub mod fonts;
 pub mod group;
 pub mod infra;
 pub mod ingest;
-pub mod layout;
 pub mod net;
 pub mod reader;
 pub mod search;
@@ -42,6 +42,11 @@ pub mod speech;
 pub mod store;
 pub mod sync;
 pub mod text;
+
+// 排版引擎已独立成 `folio-render` crate（「换 crate 不换形状」）。
+// 旧路径沿用：`folio_core::layout::*` 与 crate 内的 `crate::layout::*`（content 的
+// anchor/hit、reader 的几何、它们各自的测试）都解析到它，消费方一行不改。
+pub use folio_render as layout;
 
 pub use content::anchor::{
     Confidence, Relocated, TextAnchor, TextAnchorExt, TextMap, line_at_offset, line_at_y,
@@ -62,6 +67,7 @@ pub use folio_model::position;
 // folio-model 类型上与解析侧绑定的行为（`Chapter::inline` / `char_len`、
 // `copy_extension`、`PageText::text_map`）是 folio-format 的扩展 trait；core 与 app
 // 从这里拿，不必直接依赖 folio-format。
+pub use error::{Error, ImportReject, Result};
 pub use folio_format::ext::{ChapterExt, FlowDocExt, FormatExt, PageTextExt};
 pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
@@ -73,13 +79,11 @@ pub use infra::config::{
     PageTurn, Provenance, Reader, Resolved, Speech, Sync, SyncProvider, TextDirection, TocDensity,
     Translation, TranslationEngine, WebDavDrive,
 };
-pub use error::{Error, ImportReject, Result};
 pub use infra::i18n::Locale;
 pub use infra::paths::{
-    backups_dir, config_dir, config_path, data_dir, db_path, dicts_dir, fonts_dir, log_dir,
-    themes_dir,
+    AppDirs, app_dirs, backups_dir, cache_dir, config_dir, config_path, data_dir, db_path,
+    dicts_dir, fonts_dir, log_dir, themes_dir,
 };
-pub use services::Services;
 pub use infra::task::{
     ByteProgress, Cancel, Priority, StageCtx, TaskError, TaskEvent, TaskHandle, TaskId, TaskManager,
 };
@@ -94,6 +98,7 @@ pub use ingest::import::{
 };
 pub use ingest::scan::{ScanFilter, ScanReport, ScanSource, find, format_of};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};
+pub use services::Services;
 pub use speech::{Command, Engine, Event};
 pub use store::StaleReason;
 pub use store::{

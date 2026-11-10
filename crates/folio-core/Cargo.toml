@@ -18,8 +18,13 @@ publish = false
 folio-base.workspace = true
 folio-format.workspace = true
 folio-model.workspace = true
+# 出网地层：传输抽象与 WebDAV（原 net::remote）。旧路径经 net/mod.rs 的模块别名沿用。
+folio-net.workspace = true
+# AI 问答与选区翻译（原 net::ai / net::translate）。旧路径经 net/ai.rs、net/translate.rs 的 shim 沿用。
+folio-ai.workspace = true
+# 排版引擎（原 layout/）。旧路径经 lib.rs 的模块别名沿用。
+folio-render.workspace = true
 rusqlite.workspace = true
-dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -29,7 +34,7 @@ image.workspace = true
 zip.workspace = true
 # 词典包（`dict`）的 gzip 解压。
 flate2.workspace = true
-# Basic 认证头（`remote::dav`）。锁里已有这份，不新增依赖树。
+# Basic 认证头（WebDAV 的 dav 客户端已随传输层搬去 folio-net；OPDS 还在用）。
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
 sha2.workspace = true
@@ -39,7 +44,7 @@ md-5.workspace = true
 ring.workspace = true
 # 文件夹监听（`watch`）：事件驱动的新书自动入库。
 notify.workspace = true
-# 同步 HTTP（`remote::ureq`）。
+# 同步 HTTP（生产已随传输层搬去 folio-net；transfer 的测试还要用它调自己的服务器）。
 ureq.workspace = true
 url.workspace = true
 # Wi-Fi 传书服务器（`transfer`）。tokio 只许在这个模块里用 —— 见模块文档的边界。
@@ -47,12 +52,9 @@ tokio.workspace = true
 axum.workspace = true
 # 传书那台服务器上局域网同步的路由要流式送一本书（见根 Cargo.toml 为什么它不新增依赖树）。
 futures-util.workspace = true
-# WebDAV / OPDS 的 XML。
+# WebDAV / OPDS 的 XML（dav 已随传输层搬去 folio-net；opds 还在用）。
 quick-xml.workspace = true
-# 排版断行（`layout::collect`）。
-unicode-linebreak.workspace = true
-# 字体回退：按 Unicode Script 数出 CJK / 假名 / 谚文（`layout::font`）。
-unicode-script.workspace = true
+# 排版断行与字体回退已随排版引擎搬去 folio-render。
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，
 # 装配 subscriber 的入口在 `src/logging.rs`。（不依赖 gpui 这条边界照旧成立：
@@ -101,6 +103,8 @@ tts.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# 网盘 / 传书的测试共用 folio-net 的假传输（dav::Mock）。
+folio-net = { workspace = true, features = ["test-support"] }
 # 测试里合成 CBR 夹具；生产只用读，不开 write。
 rars = { workspace = true, features = ["write"] }
 # 测试里合成 CB7 / tar 夹具（导入的容器门）。

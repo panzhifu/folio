@@ -391,8 +391,7 @@ impl ImageAtlas {
                             finished
                         }
                         None => Some(
-                            job(&folio_core::StageCtx::detached())
-                                .map_err(|err| err.to_string()),
+                            job(&folio_core::StageCtx::detached()).map_err(|err| err.to_string()),
                         ),
                     };
                     let load = match outcome {

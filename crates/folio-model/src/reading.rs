@@ -99,6 +99,9 @@ mod tests {
     /// 设置界面的档位顺序：`ALL` 是「界面上该出现的顺序」的唯一事实。
     #[test]
     fn all_lists_the_three_scales_in_ui_order() {
-        assert_eq!(ImageScale::ALL, &[ImageScale::Follow, ImageScale::Screen, ImageScale::Original]);
+        assert_eq!(
+            ImageScale::ALL,
+            &[ImageScale::Follow, ImageScale::Screen, ImageScale::Original]
+        );
     }
 }

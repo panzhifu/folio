@@ -193,8 +193,8 @@ fn cover_bytes(
 
 #[cfg(test)]
 mod tests {
-    use crate::ChapterExt;
     use super::{BookGroup, MarkEntry, counts, load_groups, matches_query, snippet};
+    use crate::ChapterExt;
     use crate::content::anchor::TextAnchor;
     use crate::content::format::{Chapter, DocMeta, FlowDoc, Format};
     use crate::store::{AnnotationStyle, Store};

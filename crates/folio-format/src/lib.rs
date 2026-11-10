@@ -8,7 +8,6 @@
 
 use std::path::Path;
 
-
 pub use crate::href::{
     absolutize_css_urls, asset_href, dir_of, fragment_of, percent_decode, resolve_href,
 };
@@ -220,7 +219,6 @@ pub fn rules_hash(format: Format) -> Option<String> {
     }
 }
 
-
 /// 一段引擎就绪的 XHTML 里**可见文本**的字符数 —— 与 [`crate::text_map::TextMap::chars`]
 /// 同一个口径（空白折叠、行内图占一个字符位）。
 ///
@@ -271,7 +269,6 @@ fn body_of(dom: &crate::dom::Dom) -> crate::dom::NodeId {
         .find(|(id, _)| dom.tag_name(*id) == Some("body"))
         .map_or(dom.document, |(id, _)| id)
 }
-
 
 /// 这本书里取到的一份字体字节，按容器绝对路径索引。
 ///
