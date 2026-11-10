@@ -103,7 +103,7 @@ pub(in crate::ui::features::shelf) fn popover(
         .into_any_element()
 }
 
-/// 给卡片内容套一层「滚动到此为止」：`occlude` 挡点击、`scroll_guard` 吞滚动。
+/// 给**居中浮层**的内容套一层「滚动到此为止」：`occlude` 挡点击、`scroll_guard` 吞滚动。
 ///
 /// 两块必须一起给：`occlude` 只让身后的 hitbox 不进命中测试，而滚动归谁看的是
 /// `should_handle_scroll`；没有 `scroll_guard` 那一格，读者在卡上滑一下，身后的
@@ -112,6 +112,11 @@ pub(in crate::ui::features::shelf) fn popover(
 ///
 /// 收在这里而不是每张卡自己写：架面上这几张浮层全是「答一句话」的卡，内容本身
 /// 不滚，一件件补漏迟早漏掉某一张（网络导入那张就这么漏的）。
+///
+/// **只给 [`centered`] 那一档用**：它多包的一层是普通块，不参与尺寸计算，而浮层里的
+/// 卡片都是定高或 `min_h` 的。底部弹层不能走这一层 —— 那边的内容是 `flex_1` 的树（扫描
+/// 清单要靠父层给出确定高度），再套一个普通块就把 `flex_1` 挡在自动高度里，虚拟列表塌成
+/// 0 高：手机上只看得到标题与底部按钮，中间一行候选都没有（见 [`sheet`]）。
 fn guarded(key: &'static str, body: AnyElement) -> AnyElement {
     div()
         .relative()
@@ -167,6 +172,10 @@ pub(in crate::ui::features::shelf) fn centered(
 /// 输入框在弹层**底部或中部**的表单（建组、从链接导入）开着 —— 键盘真的会盖住输入框；
 /// 输入框钉在弹层**顶部**的那几张（扫描清单）关掉 —— 展开档又高，键盘本来就够不到它，
 /// 再抬一次只是让整屏内容往上跳一下（阅读页目录那一屏同一形状、同一取舍）。
+///
+/// 守卫与内容**平级**摆进弹层，不套那一层 [`guarded`]：扫描清单的根是 `flex_1` 的树，
+/// 中间夹一个普通块就把它挡在自动高度里，清单塌成 0 高。挡点击由弹层表面自己的
+/// `occlude` 负责，这一格只补「滚动到此为止」。
 pub(in crate::ui::features::shelf) fn sheet(
     key: &'static str,
     state: &Entity<BottomSheetState>,
@@ -178,7 +187,118 @@ pub(in crate::ui::features::shelf) fn sheet(
         .expanded(expanded)
         .ime_lift(lift_ime);
     match body {
-        Some(body) => sheet.child(guarded(key, body)).into_any_element(),
+        // 守卫必须排在内容**之前**：它先于内容绘制，冒泡相里就排在内容自己的滚动处理
+        // 之后（见 `components::scroll_guard` 模块头）。
+        Some(body) => sheet
+            .child(scroll_guard(ElementId::Name(
+                format!("{key}-scroll").into(),
+            )))
+            .child(body)
+            .into_any_element(),
         None => sheet.into_any_element(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 这一层只钉一条：**弹层的内容根必须自己拿到弹层的高度**。
+    //!
+    //! 手机档（Compact）在宿主的单测里走不到 —— `SizeClass::of` 把非移动端的 Compact
+    //! 夹回 Medium，于是这套弹层不进 `shell/tests` 的窗口。而它坏掉的样子只有手机上看得见：
+    //! 扫描清单的 `flex_1` 被中间一层普通块挡在自动高度里，虚拟列表塌成 0 高，屏幕上只剩
+    //! 标题与底部按钮。所以这条门直接量布局，不绕视口档位。
+
+    use std::time::Duration;
+
+    use gpui_kit::component::Root;
+    use gpui_kit::component::v_flex;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+        ParentElement as _, Render, Styled as _, TestAppContext, TestSupportExt as _, Window, div,
+        px, size,
+    };
+
+    use super::sheet;
+    use crate::ui::components::BottomSheetState;
+
+    /// 底下一块弹层，内容照扫描那一屏的形状搭：一条定高的工具行、一棵 `flex_1` 的清单、
+    /// 一条定高的底栏。清单那格挂个名，量它拿到了多高。
+    struct Harness {
+        state: Entity<BottomSheetState>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().relative().child(sheet(
+                "harness-sheet",
+                &self.state,
+                0.85,
+                false,
+                Some(
+                    v_flex()
+                        .w_full()
+                        .flex_1()
+                        .min_h_0()
+                        .child(div().w_full().h(px(40.)))
+                        .child(
+                            div()
+                                .id("sheet-content-fill")
+                                .test_support()
+                                .w_full()
+                                .flex_1(),
+                        )
+                        .child(div().w_full().h(px(40.)))
+                        .into_any_element(),
+                ),
+            ))
+        }
+    }
+
+    /// 推进弹簧：测试时钟不自己走，一帧一帧推 16ms 直到弹层停稳。
+    fn settle(cx: &mut TestAppContext, handle: AnyWindowHandle) {
+        for _ in 0..60 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+                .expect("窗口应能渲染");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_sheet_body_keeps_its_flex_one(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let state = cx.new(BottomSheetState::closed);
+        let state_for_view = state.clone();
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(400.), px(600.)), |window, cx| {
+                let view = cx.new(|_| Harness {
+                    state: state_for_view,
+                });
+                Root::new(view, window, cx)
+            })
+            .into();
+        cx.update(|cx| state.update(cx, |state, cx| state.show(cx)));
+        settle(cx, handle);
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let surface = window
+                .try_find("bottom-sheet-surface")
+                .expect("弹层表面该挂着")
+                .bounds();
+            let fill = window
+                .try_find("sheet-content-fill")
+                .expect("清单那一格该在树上")
+                .bounds();
+            assert!(
+                f32::from(fill.size.height) > f32::from(surface.size.height) * 0.5,
+                "内容没拿到弹层的高度（弹层 {}、清单 {}）：`flex_1` 被中间一层挡在自动高度里，\
+                 手机上扫描清单会塌成 0 高，只剩标题与底部按钮",
+                f32::from(surface.size.height),
+                f32::from(fill.size.height),
+            );
+        })
+        .expect("窗口应能渲染");
     }
 }
