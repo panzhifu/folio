@@ -8,11 +8,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use super::{Found, Hit, Options, Query, fold, scan, scan_book_at, scan_chapter, scan_with_sink};
-use crate::ChapterExt;
-use crate::content::document::{Document, from_content};
-use crate::content::format::{Chapter, Content, DocMeta, FlowDoc, visible_text, visible_text_only};
-use crate::infra::task::StageCtx;
+use folio_base::task::StageCtx;
+use folio_format::ChapterExt;
+use folio_format::document::{Document, from_content};
 use folio_format::fixtures::published_shape_epub;
+use folio_format::{Chapter, Content, DocMeta, FlowDoc, visible_text, visible_text_only};
 
 /// 一本正文就在手上的书：每对 `(章名, XHTML)` 一章。
 fn book(chapters: &[(&str, &str)]) -> Box<dyn Document> {
@@ -377,7 +377,7 @@ fn the_same_book_on_two_codepages_answers_the_same() {
         assert_eq!(found.hits.len(), 1, "{name}：那句该只命中一次");
         let hit = &found.hits[0];
         // 偏移切回去必须正是查询本身 —— 判据与整本那一档同一份。
-        let doc = crate::content::document::open(&path).expect("合成容器应能打开");
+        let doc = folio_format::document::open(&path).expect("合成容器应能打开");
         let text = visible_text(&doc.chapter_source(hit.chapter).unwrap());
         assert_eq!(slice(&text, hit), "天地玄黄", "{name}：切回去不是那四个字");
         answers.push((hit.chapter, hit.start));
@@ -394,7 +394,7 @@ fn the_same_book_on_two_codepages_answers_the_same() {
 /// 状态 —— 那一档的症状若是崩或挂，整架的搜索就废了。
 #[test]
 fn a_fixed_book_answers_with_nothing_to_read() {
-    let flow = crate::content::format::FixedDoc::default();
+    let flow = folio_format::FixedDoc::default();
     let doc = from_content(
         DocMeta {
             title: "漫画包".into(),
@@ -415,7 +415,7 @@ fn a_fixed_book_answers_with_nothing_to_read() {
 fn the_synthetic_published_book_answers_with_chapter_and_offset() {
     let dir = tempfile::tempdir().unwrap();
     let path = published_shape_epub(dir.path());
-    let doc = crate::content::document::open(&path).expect("合成容器应能打开");
+    let doc = folio_format::document::open(&path).expect("合成容器应能打开");
     let out = sweep(doc.as_ref(), "正文");
     assert_eq!(out.chapters, 28, "前置：28 章");
     assert_eq!(out.hits.len(), 28, "每一章那句『第 N 章的正文。』都该命中");
@@ -462,7 +462,7 @@ fn the_local_books_answer_on_the_same_axis() {
             continue;
         }
         let started = std::time::Instant::now();
-        let doc = crate::content::document::open(&path).expect("真书该打得开");
+        let doc = folio_format::document::open(&path).expect("真书该打得开");
         let opened = started.elapsed();
         // 查询从这本书自己的正文里摘：换一本书也不会红在「那句话不在书里」上。
         let middle = doc.flow().unwrap().chapters.len() / 2;
@@ -523,7 +523,7 @@ fn fixture(relative: &str) -> PathBuf {
 fn wps() -> (PathBuf, Box<dyn Document>) {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/pdf/wps-paper.pdf");
-    let doc = crate::content::document::open(&path).expect("WPS 那本该开得动");
+    let doc = folio_format::document::open(&path).expect("WPS 那本该开得动");
     (path, doc)
 }
 
@@ -600,7 +600,7 @@ fn chars(text: &str, from: usize, to: usize) -> String {
 #[test]
 fn the_batched_pages_are_the_per_page_ones_byte_for_byte() {
     let (path, doc) = wps();
-    let provider = crate::content::format::provider_for(&path).expect("PDF 该有 provider");
+    let provider = folio_format::provider_for(&path).expect("PDF 该有 provider");
     let batch = doc.page_texts().expect("带字的 PDF 该给得出整本");
     let pages = doc.fixed().expect("这一本该是定版式").pages.len();
     assert_eq!(batch.len(), pages, "整本那一列的长度就是页数");
@@ -713,7 +713,7 @@ fn a_triggered_cancel_stops_the_page_scan() {
 fn a_wordless_book_scans_to_nothing_and_still_counts_its_pages() {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/oss/pdf/three-pages.pdf");
-    let doc = crate::content::document::open(&path).expect("入库的那本夹具该读得开");
+    let doc = folio_format::document::open(&path).expect("入库的那本夹具该读得开");
     let out = scan(
         &*doc,
         &Query::parse("猫").unwrap(),

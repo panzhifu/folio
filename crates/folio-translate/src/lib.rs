@@ -1,8 +1,17 @@
-//! 翻译：把一段文字交给外部引擎，换回目标语言的文本。
+//! 选区翻译与本地词典：「查」的两条路住一个 crate。
 //!
-//! 与 [`folio_net`] 同一条分工：本模块定**该发什么、回来的东西怎么读**
-//! （`Translator` trait 与三只引擎的请求/响应规则），字节怎么发出去归 [`Transport`]。
-//! 于是响应解析那一半能在无网络、假传输的条件下逐字段钉死（见各文件测试）。
+//! - 根模块（本文件）—— **翻译**：把一段文字交给外部引擎，换回目标语言的文本。
+//!   与 [`folio_net`] 同一条分工：定**该发什么、回来的东西怎么读**
+//!   （[`Translator`] trait 与三只引擎的请求/响应规则），字节怎么发出去归
+//!   [`Transport`]。于是响应解析那一半能在无网络、假传输的条件下逐字段钉死
+//!   （见各文件测试）。
+//! - [`dict`] —— **本地词典**：StarDict 解析、清洗、精确查找与多词典库管理。
+//!   只认磁盘与内存，零网络，与翻译互不依赖。
+//!
+//! 翻译机制原住 folio-ai::translate、词典原住 folio-core::dict（2026-11-11 阶段五
+//! 拆分原样搬来，「换 crate 不换形状」：core 经 shim / 模块别名沿用旧路径）。两者
+//! 都不认识配置文件：按配置挑引擎的分发在 folio-core 的入口层
+//! （`net::translate::configured`），词典源列表由 app 按配置拼好递进来。
 //!
 //! ## 三只引擎
 //!
@@ -25,9 +34,11 @@
 //! ## 错误分档
 //!
 //! [`TranslateError`] 把传输层的 WebDAV 词表翻成翻译场景能说的话：缺 key、密钥被拒、
-//! 限流 / 配额、引擎返回的状态、响应读不懂。界面直接把这一句摆进失败卡片。
+//! 限流 / 配额、引擎返回的状态、响应读不懂。界面直接把这一句摆进失败卡片。词典的
+//! [`dict::DictError`] 同一条口径：错误自持，每个变体带上下文。
 
 pub mod deepl;
+pub mod dict;
 pub mod openai;
 
 use folio_base::identity::sha256_of_bytes;
@@ -150,9 +161,9 @@ pub fn source_hash(text: &str) -> String {
 }
 
 /// BCP-47 码 → 提示词里的语言名。认不出的码原样递过去：模型对 `yue` 这类标签的理解
-/// 通常好过我们临时编一个名字。翻译与 [`crate::ai`] 共用这一份 —— 两条链都要对模型
-/// 说「用这种语言回答」，两份表迟早有一处漏掉一门语言。
-pub(crate) fn language_name(code: &str) -> &str {
+/// 通常好过我们临时编一个名字。翻译与 folio-ai 的问答提示词共用这一份 —— 两条链都要
+/// 对模型说「用这种语言回答」，两份表迟早有一处漏掉一门语言。
+pub fn language_name(code: &str) -> &str {
     match code {
         "zh-CN" | "zh-Hans" => "Simplified Chinese",
         "zh-TW" | "zh-Hant" => "Traditional Chinese",

@@ -20,8 +20,17 @@ folio-format.workspace = true
 folio-model.workspace = true
 # 出网地层：传输抽象与 WebDAV（原 net::remote）。旧路径经 net/mod.rs 的模块别名沿用。
 folio-net.workspace = true
-# AI 问答与选区翻译（原 net::ai / net::translate）。旧路径经 net/ai.rs、net/translate.rs 的 shim 沿用。
+# AI 问答（原 net::ai）。旧路径经 net/ai.rs 的 shim 沿用。
 folio-ai.workspace = true
+# 选区翻译与本地词典（原 folio-ai::translate 与本 crate 的 dict/）。旧路径经
+# net/translate.rs 的 shim 与 lib.rs 的模块别名沿用。
+folio-translate.workspace = true
+# 听书引擎（原 speech.rs）。旧路径经 lib.rs 的模块别名沿用。
+folio-speech.workspace = true
+# 字体域（原 text/ 与 fonts.rs）。旧路径经 lib.rs 的模块别名沿用。
+folio-fonts.workspace = true
+# 书内搜索（原 search.rs）。旧路径经 lib.rs 的模块别名沿用。
+folio-search.workspace = true
 # 排版引擎（原 layout/）。旧路径经 lib.rs 的模块别名沿用。
 folio-render.workspace = true
 rusqlite.workspace = true
@@ -32,8 +41,6 @@ thiserror.workspace = true
 image.workspace = true
 # 备份包（`backup`）与导入时的容器读取。
 zip.workspace = true
-# 词典包（`dict`）的 gzip 解压。
-flate2.workspace = true
 # Basic 认证头（WebDAV 的 dav 客户端已随传输层搬去 folio-net；OPDS 还在用）。
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
@@ -68,41 +75,13 @@ tracing-subscriber.workspace = true
 # 那边 `log` 的全局位给了 `android_logger`（见 `logging::init` 那段注释）。
 tracing-log = { workspace = true }
 
-# 听书引擎的两条管道（`src/speech.rs` 的 `Engine`）：命令与回调合走一条、事件走另一条，
-# 引擎线程用 blocking 两端收发，界面侧在 gpui 的 async 环境里 `recv().await` —— 所以
-# 既不是 `std::sync::mpsc`（Receiver 不 async），也不为此引入一个 runtime。
-# **不是新依赖树**：锁里已有 2.5.0，folio-app 已经直接依赖它（根 `Cargo.toml` 那条
-# 注释写了出处），这里只是把图上已有的这份转成 folio-core 的直接依赖。
-async-channel.workspace = true
-
 # 名字表解析（`text::names` 的拉丁 `m` 覆盖率）要用：锁里 fontdb 已带它，
 # 这里只是把图上已有的一份转成直接依赖（此前只声明为测试依赖）。
 ttf-parser.workspace = true
-# 随书字体加载管线（`text::load`）：子集化、name 表读与改。**这几条必须留在
-# 主依赖区**：`text::load` 不分平台，Windows / macOS 也要用；从前误放在下面的
-# `[target.'cfg(linux/android)'.dependencies]` 里，桌面两端因此缺 crate 编不过。
-skera.workspace = true
-read-fonts.workspace = true
-write-fonts.workspace = true
+# 随书字体加载管线已随机制搬去 folio-fonts，skera / read-fonts / write-fonts 跟着走。
 
-# 听书（合成朗读）的后端。为什么只挂这两个平台、Linux 构建要 libclang + libspeechd 头、
-# Android 随包要有 `rs/tts/Bridge` 类，全部写在根 `Cargo.toml` 的 `tts` 那条注释里。
-#
-# 用它的是 `crate::speech`：一根专职线程持有 `tts::Tts`，对外只暴露命令与事件两条
-# 管道。Step 0 的两件量具（Android 的真机探针 `speech::probe`、桌面那个 `speech-smoke`
-# example）只活在测量那一轮，量完就删、**没进仓库**；量到的结论落在 `plans/听书.md`
-# 与 `speech.rs` 的模块文档里。留这条依赖要落的是打包而不是代码 —— `tts` 的
-# `JNI_OnLoad` 在 cdylib 加载那一刻就找 `rs/tts/Bridge`，所以随包的 `Bridge.java`、它的 R8
-# keep、manifest 的 `<queries>` 与 gradle 里排除 `libtts*.so` 必须跟它同进同退，缺一样就是
-# 加载期 abort。句柄不能跨线程（`Tts` 内部是 `Rc<RwLock<Box<dyn Backend>>>`，那句
-# `unsafe impl Send + Sync` 只让类型通过检查），这就是它必须住在一根专职线程里的原因。
-#
-# `not(target_env = "ohos")` 是鸿蒙那一格：它的三元组报 `target_os = "linux"`，于是这条
-# 判据本来就把 `tts` 放了进来，而 `tts` 的 linux 后端是 Speech Dispatcher —— 链接行上就多
-# 一个 `-lspeechd`，OHOS 的 sysroot 里没有（实测：整个鸿蒙构建全过，只死在这一格）。
-# 听书在鸿蒙上要等 NAPI / ArkTS 那一层（`@ohos.textToSpeech`）另起一条后端，不在这里。
-[target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "android"))'.dependencies]
-tts.workspace = true
+# 听书（合成朗读）的后端 `tts` 已随引擎机制搬去 folio-speech —— 平台门控的 target 段
+# 与「rs/tts/Bridge 同进同退」的注释都跟着走了，core 这边不再直接认识 tts。
 
 [dev-dependencies]
 tempfile = "3"

@@ -24,7 +24,13 @@ pub(in crate::ui::features::settings) fn store_row() -> Row {
 }
 
 pub(in crate::ui::features::settings) fn installed_row() -> Row {
-    Row::custom(move |_, cx| installed_list(cx)).keywords(&["font", "installed", "字体", "已装", "我的"])
+    Row::custom(move |_, cx| installed_list(cx)).keywords(&[
+        "font",
+        "installed",
+        "字体",
+        "已装",
+        "我的",
+    ])
 }
 
 /// 商店那一行：导入入口 + 每款字体一张卡。

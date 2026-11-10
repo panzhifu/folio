@@ -4,12 +4,12 @@
 //!   [`folio_net`] crate（「换 crate 不换形状」：这里沿用旧路径，消费方一行不改）。
 //!   协议规则与实现分开，所以它们离线可测。
 //! - [`translate`] —— 选区翻译：引擎 trait 与三只引擎（Google 免 key、OpenAI 兼容、
-//!   DeepL）的请求/响应解析。机制已独立成 [`folio_ai`] crate（与 [`ai`] 同 crate，
-//!   「同一件事的两张脸」）；走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测
-//!   （假传输 + fixture）。
+//!   DeepL）的请求/响应解析。机制已独立成 [`folio_translate`] crate（词典也在那边）；
+//!   走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测（假传输 + fixture）。
 //! - [`ai`] —— 选区问 AI 与切章规则草案：**一层** provider（OpenAI 兼容的
 //!   `chat/completions`），地址与密钥共用 [`translate`] 那一档，错误分档与响应解析的形状
-//!   也照它，所以同样离线可测（假传输 + 固定应答）。
+//!   也照它（机制在 [`folio_ai`] crate，两条错误链的对应关系由那一侧的 `From` 记着），
+//!   所以同样离线可测（假传输 + 固定应答）。
 //! - [`update`] —— 检查更新：问发布仓要「最新那版」，比版本、挑这一端的包、验摘要。
 //!   走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测（假传输 + fixture JSON）。
 //! - [`redeem`] —— 会员兑换：把一个爱发电订单号换回会员天数。付没付过钱只能由服务端判

@@ -1,7 +1,7 @@
 //! 随书字体的**加载管线**：`@font-face` → 身份去重 → 读字节 → 子集化 → 改名 → 注册 →
 //! 别名表。2026-11-09 从 `folio_app::ui::features::reader::model::book_fonts` 整体搬来，
 //! gpui 的接触点收进 [`FontSink`] 一个 trait（app 用 `TextSystemSink` 实现）——
-//! 与 [`crate::layout::Measure`] 同一条边界画法：接口在 core，实现在 app。
+//! 与 folio-render 的 `Measure` 同一条边界画法：接口在这一层，实现在 app。
 //!
 //! 上一版的完整设计文档见 `doc/字体加载优化.md`；行内注释保留搬迁时的口径。
 
@@ -16,11 +16,11 @@ use read_fonts::collections::IntSet;
 use read_fonts::types::{NameId, Tag};
 use skera::{DEFAULT_DROP_TABLES, DEFAULT_LAYOUT_FEATURES, Plan, SubsetFlags};
 
-use crate::content::document::Document;
-use crate::content::format::css::{FontFaceRule, FontSrc, RuleSet};
-use crate::content::format::{FontBytes, FontRef};
 use crate::text::families as font_primary;
 use crate::text::names::{LatinCoverage, latin_by_family};
+use folio_format::css::{FontFaceRule, FontSrc, RuleSet};
+use folio_format::document::Document;
+use folio_format::{FontBytes, FontRef};
 
 /// 与 app 侧 `perf::Timer` 同形的计时段：`start` 起表，`ns` 报已过去的纳秒。
 /// 搬进 core 后不再借 app 的那一份 —— 口径一致（`Instant` 差的纳秒），不需要同步。
@@ -952,8 +952,8 @@ mod tests {
     //! `scratch_subset_llf_keeps_outlines` 读的是本机才有的样本（`/tmp/folio-css/`），
     //! 默认 ignored。
 
-    use crate::content::format::FontBytes;
-    use crate::content::format::css::{Origin, RuleSet};
+    use folio_format::FontBytes;
+    use folio_format::css::{Origin, RuleSet};
 
     use super::{
         AliasKey, BookFonts, FaceName, FontId, FontRequest, cached_names, charset_hash,

@@ -2254,7 +2254,7 @@ version = "0.1.4"
 dependencies = [
  "folio-base",
  "folio-net",
- "serde",
+ "folio-translate",
  "serde_json",
  "thiserror 2.0.21",
 ]
@@ -2306,16 +2306,18 @@ dependencies = [
 name = "folio-core"
 version = "0.1.4"
 dependencies = [
- "async-channel",
  "axum",
  "base64 0.22.1",
- "flate2",
  "folio-ai",
  "folio-base",
+ "folio-fonts",
  "folio-format",
  "folio-model",
  "folio-net",
  "folio-render",
+ "folio-search",
+ "folio-speech",
+ "folio-translate",
  "futures-util",
  "hayro",
  "image",
@@ -2324,7 +2326,6 @@ dependencies = [
  "notify",
  "quick-xml 0.42.0",
  "rars",
- "read-fonts 0.46.0",
  "ring",
  "rusqlite",
  "rust-i18n",
@@ -2332,7 +2333,6 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha2 0.11.0",
- "skera",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
@@ -2341,10 +2341,8 @@ dependencies = [
  "tracing-log",
  "tracing-subscriber",
  "ttf-parser",
- "tts",
  "ureq",
  "url",
- "write-fonts",
  "zip",
 ]
 
@@ -2354,6 +2352,24 @@ version = "0.1.0"
 source = "git+https://github.com/panzhifu/gpui-folio?rev=5631b68d91fa09ae2081f6eef366cd484e157947#5631b68d91fa09ae2081f6eef366cd484e157947"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "folio-fonts"
+version = "0.1.4"
+dependencies = [
+ "folio-base",
+ "folio-format",
+ "folio-net",
+ "read-fonts 0.46.0",
+ "serde",
+ "serde_json",
+ "skera",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "ttf-parser",
+ "write-fonts",
 ]
 
 [[package]]
@@ -2425,6 +2441,37 @@ dependencies = [
  "tracing",
  "unicode-linebreak",
  "unicode-script",
+]
+
+[[package]]
+name = "folio-search"
+version = "0.1.4"
+dependencies = [
+ "folio-base",
+ "folio-format",
+ "tempfile",
+]
+
+[[package]]
+name = "folio-speech"
+version = "0.1.4"
+dependencies = [
+ "async-channel",
+ "tracing",
+ "tts",
+]
+
+[[package]]
+name = "folio-translate"
+version = "0.1.4"
+dependencies = [
+ "flate2",
+ "folio-base",
+ "folio-net",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

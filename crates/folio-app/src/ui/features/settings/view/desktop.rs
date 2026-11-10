@@ -268,8 +268,12 @@ mod tests {
 
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
-            for id in ["mode-card-light", "mode-card-dark", "mode-card-ink", "mode-card-system"]
-            {
+            for id in [
+                "mode-card-light",
+                "mode-card-dark",
+                "mode-card-ink",
+                "mode-card-system",
+            ] {
                 assert!(
                     window.try_find(id).is_some(),
                     "找不到浅深卡 {id}：这一页没有把浅深画成预览卡"
@@ -302,7 +306,9 @@ mod tests {
             cx.update_window(handle, |_, window, cx| {
                 window.render_frame(cx);
                 (
-                    window.try_find(format!("theme-card-{light_card}")).is_some(),
+                    window
+                        .try_find(format!("theme-card-{light_card}"))
+                        .is_some(),
                     window.try_find(format!("theme-card-{dark_card}")).is_some(),
                 )
             })

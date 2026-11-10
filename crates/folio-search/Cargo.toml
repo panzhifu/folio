@@ -1,0 +1,28 @@
+[package]
+name = "folio-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 书内搜索：**现读现扫，不建索引**（判据与实测数字见 lib.rs 头部）。从
+# folio-core::search 原样搬来（2026-11-12，阶段五收尾拆分；「换 crate 不换形状」：
+# core 经模块别名沿用旧路径，消费方一行不改）。
+#
+# 依赖闭包只有两层：统一文档接口（folio-format::document）给「正文从哪儿现取」，
+# folio-base 的作业层（task::StageCtx）给「扫到几成、取消旗标」。它不认识书库、
+# 配置与界面 ——「整架搜索」那一档的按本分发、结果拼页都由调用方（app）做，
+# 这里只认一本书与一个查询词。零错误词表：开不了书回 `None`、取不到章跳过，
+# 不 fail 整趟 —— 与「这一本搜不了」和「搜索坏了」是两件事的立场一致。
+
+[dependencies]
+# 统一文档接口（Document / chapter_source / page_texts）与可见文本折取
+# （visible_text_only），正文现取的另一半在它那边。
+folio-format.workspace = true
+# 扫描作业的进度与取消（task::StageCtx）—— 与全仓作业池同一套。
+folio-base.workspace = true
+
+[dev-dependencies]
+# 合成书的落盘夹具（原 folio-core 的 dev-dep 随测试一同搬来）。
+tempfile = "3"

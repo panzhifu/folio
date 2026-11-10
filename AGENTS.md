@@ -9,7 +9,7 @@ Folio：Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 阅读器，覆
 
 ## 文档地图
 
-`doc/` 下这十篇是现状的真相源；`软件架构.md` 开头写明「以代码为准，改了架构顺手改
+`doc/` 下这十二篇是现状的真相源；`软件架构.md` 开头写明「以代码为准，改了架构顺手改
 这一篇」。先看总纲，再按要改的层挑对应的 API 篇。
 
 | 篇 | 讲什么 |
@@ -20,14 +20,18 @@ Folio：Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 阅读器，覆
 | [doc/format.md](doc/format.md) | 格式解析六个 API：识别 / 打开 / 章表 / 资源 / 取内容 / 写回 |
 | [doc/渲染.md](doc/渲染.md) | 排版（`folio-render`）与绘制（`folio-app`）两段管线、仿真翻页 |
 | [doc/网络.md](doc/网络.md) | `Transport` / `RemoteStore`、OPDS、Wi-Fi 传书、局域网同步、更新检查、会员兑换 |
-| [doc/AI.md](doc/AI.md) · [doc/翻译.md](doc/翻译.md) | `folio-ai` 的问答与选区翻译；配置到参数的挑选留在 core 入口层 |
+| [doc/AI.md](doc/AI.md) | `folio-ai` 的问答；配置到参数的挑选留在 core 入口层 |
+| [doc/翻译.md](doc/翻译.md) | `folio-translate` 的选区翻译（三只引擎）与本地词典（StarDict） |
+| [doc/听书.md](doc/听书.md) | `folio-speech` 的听书引擎收口（两条管道）与会话侧分工、平台矩阵 |
+| [doc/字体.md](doc/字体.md) | `folio-fonts` 的随书字体装载（text）与用户字体库（fonts）、FontsError |
 | [doc/储存.md](doc/储存.md) | `Store` 的 SQLite API：书目 / 进度 / 批注 / 统计 / 笔记聚合 |
 | [doc/服务.md](doc/服务.md) | 服务层与导入管线（写得最全的一条业务线）、`Services` 组合根 |
 
-**别把设计稿当现状**：各篇明确标了「现状 ≠ 目标」的地方 —— `format.md` 末行的
-API 4（资源清单）与 6（写回）尚未实现、`地基.md` 的 settings 层仍在 core、
-`储存.md` 的 store 拆 crate 停在路线图阶段四、`软件架构.md` §7 的阶段二~五各有卡点。
-动这些之前先读对应段落，别照着文档以为已经有代码。
+**别把设计稿当现状**：各篇明确标了「现状 ≠ 目标」的地方 —— `format.md` 末行只
+剩 API 6（写回）尚未实现（1–5 已有对应物，4 资源清单于 4015abf 落地）、`地基.md`
+的 settings 层仍在 core、`储存.md` 的 store 拆 crate 停在路线图阶段四、
+`软件架构.md` §7 的阶段二~四各有卡点（阶段五已收尾）。动这些之前先读对应段落，
+别照着文档以为已经有代码。
 
 [README.md](README.md)（英文，读者向）/ [CHANGELOG.md](CHANGELOG.md) /
 [packaging/README.md](packaging/README.md)（安装包里非代码资产：图标、desktop 条目）。
@@ -40,16 +44,22 @@ API 4（资源清单）与 6（写回）尚未实现、`地基.md` 的 settings 
 crates/
   folio-base/    地基：时间、路径、作业池、取消、日志、身份、内存预算；零业务依赖
   folio-model/   公共数据模型：诸 crate 共用的类型，只有数据（三条规矩见其 lib.rs）
-  folio-format/  文件格式解析：字节 + 路径 → 统一文档模型（21 个 provider、DOM、CSS、scan）
+  folio-format/  文件格式解析：字节 + 路径 → 统一文档模型（21 个 provider、DOM、CSS、scan、
+                 Document trait 与 BookDocument 门面）
   folio-net/     出网地层：Transport / RemoteStore / Sink 与 WebDAV（原 core::net::remote）
-  folio-ai/      AI 问答与选区翻译（原 core::net::ai / translate）
+  folio-translate/ 选区翻译三只引擎与本地 StarDict 词典（原 folio-ai::translate 与 core::dict）
+  folio-ai/      AI 问答：一层 provider 与三档预设问法（原 core::net::ai）
   folio-render/  排版引擎：DOM + 样式 → 扁平的块盒 / 行盒两张表（原 core::layout）
-  folio-core/    引擎：内容与锚点、书库（SQLite）、导入、剩余的网络面；
+  folio-speech/  听书引擎收口：专职线程持有 tts 后端、两条管道（原 core::speech）
+  folio-fonts/   字体域：随书字体装载与子集化（text）+ 用户字体库下载落盘（fonts）；
+                 skera / read-fonts / write-fonts / ttf-parser 只在这里
+  folio-search/  书内搜索：现读现扫不建索引，只认一本书与一个查询词（原 core::search）
+  folio-core/    引擎：锚点与命中、书库（SQLite）、导入、剩余的网络面；
                  内部按 content / store / ingest / net / infra 单向分区
   folio-app/     应用壳：GPUI 界面、平台入口、原生桥；src/ui/ 依赖方向只有一条
                  shell ▶ features ▶ components ▶ services ▶ foundation（host / platform 在两侧），
                  `cfg(mobile)` 只许出现在 host 与 platform
-doc/             十篇架构与分层 API 文档（见上面的文档地图）
+doc/             十一篇架构与分层 API 文档（见上面的文档地图）
 packaging/       四端安装包里的非代码资产与打包脚本
 tests/           fixtures：程序合成的书可入库；真书只放 tests/fixtures/local/ 且不入库
 reference/       借鉴用的上游只读克隆（含 AGPL），gitignore，永不入库、不参与构建

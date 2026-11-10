@@ -1114,8 +1114,12 @@ mod tests {
             String::new()
         }
 
-        fn chapter_source(&self, index: usize) -> folio_core::Result<String> {
-            Err(folio_core::Error::NoSuchChapter(index as i64))
+        fn chapter_source(&self, index: usize) -> folio_core::content::format::Result<String> {
+            Err(folio_core::content::format::Error::ChapterUnavailable {
+                path: Default::default(),
+                index,
+                at: String::new(),
+            })
         }
 
         fn page_text(&self, page: usize) -> Option<PageText> {

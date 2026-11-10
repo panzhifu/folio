@@ -150,7 +150,7 @@ mod tests {
     use serde_json::Value;
 
     use super::{OpenAiTranslator, language_name, parse_response};
-    use crate::translate::{MAX_SOURCE_CHARS, TranslateError, Translator};
+    use crate::{MAX_SOURCE_CHARS, TranslateError, Translator};
     use folio_net::{Error, Method, Request, Response, Transport};
 
     const OK: &str = r#"{"choices":[{"message":{"role":"assistant","content":"你好"}}]}"#;

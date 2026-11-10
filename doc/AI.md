@@ -1,10 +1,10 @@
 # AI API 设计
 
 AI 问答：一层 provider（OpenAI 兼容的 `chat/completions`）+ 三档预设问法 +
-切章规则草案。形状照翻译立：同一套 Transport、同一套错误分档、离线可测。
-**机制住 folio-ai crate**（与翻译同 crate，「同一件事的两张脸」）；
-`folio_core::net::ai::*` 旧路径经 shim 沿用——配置到参数的映射与
-「这一格存不存在」的 None 判据就在那个入口层。
+切章规则草案。形状照翻译立（见 [翻译.md](翻译.md)）：同一套 Transport、同一套
+错误分档、离线可测。**机制住 folio-ai crate**（2026-11-11 起问答单住——翻译机制与
+本地词典已拆去 folio-translate）；`folio_core::net::ai::*` 旧路径经 shim 沿用——
+配置到参数的映射与「这一格存不存在」的 None 判据就在那个入口层。
 
 ## 使用顺序（一屏看完）
 
@@ -43,10 +43,19 @@ ChatCompletion::new(base_url, model, api_key)   // 唯一 provider，实现 Assi
   `MAX_ANSWER_CHARS` 答案收 4k；`clip(text, limit)` 收文本。
 - 切章草案：`draft_system(lang)` / `draft_prompt(head, candidates)`——
   给 txt 分章规则出 AI 建议（novel::draft 那条路）。
+- 提示词里的语言名来自 folio-translate 的 `language_name`（BCP-47 码 → 语言名表
+  的一份真源，翻译那侧同样用它）。
+
+## 与翻译的错误对应
+
+两条链意思相同但**类型不共用**：翻译的 `TranslateError::NotConfigured("服务地址")`
+出现在 AI 的失败卡片上会说出「引擎」这种不属于这一屏的词。对应关系由 folio-ai 里的
+`From<TranslateError> for AiError` 记着——机制分住两个 crate 之后，这一句是唯一的桥。
 
 ## 优化（现有实现里已经做了的）
 
-- **与翻译同源**——同一套 Transport / 错误分档 / 响应解析形状，一份经验两处用。
+- **与翻译同形状**——同一套 Transport / 错误分档 / 响应解析纪律，一份经验两处用；
+  机制分住两个 crate 后，对应关系仍有 `From` 记着。
 - **密钥不复制第二份**——多一处落盘面就多一处泄漏面。
 - **离线可测**——假传输 + 固定应答，请求与解析逐字段钉死。
 - **日志纪律**——只有模型名、字符数、耗时、错误档位可出声；正文与答案不进日志。

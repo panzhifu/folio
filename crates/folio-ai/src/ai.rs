@@ -1,10 +1,10 @@
 //! AI 问答：一层 provider（OpenAI 兼容的 `chat/completions`）与三档预设问法的提示词。
 //!
-//! 形状照 [`crate::translate`] 立：同一套 [`Transport`]、同一套错误分档、同一条
+//! 形状照 [`folio_translate`] 立：同一套 [`Transport`]、同一套错误分档、同一条
 //! 「出网前先判必填项」的纪律，所以请求形状与响应解析都能在**无网络、假传输**的条件下
-//! 逐字段钉死（见文件末的测试）。翻译与 AI 是同一件事的两张脸 —— 都是「把一段书本文
-//! 交给一个外部模型，拿回一段文字」，两份实现各长一套错误词表与解析，迟早在一处修了
-//! 另一处忘。
+//! 逐字段钉死（见文件末的测试）。翻译与 AI 都是「把一段书本文交给一个外部模型，拿回
+//! 一段文字」，机制搬去两个 crate 之后各长一套错误词表与解析——对应关系由下面的
+//! `From<TranslateError> for AiError` 记着，那一处修了另一处别忘了。
 //!
 //! ## 地址与密钥共用翻译那一档
 //!
@@ -27,9 +27,9 @@
 
 use serde_json::{Value, json};
 
-use crate::translate::{TranslateError, language_name};
 use folio_base::identity::sha256_of_bytes;
 use folio_net::{Error, Method, Request, Response, Transport};
+use folio_translate::{TranslateError, language_name};
 
 /// 一次请求送出去的文本上限（字符）。选区那一档实际用的是 [`CONTEXT_BUDGET`] 那一圈，
 /// 这个数是最后一道闸：草案那一刀要送几十行样本，比选区长，但也不该长过这个量 ——
@@ -390,9 +390,10 @@ pub fn selection_prompt(asked: &Asked) -> String {
     out
 }
 
-/// 翻译那层的错误词表与这一份是同一套意思，但**类型不能共用**：翻译的
-/// [`TranslateError::NotConfigured("服务地址")`] 出现在 AI 的失败卡片上会说出「引擎」
-/// 这种不属于这一屏的词。这一句只是把两条链的对应关系记下来。
+/// 翻译那层（folio-translate）的错误词表与这一份是同一套意思，但**类型不能共用**：
+/// 翻译的 [`TranslateError::NotConfigured("服务地址")`] 出现在 AI 的失败卡片上会说出
+/// 「引擎」这种不属于这一屏的词。机制分住两个 crate 之后，这一句是两个 crate 之间
+/// 唯一的桥——只把两条链的对应关系记下来，没人调用也算数。
 impl From<TranslateError> for AiError {
     fn from(err: TranslateError) -> Self {
         match err {

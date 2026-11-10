@@ -158,14 +158,22 @@ impl Document for Illustrated {
     }
 
     /// 正文按章现取那一条：字节不在容器里，就在手上这份 `FlowDoc` 里。
-    fn chapter_source(&self, index: usize) -> folio_core::Result<String> {
+    fn chapter_source(&self, index: usize) -> folio_core::content::format::Result<String> {
         let Content::Reflow(flow) = &self.content else {
-            return Err(folio_core::Error::NoSuchChapter(index as i64));
+            return Err(folio_core::content::format::Error::ChapterUnavailable {
+                path: Default::default(),
+                index,
+                at: String::new(),
+            });
         };
         flow.chapters
             .get(index)
             .map(|chapter| chapter.source().to_string())
-            .ok_or(folio_core::Error::NoSuchChapter(index as i64))
+            .ok_or(folio_core::content::format::Error::ChapterUnavailable {
+                path: Default::default(),
+                index,
+                at: String::new(),
+            })
     }
 }
 

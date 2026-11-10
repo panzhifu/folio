@@ -17,7 +17,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use folio_core::net::remote::{Cancel, Error as TransportError};
+use folio_core::fonts::FontsError;
+use folio_core::net::remote::Cancel;
 use folio_core::{FontEntry, Priority};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, WeakEntity};
 
@@ -301,10 +302,10 @@ fn busy(status: &Status) -> bool {
 fn install_outcome(
     path: &std::path::Path,
     texts: &gpui_kit::TextSystem,
-) -> folio_core::Result<FontEntry> {
+) -> Result<FontEntry, FontsError> {
     let families = user_fonts::register_file(texts, path).ok_or_else(|| {
         let _ = std::fs::remove_dir_all(path.parent().unwrap_or(path));
-        folio_core::Error::Font {
+        folio_core::fonts::FontsError::Font {
             path: path.to_path_buf(),
             why: "这份字体解不出来（文件可能是坏的）".to_string(),
             source: None,
@@ -333,7 +334,7 @@ fn install_outcome(
 /// 作业线程递回界面的消息：下载走多档进度，结束那档带着结果。
 enum Message {
     Progress(u64),
-    Done(folio_core::Result<FontEntry>),
+    Done(Result<FontEntry, FontsError>),
 }
 
 struct ImportOutcome {
@@ -342,7 +343,7 @@ struct ImportOutcome {
 }
 
 impl UserFontsState {
-    fn finish(&mut self, outcome: folio_core::Result<FontEntry>, cx: &mut Context<Self>) {
+    fn finish(&mut self, outcome: Result<FontEntry, FontsError>, cx: &mut Context<Self>) {
         self.cancel = None;
         match outcome {
             Ok(entry) => {
@@ -355,7 +356,8 @@ impl UserFontsState {
                 cx.refresh_windows();
             }
             // 取消不是失败：读者的话就是「不装了」，状态回 Idle，失败句不给。
-            Err(folio_core::Error::Remote(TransportError::Cancelled)) => {
+            // 按类型分档（FontsError::Cancelled），别匹配文案。
+            Err(FontsError::Cancelled) => {
                 self.status = Status::Idle;
             }
             Err(err) => self.status = Status::Failed(err.to_string()),
@@ -383,7 +385,7 @@ impl UserFontsState {
         &mut self,
         id: &str,
         family: String,
-        result: folio_core::Result<()>,
+        result: Result<(), FontsError>,
         cx: &mut Context<Self>,
     ) {
         match result {

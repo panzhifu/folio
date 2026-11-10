@@ -6,8 +6,12 @@ members = [
     "crates/folio-model",
     "crates/folio-format",
     "crates/folio-net",
+    "crates/folio-translate",
+    "crates/folio-fonts",
+    "crates/folio-search",
     "crates/folio-ai",
     "crates/folio-render",
+    "crates/folio-speech",
     "crates/folio-core",
     "crates/folio-app",
 ]
@@ -25,8 +29,12 @@ folio-base = { path = "crates/folio-base" }
 folio-model = { path = "crates/folio-model" }
 folio-format = { path = "crates/folio-format" }
 folio-net = { path = "crates/folio-net" }
+folio-translate = { path = "crates/folio-translate" }
+folio-fonts = { path = "crates/folio-fonts" }
+folio-search = { path = "crates/folio-search" }
 folio-ai = { path = "crates/folio-ai" }
 folio-render = { path = "crates/folio-render" }
+folio-speech = { path = "crates/folio-speech" }
 folio-core = { path = "crates/folio-core" }
 
 # 走 git main 而不是 crates.io：上游每周发版，发布版落后一到两周，且主题目录

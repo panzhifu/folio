@@ -14,7 +14,7 @@
 //! - 命令与回调走**同一条**输入管道（[`gate::Input`]）：引擎线程一根 `recv_blocking`
 //!   同时收两路，不需要 select。选 `async_channel` 而不是 `std::sync::mpsc`，是因为
 //!   事件的消费端在 gpui 的 async 环境里 `recv().await`；它在依赖图上本来就有
-//!   （folio-app 的直接依赖，见根 `Cargo.toml` 那条），core 只是加一条边，锁里零新包。
+//!   （folio-app 的直接依赖，见根 `Cargo.toml` 那条），本 crate 只是加一条边，锁里零新包。
 //! - 事件走输出管道：一条 [`Event::Ready`]，之后是 [`Event::Begin`] / [`Event::Done`]。
 //!
 //! ## 两平台的回调映射是反的，归一在 [`gate::reduce`]
@@ -35,7 +35,7 @@
 //!
 //! ## 语速与音高：管道里只走语义值
 //!
-//! 配置（`infra::config::Speech`）与两条管道里流动的都是**语义值**（0.5–2.0，常速
+//! 配置（folio-core 的 `infra::config::Speech`，settings 层仍在 core）与两条管道里流动的都是**语义值**（0.5–2.0，常速
 //! 1.0）。引擎那一档的数在 [`gate::rate_to_engine`] / [`gate::pitch_to_engine`] 里
 //! 换算：Android 的区间本来就是 0.1–10.0（常速 1.0），恒等；Linux Speech Dispatcher
 //! 是 −100–100（常速 0），线性 `(v−1)×100`。上下限不许问引擎：`Tts` 的 `min_*` /
@@ -44,8 +44,8 @@
 //!
 //! ## 平台矩阵
 //!
-//! `tts` 依赖只挂在 Linux（非 ohos）与 Android 两档（见根与本 crate 的 `Cargo.toml`
-//! 那条 target 门）。macOS / Windows 的构建没有这个后端：[`engine`] 恒回 `None`，
+//! `tts` 依赖只挂在 Linux（非 ohos）与 Android 两档（见本 crate `Cargo.toml`
+//! 那条 target 门，原 folio-core 的门随机制一同迁来）。macOS / Windows 的构建没有这个后端：[`engine`] 恒回 `None`，
 //! 界面按「这一格不存在」降级。鸿蒙同属这一档 —— 它的三元组报 linux，被
 //! `not(target_env = "ohos")` 挡在门外，听书要等 NAPI / ArkTS 那层另起后端。
 
@@ -441,8 +441,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicI8;
 
-    use crate::speech::gate::{Action, Callback, Gate, pitch_to_engine, rate_to_engine, reduce};
-    use crate::speech::{Command, Engine, Event, Input, READY_UNKNOWN};
+    use crate::gate::{Action, Callback, Gate, pitch_to_engine, rate_to_engine, reduce};
+    use crate::{Command, Engine, Event, Input, READY_UNKNOWN};
 
     /// 一条不带真引擎的句柄，只为验「结论快照」这一格。
     fn engine_with_ready(value: i8) -> Engine {

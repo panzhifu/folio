@@ -12,9 +12,9 @@
 //! 重装时开头就清掉的残渣。
 //!
 //! 下载用同步 [`Transport`]，与 `net::update` 同一条理由：出网的作业跑在后台线程上，
-//! 「一个请求流到底」用阻塞读最直白，core 里因此不需要任何执行器。字节**原样落盘**
-//! （woff / woff2 也存原样）：解回 sfnt 是注册前那一脚的事，在 `folio_app` 那侧
-//! （`content::format::woff(2)::decode`），与随书字体同一条路。
+//! 「一个请求流到底」用阻塞读最直白，这一层因此不需要任何执行器。字节**原样落盘**
+//! （woff / woff2 也存原样）：解回 sfnt 是注册前那一脚的事，与清单 / 下载同住这里
+//! （[`decode_font_file`]），与随书字体同一条路。
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
@@ -23,11 +23,48 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use crate::infra::paths;
-use crate::net::remote::{Cancel, Error as TransportError, Method, Request, Sink, Transport};
-use crate::{Error, Result};
+use folio_base::paths;
+use folio_net::{Cancel, Error as TransportError, Method, Request, Sink, Transport};
 
-/// 清单文本随二进制走；`include_str!` 的路径相对本文件（`crates/folio-core/font_manifest.json`）。
+/// 被套上上下文的底层错误；与 `folio_format::Error` 的 `Source` 同一形状。
+pub type Source = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+pub type Result<T> = std::result::Result<T, FontsError>;
+
+/// 字体库这一层的错误：清单、下载、落盘装删。
+///
+/// 与 `folio_format::Error` / folio-translate 的 `DictError` 同一条口径 —— 错误自持、
+/// 带上下文、底层原因留在 `source` 链上。机制有自己的 crate，错误词表跟机制走：
+/// 原 `folio_core::Error::Font` 变体随迁删除，core 的伞枚举不再代持这一档。
+#[derive(Debug, thiserror::Error)]
+pub enum FontsError {
+    /// 一份字体装不上：清单里没有这个 id、下载下来的字节大小对不上、解不出来。
+    ///
+    /// 单独立一条而不是复用 [`FontsError::Io`]：设置页要按「这一份字体装坏了」提示
+    /// 并让读者删掉重装，而不是把一条路径拼进通用的读盘错误里。
+    #[error("字体 {path:?} 装不上：{why}")]
+    Font {
+        path: PathBuf,
+        why: String,
+        #[source]
+        source: Option<Source>,
+    },
+
+    /// 落盘读写失败。
+    #[error("读 {path} 失败：{source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: Source,
+    },
+
+    /// 读者取消了下载：**不是失败**，界面回 `Idle` 就好。单独立一条让调用方按类型
+    /// 分档（匹配文案是脆的）；保留 transport 那句「已取消」的原文。
+    #[error("已取消")]
+    Cancelled,
+}
+
+/// 清单文本随二进制走；`include_str!` 的路径相对本文件（`crates/folio-fonts/font_manifest.json`）。
 const MANIFEST_JSON: &str = include_str!("../font_manifest.json");
 
 /// 内置清单。每项一份字体一个文件（`url` 直指那一份）；同一家族的另一档字重
@@ -89,7 +126,13 @@ impl Manifest {
     /// 解析并校验。清单是仓库里的一份数据，两条底线在这里守：id 不空不重，
     /// url 必须是 https —— 明文的 http 直链等于把装进正文的字节交给中间人。
     pub fn parse(json: &str) -> Result<Manifest> {
-        let manifest: Manifest = serde_json::from_str(json)?;
+        // 原来靠 core 伞枚举的 `Json` 变体接 `?`；自持之后这里自己套上下文，
+        // 原始的 serde 错误留在链上。
+        let manifest: Manifest = serde_json::from_str(json).map_err(|err| FontsError::Font {
+            path: MANIFEST_PATH.into(),
+            why: format!("清单不是合法 JSON：{err}"),
+            source: Some(Box::new(err)),
+        })?;
         let mut seen = BTreeSet::new();
         for item in &manifest.items {
             if item.id.trim().is_empty() || !seen.insert(item.id.as_str()) {
@@ -131,7 +174,7 @@ pub const INSTALLABLE_EXTENSIONS: &[&str] = &["ttf", "otf", "ttc", "woff", "woff
 
 /// 下载清单里的一款字体，落到 `<root>/<id>/<文件名>`，交回最终路径。
 ///
-/// 传输由调用方递进来（[`crate::net::remote::ureq::shared`] 的那一份，或测试里的
+/// 传输由调用方递进来（[`folio_net::ureq::shared`] 的那一份，或测试里的
 /// 假传输）—— 与 `net::update::download_to_file` 同一形状，离线测试才写得出来。
 ///
 /// 源的顺序是主源在前、镜像按清单给序跟进：一个源失败（连不上、大小对不上）就换
@@ -173,7 +216,7 @@ pub fn download_item(
                 break;
             }
             // 取消不换源：那是读者的话，不是哪个源的错。
-            Err(err @ Error::Remote(TransportError::Cancelled)) => return Err(err),
+            Err(err @ FontsError::Cancelled) => return Err(err),
             Err(err) => {
                 tracing::warn!("fonts: 第 {} 个源失败，换下一个：{}", nth + 1, err);
                 last_err = Some(err);
@@ -221,7 +264,7 @@ fn download_one(
         Ok(_) => {}
         // 已取消的半份在 abort 里清。取消保持 remote 层的类型（`Error::Remote(Cancelled)`）：
         // 调用方按类型分档「取消不算失败」，匹配文案是脆的。
-        Err(TransportError::Cancelled) => return Err(TransportError::Cancelled.into()),
+        Err(TransportError::Cancelled) => return Err(FontsError::Cancelled),
         Err(err) => {
             let _ = std::fs::remove_file(&part);
             return Err(transport_error(&part, err));
@@ -386,23 +429,23 @@ impl<P: FnMut(u64) + Send> Sink for PartSink<P> {
     }
 }
 
-fn font_error(path: impl Into<PathBuf>, why: impl Into<String>) -> Error {
-    Error::Font {
+fn font_error(path: impl Into<PathBuf>, why: impl Into<String>) -> FontsError {
+    FontsError::Font {
         path: path.into(),
         why: why.into(),
         source: None,
     }
 }
 
-fn io_error(path: &Path, err: std::io::Error) -> Error {
-    Error::Io {
+fn io_error(path: &Path, err: std::io::Error) -> FontsError {
+    FontsError::Io {
         path: path.to_path_buf(),
         source: Box::new(err),
     }
 }
 
-fn transport_error(path: &Path, err: TransportError) -> Error {
-    Error::Font {
+fn transport_error(path: &Path, err: TransportError) -> FontsError {
+    FontsError::Font {
         path: path.to_path_buf(),
         why: err.to_string(),
         source: Some(Box::new(err)),
@@ -410,7 +453,7 @@ fn transport_error(path: &Path, err: TransportError) -> Error {
 }
 
 /// 一份字体文件的字节是哪一种（按头四个字节的魔数认）。判据与
-/// [`crate::content::format::woff(2)::is_*`] 同源：那两份只认自己的魔数，
+/// [`folio_format::woff(2)::is_*`] 同源：那两份只认自己的魔数，
 /// 这里把五类收齐 —— 注册入口只该有一个。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontFileKind {
@@ -443,8 +486,8 @@ pub fn font_kind(bytes: &[u8]) -> FontFileKind {
 pub fn decode_font_file(raw: &[u8]) -> Option<Vec<u8>> {
     match font_kind(raw) {
         FontFileKind::Sfnt => Some(raw.to_vec()),
-        FontFileKind::Woff => crate::content::format::woff::decode(raw),
-        FontFileKind::Woff2 => crate::content::format::woff2::decode(raw),
+        FontFileKind::Woff => folio_format::woff::decode(raw),
+        FontFileKind::Woff2 => folio_format::woff2::decode(raw),
         FontFileKind::Unknown => None,
     }
 }
@@ -471,7 +514,7 @@ mod tests {
     use super::{
         FontItem, Manifest, dir_id, download_item, install_copy, manifest, remove, unique_id,
     };
-    use crate::net::remote::{Cancel, Error as TransportError, Request, Sink, Transport};
+    use folio_net::{Cancel, Error as TransportError, Request, Sink, Transport};
     use std::collections::BTreeSet;
     use std::sync::Mutex;
 
@@ -523,10 +566,7 @@ mod tests {
     }
 
     impl Transport for Chunked {
-        fn request(
-            &self,
-            _req: Request,
-        ) -> crate::net::remote::Result<crate::net::remote::Response> {
+        fn request(&self, _req: Request) -> folio_net::Result<folio_net::Response> {
             unreachable!("字体下载只走 download")
         }
 
@@ -535,7 +575,7 @@ mod tests {
             _req: Request,
             sink: &mut dyn Sink,
             cancel: &Cancel,
-        ) -> crate::net::remote::Result<u64> {
+        ) -> folio_net::Result<u64> {
             let mut sent = 0;
             let mut nth = 0;
             while sent < self.body.len() {
@@ -582,10 +622,7 @@ mod tests {
     fn a_failed_primary_falls_through_to_the_mirror() {
         struct Picky;
         impl Transport for Picky {
-            fn request(
-                &self,
-                _req: Request,
-            ) -> crate::net::remote::Result<crate::net::remote::Response> {
+            fn request(&self, _req: Request) -> folio_net::Result<folio_net::Response> {
                 unreachable!("字体下载只走 download")
             }
             fn download(
@@ -593,7 +630,7 @@ mod tests {
                 req: Request,
                 sink: &mut dyn Sink,
                 _cancel: &Cancel,
-            ) -> crate::net::remote::Result<u64> {
+            ) -> folio_net::Result<u64> {
                 if req.url.contains("mirror") {
                     sink.write(b"mirror-bytes")
                         .map_err(|err| TransportError::Transport(err.to_string()))?;

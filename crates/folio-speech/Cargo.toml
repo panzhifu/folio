@@ -1,0 +1,44 @@
+[package]
+name = "folio-speech"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 听书（合成朗读）的引擎收口：一根专职线程持有 `tts::Tts`，对外只暴露命令与事件
+# 两条管道。从 folio-core::speech 原样搬来（2026-11-11，阶段五拆分；「换 crate 不
+# 换形状」：core 经模块别名沿用旧路径，消费方一行不改）。依赖闭包零 folio ——
+# 只挂 async-channel 与平台门控的 tts；「念什么」（句级切分、跟读推进、跨章接力）
+# 在 folio-app 的会话层，不在这里。
+
+[dependencies]
+# 两条管道（`Engine`）：命令与回调合走一条、事件走另一条，引擎线程用 blocking 两端
+# 收发，界面侧在 gpui 的 async 环境里 `recv().await` —— 所以既不是 `std::sync::mpsc`
+# （Receiver 不 async），也不为此引入一个 runtime。
+# **不是新依赖树**：锁里已有 2.5.0，folio-app 已经直接依赖它（根 `Cargo.toml` 那条
+# 注释写了出处），这里只是把图上已有的这份转成 folio-speech 的直接依赖。
+async-channel.workspace = true
+# 引擎线程的关键动作（事件、开口、调用失败）记一条日志；纪律与全仓同一条：
+# 只有动作与档位可出声，正文文本不进日志。
+tracing.workspace = true
+
+# 听书（合成朗读）的后端。为什么只挂这两个平台、Linux 构建要 libclang + libspeechd 头、
+# Android 随包要有 `rs/tts/Bridge` 类，全部写在根 `Cargo.toml` 的 `tts` 那条注释里。
+#
+# 用它的是本 crate（原 folio-core::speech）：一根专职线程持有 `tts::Tts`，对外只暴露
+# 命令与事件两条管道。Step 0 的两件量具（Android 的真机探针 `speech::probe`、桌面那个
+# `speech-smoke` example）只活在测量那一轮，量完就删、**没进仓库**；量到的结论落在
+# `plans/听书.md` 与模块文档里。留这条依赖要落的是打包而不是代码 —— `tts` 的
+# `JNI_OnLoad` 在 cdylib 加载那一刻就找 `rs/tts/Bridge`，所以随包的 `Bridge.java`、它的
+# R8 keep、manifest 的 `<queries>` 与 gradle 里排除 `libtts*.so` 必须跟它同进同退，
+# 缺一样就是加载期 abort。句柄不能跨线程（`Tts` 内部是 `Rc<RwLock<Box<dyn Backend>>>`，
+# 那句 `unsafe impl Send + Sync` 只让类型通过检查），这就是它必须住在一根专职线程里的
+# 原因。
+#
+# `not(target_env = "ohos")` 是鸿蒙那一格：它的三元组报 `target_os = "linux"`，于是这条
+# 判据本来就把 `tts` 放了进来，而 `tts` 的 linux 后端是 Speech Dispatcher —— 链接行上
+# 就多一个 `-lspeechd`，OHOS 的 sysroot 里没有（实测：整个鸿蒙构建全过，只死在这一格）。
+# 听书在鸿蒙上要等 NAPI / ArkTS 那一层（`@ohos.textToSpeech`）另起一条后端，不在这里。
+[target.'cfg(any(all(target_os = "linux", not(target_env = "ohos")), target_os = "android"))'.dependencies]
+tts.workspace = true

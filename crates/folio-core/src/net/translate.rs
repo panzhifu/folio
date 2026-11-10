@@ -1,23 +1,23 @@
 //! 选区翻译的**入口层**。引擎机制（三只引擎、请求/响应解析、编码、语言名表）
-//! 住 [`folio_ai`] crate —— 「换 crate 不换形状」，这里沿用旧路径；本层只做一件事：
-//! 把配置里的引擎档与密钥映射成一只 `Translator`。
+//! 住 [`folio_translate`] crate —— 「换 crate 不换形状」，这里沿用旧路径；本层只做
+//! 一件事：把配置里的引擎档与密钥映射成一只 `Translator`。
 //!
 //! ## 错误分档
 //!
 //! [`TranslateError`] 把传输层的 WebDAV 词表翻成翻译场景能说的话：缺 key、密钥被拒、
 //! 限流 / 配额、引擎返回的状态、响应读不懂。界面直接把这一句摆进失败卡片。
 
-pub use folio_ai::translate::{
+pub use folio_translate::{
     GoogleTranslator, MAX_SOURCE_CHARS, TARGET_LANGUAGES, TranslateError, Translation, Translator,
     source_hash,
 };
 pub mod deepl {
-    //! DeepL 引擎（机制在 folio-ai，旧路径沿用）。
-    pub use folio_ai::translate::deepl::*;
+    //! DeepL 引擎（机制在 folio-translate，旧路径沿用）。
+    pub use folio_translate::deepl::*;
 }
 pub mod openai {
-    //! OpenAI 兼容引擎（机制在 folio-ai，旧路径沿用）。
-    pub use folio_ai::translate::openai::*;
+    //! OpenAI 兼容引擎（机制在 folio-translate，旧路径沿用）。
+    pub use folio_translate::openai::*;
 }
 
 use crate::infra::config::{Translation as TranslationConfig, TranslationEngine};
@@ -38,7 +38,7 @@ pub fn configured(config: &TranslationConfig) -> Box<dyn Translator> {
 
 #[cfg(test)]
 mod tests {
-    //! 分发只认配置里的引擎档；引擎机制测试（请求形状、解析、语言映射）在 folio-ai。
+    //! 分发只认配置里的引擎档；引擎机制测试（请求形状、解析、语言映射）在 folio-translate。
     use super::configured;
     use crate::infra::config::{OpenAi, Translation as TranslationConfig, TranslationEngine};
 

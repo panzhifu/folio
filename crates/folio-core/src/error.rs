@@ -71,9 +71,6 @@ pub enum Error {
     #[error("没有这本书：{0}")]
     NoSuchBook(i64),
 
-    #[error("没有这一章：{0}")]
-    NoSuchChapter(i64),
-
     /// 库里只有正文的**位置**（v8 起），而按它回容器取时取不到。
     ///
     /// 单独立一条而不是回空串：它的后果与「这一章本来就是空的」完全不同 ——
@@ -119,39 +116,14 @@ pub enum Error {
         source: Option<Source>,
     },
 
-    /// StarDict 词典读不动：缺文件、版本不认识、索引与数据对不上。
-    ///
-    /// 单独立一条而不是复用 [`Error::Io`]：设置页要按「这一本词典坏了」提示并让读者
-    /// 删掉重导，而不是把一份路径拼进通用的读盘错误里；导入那一趟也要能原样把它
-    /// 交给弹层。
-    #[error("词典 {path:?} 读不动：{why}")]
-    Dictionary {
-        path: PathBuf,
-        why: String,
-        #[source]
-        source: Option<Source>,
-    },
-
     /// 备份包这一层的语义错误：路径不在备份目录里、清单不认识。
     ///
     /// 不混进 [`Error::Io`]：这一条说的是「这一份东西不是本应用这一版认得的备份」，
     /// 读者要做的不是检查网盘权限，而是换一份包或换一个版本。
     #[error("备份包 {path:?} 用不了：{why}")]
     Backup { path: PathBuf, why: String },
-
-    /// 字体这一层的语义错误：清单里没有这个 id、下载下来的字节大小对不上、
-    /// 目录里的文件不是认得的字体。
-    ///
-    /// 单独立一条而不是复用 [`Error::Io`]：与 [`Error::Dictionary`] 同一条理由 ——
-    /// 设置页要按「这一份字体装坏了」提示并让读者删掉重装，而不是把一条路径拼进
-    /// 通用的读盘错误里。
-    #[error("字体 {path:?} 装不上：{why}")]
-    Font {
-        path: PathBuf,
-        why: String,
-        #[source]
-        source: Option<Source>,
-    },
+    // 字体这一层的语义错误已随机制搬去 `folio-fonts`（`FontsError` 自持，
+    // 与词典的 `DictError` 同一条口径）；本枚举不再有这一档。
 }
 
 /// 解析层的错误 1:1 映射回 core 的变体：调用方 match 的分支与字段都不变。

@@ -889,8 +889,8 @@ fn index(store: &Store, idx: Indexing<'_>) -> Result<Imported> {
                 // 其余仍算「读不动」—— `UnsupportedFormat` 那一路走的是**容器结构**读不出，
                 // 到这里书已经被判成 EPUB 了，说「格式不支持」会把人引去换格式。
                 reject: match &err {
-                    crate::Error::Encrypted { .. } => ImportReject::Encrypted,
-                    crate::Error::NeedsPassword { .. } => ImportReject::NeedsPassword,
+                    folio_format::Error::Encrypted { .. } => ImportReject::Encrypted,
+                    folio_format::Error::NeedsPassword { .. } => ImportReject::NeedsPassword,
                     _ => ImportReject::Unreadable,
                 },
                 source: Some(Box::new(err)),

@@ -142,16 +142,14 @@ pub(in crate::ui::features::settings) fn gate_group(text_key: &'static str, cx: 
 /// 与「会员权益」「激活会员」那几组同形（买断到手后这一颗自己退场）。
 fn status_group(membership: &Membership, cx: &App) -> Group {
     let lifetime = membership.lifetime;
-    let mut rows = vec![
-        Row::custom(|_, cx| hero(cx).into_any_element()).keywords(&[
-            "membership",
-            "premium",
-            "会员",
-            "开通",
-            "买断",
-            "永久",
-        ]),
-    ];
+    let mut rows = vec![Row::custom(|_, cx| hero(cx).into_any_element()).keywords(&[
+        "membership",
+        "premium",
+        "会员",
+        "开通",
+        "买断",
+        "永久",
+    ])];
     if !lifetime {
         rows.push(
             Row::custom(|_, cx| cta_row(cx).into_any_element()).keywords(&[

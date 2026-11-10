@@ -1,5 +1,12 @@
 //! 在一本书的正文里找一段字：**现读现扫，不建索引**。
 //!
+//! 原住 folio-core::search（2026-11-12 阶段五收尾拆分原样搬来，「换 crate 不换形状」：
+//! core 经模块别名沿用旧路径，消费方一行不改）。它只认一本书与一个查询词：
+//! 全库那一档的按本分发与结果拼页归调用方（app），书库、配置与界面都不在这里。
+//! 坐标契约是 core 那侧的 [`folio_format::document`]（正文现取）与
+//! `folio_core::content::anchor`（`TextMap` 那把尺）——「搜到了、跳过去挑中的是别处」
+//! 靠两把尺同一份来保证，见下文。
+//!
 //! ## 为什么不建索引（2026-10-19 实测，release 档，本机，仓库里那三本真书）
 //!
 //! 单位是「读者改一次查询实际付的钱」，走的就是下面 [`scan`] 那一条路（作业池里按位置
@@ -48,7 +55,7 @@
 //! 这条数决定了全库那一档的优化方向**不是**倒排索引（FTS5 那一档见上文的表：建索引比现扫
 //! 一遍贵十倍，体积 3.2–4.4× 正文，中文两字查询还静默给 0 行），而是**别为搜索开一整本书**：
 //! 章节的位置清单本来就在库里（`Store::load_flow` → `chapters.locator`），而
-//! [`crate::content::format::ChapterLocator`] 足够回容器取字节，所以 OPF 与目录那两趟解析
+//! [`folio_format::ChapterLocator`] 足够回容器取字节，所以 OPF 与目录那两趟解析
 //! 在这一档是白付的。那一刀归下一轮（界面侧落点也归下一轮：读者 2026-10-20 定「先停在 core」）。
 //!
 //! ## 定版式那一族：钱全在「每页重开一次容器」
@@ -66,32 +73,32 @@
 //! 两族的现扫因此是同一个量级的一件事，不必给哪一族单独一档策略。
 //!
 //! 逐页问与整本一次**必须逐字节给同一串字**（那条契约与它的门写在
-//! [`crate::content::format::DocumentProvider::page_texts`]）：命中的偏移与选中、
+//! [`folio_format::DocumentProvider::page_texts`]）：命中的偏移与选中、
 //! 批注锚点是同一把尺，两处各数一遍就是「搜到了、跳过去挑中的是别处」。
 //!
 //! ## 坐标是 `TextMap` 那一把尺，而两族各有各的一把
 //!
-//! 可重排的一把是**那一章**的可见文本（[`crate::content::anchor::TextMap::build`] 从 DOM
+//! 可重排的一把是**那一章**的可见文本（`folio_core::content::anchor::TextMap::build` 从 DOM
 //! 的文本节点拼出来），定版式的一把是**那一页**的字序
-//! （[`crate::content::anchor::TextMap::from_visible_text`]，栅格引擎交出的那几个字）。
+//! （`folio_core::content::anchor::TextMap::from_visible_text`，栅格引擎交出的那几个字）。
 //! 两把都是「数的是字、不数断行」，所以同一份 `Hit` 在两族里都能被选中那套原样挑回来 ——
 //! 而两族**不能共用一把**：一页没有章，一章没有既定的页。
 //!
-//! 命中的 `start` / `end` 是**那一章可见文本**里的字符数，与 [`crate::Locator::offset`]、
-//! `chapters.char_len`、锚点的 `start` 全用同一份 [`crate::content::anchor::TextMap`]。
-//! 所以一处命中不必经过排版就能变成一个可跳的 [`crate::Locator`]。
+//! 命中的 `start` / `end` 是**那一章可见文本**里的字符数，与 `folio_core::Locator::offset`、
+//! `chapters.char_len`、锚点的 `start` 全用同一份 `folio_core::content::anchor::TextMap`。
+//! 所以一处命中不必经过排版就能变成一个可跳的 `folio_core::Locator`。
 //! 别在这条轴上另起一把尺：错了半个字就是「搜到『猫』、跳过去屏上是『狗』」。
 //!
-//! [`crate::content::format::visible_text`] 与 [`crate::content::format::visible_chars`]
+//! [`folio_format::visible_text`] 与 [`folio_format::visible_chars`]
 //! 必须同源（一个数、一条串，同一个 `TextMap`）：同一章在两处折出不同的字数，
 //! 进度条与搜索结果就指不到同一行。
 
 use std::ops::Range;
 use std::path::Path;
 
-use crate::content::document::Document;
-use crate::content::format::visible_text_only;
-use crate::infra::task::StageCtx;
+use folio_base::task::StageCtx;
+use folio_format::document::Document;
+use folio_format::visible_text_only;
 
 /// 一次扫描默认最多报多少处。
 ///
@@ -250,7 +257,7 @@ pub fn scan_book_at(
     options: &Options,
     ctx: &StageCtx,
 ) -> Option<Found> {
-    let doc = crate::content::document::open(path).ok()?;
+    let doc = folio_format::document::open(path).ok()?;
     Some(scan(doc.as_ref(), query, options, ctx))
 }
 

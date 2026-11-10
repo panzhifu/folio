@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use super::{ContentRef, Document, unsupported};
 use crate::Result;
-use crate::content::format::{
-    self, ChapterLocator, ChapterText, Content, ContentKind, DocMeta, DocumentProvider, FontBytes,
+use crate::{
+    ChapterLocator, ChapterText, Content, ContentKind, DocMeta, DocumentProvider, FontBytes,
 };
 
 pub struct BookDocument {
@@ -29,12 +29,12 @@ pub struct BookDocument {
     ///
     /// 懒开：绝大多数书在这次会话里根本不会被取字节，所以 `OnceLock` 里的
     /// `Container` 要等第一次取字节才真的 `Zip::open`（见那个模块的头）。
-    container: std::sync::OnceLock<crate::content::format::container::Container>,
+    container: std::sync::OnceLock<crate::container::Container>,
     /// `href` → 字节真实所在的那条目，**只收降级过的那几张**。
     ///
     /// 存在理由是 EPUB3 的 `<item fallback="…">`：正文里那串 `<img src>` 指的是这一版解不动
     /// 的那一份（逐页 SVG 是主流那个），而字节躺在同一个容器的另一条目里 —— 那一格就是
-    /// [`ImageRes::source`](crate::content::format::ImageRes::source)。键仍是
+    /// [`ImageRes::source`](crate::ImageRes::source)。键仍是
     /// `<img src>` 解出来的那一条，因为正文一个字都不许改（锚点坐标建在源文本上）。
     ///
     /// 第一次取字节时才从图片元数据里筛：绝大多数书一张降级路都没挂，那时它就是一张空表。
@@ -45,8 +45,8 @@ pub struct BookDocument {
     /// （2.7 MB / 122 章，release、热页缓存、3 轮取最小）解一遍是 13 ms，顺着读下去就是
     /// 每章一次 13 ms。留下第一次的结果，后面每次都是一次下标取值。
     ///
-    /// 先问 [`read_texts`](format::DocumentProvider::read_texts)（只要正文那一趟），问不
-    /// 出来才退回 [`read`](format::DocumentProvider::read)：后者顺手算的封面重编、逐章
+    /// 先问 [`read_texts`](crate::DocumentProvider::read_texts)（只要正文那一趟），问不
+    /// 出来才退回 [`read`](crate::DocumentProvider::read)：后者顺手算的封面重编、逐章
     /// 字数、每张插图的尺寸，这一格**一个都不看** —— MOBI 实测那三格占全文那一趟的七成。
     ///
     /// 驻留实测：600 章（约 13 万字）改写后的 XHTML 是 405 KB，一千二百万字级别的书约 4 MB。
@@ -67,7 +67,7 @@ impl BookDocument {
     /// （见 `plans/text-out-of-db.md`），导入时解出来再丢掉等于白付一次全量解压 ——
     /// 一本 1000 多章的 EPUB 就是白解 1000 多个 zip 条目。
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_with(path, format::ParseBudget::Auto, None)
+        Self::open_with(path, crate::ParseBudget::Auto, None)
     }
 
     /// 同 [`open`](Self::open)，但把这一本**内部**的解析并行度交给调用方分，并带上
@@ -82,10 +82,10 @@ impl BookDocument {
     /// 整机那一档：它是唯一在跑的那本）。
     pub fn open_with(
         path: &Path,
-        budget: format::ParseBudget,
-        passphrase: Option<format::Passphrase>,
+        budget: crate::ParseBudget,
+        passphrase: Option<crate::Passphrase>,
     ) -> Result<Self> {
-        let mut provider = format::provider_for(path).ok_or_else(|| unsupported(path))?;
+        let mut provider = crate::provider_for(path).ok_or_else(|| unsupported(path))?;
         // 在任何读取之前灌进去。只有 PDF 那一族认得它，其余 provider 走默认的空实现。
         provider.set_passphrase(passphrase);
         tracing::debug!(
@@ -95,7 +95,7 @@ impl BookDocument {
         );
         let (meta, content) = provider.index_with(path, budget)?;
         // 校验只写日志，不阻塞阅读。
-        crate::content::validate::check(&content, path);
+        crate::validate::check(&content, path);
         Ok(Self {
             provider: Some(provider),
             path: Some(path.to_path_buf()),
@@ -111,7 +111,7 @@ impl BookDocument {
     /// 正文齐全，但 `image_bytes` / `fonts` 回空。
     pub fn from_content(meta: DocMeta, content: Content) -> Self {
         // 校验只写日志，不阻塞阅读。路径用书名占位（没有文件）。
-        crate::content::validate::check(&content, Path::new(&meta.title));
+        crate::validate::check(&content, Path::new(&meta.title));
         Self {
             provider: None,
             path: None,
@@ -139,9 +139,9 @@ impl BookDocument {
         meta: DocMeta,
         content: Content,
         path: &Path,
-        passphrase: Option<format::Passphrase>,
+        passphrase: Option<crate::Passphrase>,
     ) -> Self {
-        let mut provider = format::provider_for(path);
+        let mut provider = crate::provider_for(path);
         if let Some(provider) = provider.as_mut() {
             provider.set_passphrase(passphrase);
         }
@@ -172,18 +172,18 @@ impl BookDocument {
     ///
     /// 第一次调用把它建起来（但**不**开文件 —— `Container` 自己懒开），之后每次
     /// 取字节都命中同一个句柄。
-    fn shared(&self) -> Option<&crate::content::format::container::Container> {
+    fn shared(&self) -> Option<&crate::container::Container> {
         let path = self.path.as_deref()?;
         Some(
             self.container
-                .get_or_init(|| crate::content::format::container::Container::new(path)),
+                .get_or_init(|| crate::container::Container::new(path)),
         )
     }
 
     /// 这条 `href` 的字节该**去哪儿读**。
     ///
     /// 绝大多数时候答案就是它自己；只有作者挂了降级路（EPUB3 的 `<item fallback="…">`，
-    /// 见 [`ImageRes`](crate::content::format::ImageRes)）的那几张换了去处。换的地方收在
+    /// 见 [`ImageRes`](crate::ImageRes)）的那几张换了去处。换的地方收在
     /// 这一处，于是下面取字节那两条路（容器先试、退回 provider）都不必各自再知道
     /// 「格式可以声明一份读不动的东西」这件事 —— 那是 provider 层的知识，不是这一层的。
     fn image_at<'a>(&'a self, href: &'a str) -> &'a str {
@@ -214,14 +214,14 @@ impl Document for BookDocument {
         }
     }
 
-    fn cover_ref(&self) -> Option<&crate::content::assets::cover::CoverRef> {
+    fn cover_ref(&self) -> Option<&crate::CoverRef> {
         match &self.content {
             Content::Reflow(flow) => flow.cover_ref.as_ref(),
             Content::Fixed(fixed) => fixed.cover_ref.as_ref(),
         }
     }
 
-    fn set_cover_ref(&mut self, cover: Option<crate::content::assets::cover::CoverRef>) {
+    fn set_cover_ref(&mut self, cover: Option<crate::CoverRef>) {
         // 两族都填：封面落盘那条路与「字节是从容器抽的还是栅格化出来的」无关，
         // 写的都是同一个 `covers/<hash>.<ext>`，记的都是同两列。
         match &mut self.content {
@@ -248,7 +248,7 @@ impl Document for BookDocument {
     /// **统一资源清单**（`doc/format.md` API 4）：provider 交出的 manifest 全量
     /// 优先（认得容器的格式才有），为空则回落派生 —— 图片表折 `Image`、CSS 位置
     /// 折 `Css`（单文件格式与老库走这一条）。
-    fn resources(&self) -> Vec<crate::content::format::Resource> {
+    fn resources(&self) -> Vec<crate::Resource> {
         if let Some((provider, path)) = self.container() {
             let list = provider.resources(path);
             if !list.is_empty() {
@@ -279,7 +279,7 @@ impl Document for BookDocument {
     fn render_page_region(
         &self,
         page: usize,
-        region: crate::content::format::PageRegion,
+        region: crate::PageRegion,
         width: u32,
         height: u32,
     ) -> Option<Vec<u8>> {
@@ -289,7 +289,7 @@ impl Document for BookDocument {
         provider.render_page_region(path, page, region, width, height)
     }
 
-    fn page_text(&self, page: usize) -> Option<crate::content::format::PageText> {
+    fn page_text(&self, page: usize) -> Option<crate::PageText> {
         // 同一个页号口径：这一问交的也是引擎那一侧的页号，与 `render_page` 一路。
         let (provider, path) = self.container()?;
         provider.page_text(path, page)
@@ -333,10 +333,7 @@ impl Document for BookDocument {
                 continue;
             };
             // 每份用它自己的目录解 `url()` —— 拼接之前做，基准才不会串。
-            css.push_str(&crate::content::format::absolutize_css_urls(
-                &text,
-                &crate::content::format::dir_of(href),
-            ));
+            css.push_str(&crate::absolutize_css_urls(&text, &crate::dir_of(href)));
             css.push('\n');
         }
         css
@@ -353,12 +350,12 @@ impl Document for BookDocument {
         }
     }
 
-    fn font_refs(&self, wanted: &[String]) -> Option<Vec<crate::content::format::FontRef>> {
+    fn font_refs(&self, wanted: &[String]) -> Option<Vec<crate::FontRef>> {
         let (provider, path) = self.container()?;
         provider.font_refs(path, wanted)
     }
 
-    fn font_refs_in(&self, wanted: &[String]) -> Option<Vec<crate::content::format::FontRef>> {
+    fn font_refs_in(&self, wanted: &[String]) -> Option<Vec<crate::FontRef>> {
         let (provider, path) = self.container()?;
         // 这个句柄是懒开的：`stylesheet()` 若已经读过 CSS，它已经开着；没读过就由
         // provider 的这一次读打开 —— 无论哪条，后面的章节/图片都复用它。
@@ -366,7 +363,7 @@ impl Document for BookDocument {
         provider.font_refs_in(path, container, wanted)
     }
 
-    fn read_font(&self, font: &crate::content::format::FontRef) -> Option<Vec<u8>> {
+    fn read_font(&self, font: &crate::FontRef) -> Option<Vec<u8>> {
         let (provider, path) = self.container()?;
         provider.read_font(path, font)
     }
@@ -456,7 +453,7 @@ impl BookDocument {
         self.section_texts
             .get_or_init(|| {
                 // 这一趟是「为取一章而重解整本」，量具挂在它身上：memo 生效时一本书只涨 1。
-                crate::infra::metrics::Metric::WholeBookRereads.count();
+                crate::metrics::Metric::WholeBookRereads.count();
                 // 便宜的那一问先试：只要正文。这一趟不看的封面 / 图片尺寸 / CSS / 字数
                 // 在 MOBI 那种格式上实测占全文那一趟的七成（见 `read_texts` 的文档）。
                 if let Some(texts) = provider.read_texts(path) {
@@ -514,22 +511,19 @@ mod tests {
     use std::path::Path;
 
     use crate::ChapterExt;
-    use crate::content::document::{BookDocument, ContentRef, Document, LocatorKind, metadata};
-    use crate::content::format::{ChapterLocator, Content, ContentKind, Format};
+    use crate::document::{BookDocument, ContentRef, Document, LocatorKind, metadata};
+    use crate::{ChapterLocator, Content, ContentKind, Format};
 
     /// 把「正文在手上」的内容变成**库里那一份**：每章只留位置。
     ///
     /// 落库走的是 `Store::save_flow_in`，这里只复现它的那一句 `locator_for`
     /// —— 测试不想为了一个形状去拉一份 SQLite。
-    fn at_locators(
-        flow: &crate::content::format::FlowDoc,
-        format: crate::content::format::Format,
-    ) -> crate::content::format::FlowDoc {
+    fn at_locators(flow: &crate::FlowDoc, format: crate::Format) -> crate::FlowDoc {
         let chapters = flow
             .chapters
             .iter()
             .enumerate()
-            .map(|(ix, ch)| crate::content::format::Chapter {
+            .map(|(ix, ch)| crate::Chapter {
                 title: ch.title.clone(),
                 spine_href: ch.spine_href.clone(),
                 // 字数不跟着位置走掉：它是索引那一趟的产物，落库之后仍要读得回来。
@@ -537,12 +531,10 @@ mod tests {
                 // 图片清单同一趟扫出来的另一样数，同理跟着位置走 —— 丢了它，
                 // 落库那一章就没有清单，而重扫要等 `INDEX_VERSION` 再 bump 一次才会来。
                 images: ch.images.clone(),
-                text: crate::content::format::ChapterText::At(crate::content::format::locator_for(
-                    format, ch, ix,
-                )),
+                text: crate::ChapterText::At(crate::locator_for(format, ch, ix)),
             })
             .collect();
-        crate::content::format::FlowDoc {
+        crate::FlowDoc {
             chapters,
             ..flow.clone()
         }
@@ -692,12 +684,9 @@ mod tests {
             .iter()
             .find(|r| r.href.ends_with("style.css"))
             .expect("样式表该在清单里");
-        assert_eq!(css.kind, crate::content::format::ResourceKind::Css);
+        assert_eq!(css.kind, crate::ResourceKind::Css);
         assert_eq!(css.size, Some(281));
-        assert!(
-            list.iter()
-                .any(|r| r.kind == crate::content::format::ResourceKind::Image)
-        );
+        assert!(list.iter().any(|r| r.kind == crate::ResourceKind::Image));
         // 清单是取字节的索引：每一条都取得回，且与 image_bytes 同源。
         for resource in &list {
             let bytes = book.resource_bytes(&resource.href).expect("取得回字节");
@@ -858,7 +847,7 @@ mod tests {
     /// 顺着读完整本就是 122 个 13 ms。
     #[test]
     fn paging_through_a_single_file_book_reparses_it_only_once() {
-        use crate::infra::metrics::{Metric, take_local};
+        use crate::metrics::{Metric, take_local};
 
         let dir = tempfile::tempdir().unwrap();
         let mut md = String::new();
@@ -908,10 +897,10 @@ mod tests {
         use std::cell::Cell;
         use std::path::PathBuf;
 
-        use crate::content::format::{
+        use crate::metrics::{Metric, take_local};
+        use crate::{
             Chapter, ChapterText, Content as FormatContent, DocMeta, DocumentProvider, FlowDoc,
         };
-        use crate::infra::metrics::{Metric, take_local};
 
         thread_local! {
             /// 替身自己数「回容器取了一趟」——memo 断了只有这里看得见。
@@ -955,20 +944,16 @@ mod tests {
             fn supports(&self, _path: &Path) -> bool {
                 true
             }
-            fn index(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
+            fn index(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
                 Ok((meta(), positions()))
             }
-            fn read(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
+            fn read(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
                 Ok((meta(), positions()))
             }
-            fn chapter_source(
-                &self,
-                _path: &Path,
-                at: &ChapterLocator,
-            ) -> folio_format::Result<String> {
+            fn chapter_source(&self, _path: &Path, at: &ChapterLocator) -> crate::Result<String> {
                 PROBE_READS.with(|n| n.set(n.get() + 1));
                 let ChapterLocator::Section(ix) = at else {
-                    return Err(folio_format::Error::ChapterUnavailable {
+                    return Err(crate::Error::ChapterUnavailable {
                         path: PathBuf::from("/x.txt"),
                         index: 0,
                         at: format!("{at:?}"),
@@ -1020,10 +1005,10 @@ mod tests {
         use std::cell::Cell;
         use std::path::PathBuf;
 
-        use crate::content::format::{
+        use crate::metrics::{Metric, take_local};
+        use crate::{
             Chapter, ChapterText, Content as FormatContent, DocMeta, DocumentProvider, FlowDoc,
         };
-        use crate::infra::metrics::{Metric, take_local};
 
         thread_local! {
             /// 全文那一趟被跑了几次 —— 便宜的路生效时它必须是 0。
@@ -1068,10 +1053,10 @@ mod tests {
             fn supports(&self, _path: &Path) -> bool {
                 true
             }
-            fn index(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
+            fn index(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
                 Ok((meta(), positions()))
             }
-            fn read(&self, _path: &Path) -> folio_format::Result<(DocMeta, FormatContent)> {
+            fn read(&self, _path: &Path) -> crate::Result<(DocMeta, FormatContent)> {
                 FULL_READS.with(|n| n.set(n.get() + 1));
                 Ok((
                     meta(),

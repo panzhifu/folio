@@ -6,13 +6,17 @@
 //!
 //! 文件活（复制 / 删除）走常驻作业池的 `Cleanup` 档，不在界面线程上搬几十 MB；
 //! 查词走 `Interactive` 档，结果原样交给会话。盘上那一半（导入的原子拷贝、id 消毒、
-//! 查词与进程级缓存）住在 `folio_core::dict::library`，这里只留状态与调度。
+//! 查词与进程级缓存）住在 folio-translate 的 dict 模块（旧路径
+//! `folio_core::dict::library` 经模块别名沿用），这里只留状态与调度。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 pub use folio_core::dict::library::{Hit, Source, lookup_in};
 use folio_core::dict::library::{ImportedDict, clear_cache, import_folder, remove_folder};
+// 词典错误自持在 folio-translate（DictError）；本服务只把它翻成状态行的字符串，
+// 不按变体分支，所以签名跟着机制走即可。
+use folio_core::dict::DictError;
 use folio_core::{DictionaryEntry, Priority};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global};
 
@@ -171,7 +175,7 @@ pub fn set_enabled(cx: &mut App, id: &str, enabled: bool) {
 impl DictionaryState {
     fn finish_import(
         &mut self,
-        result: folio_core::Result<(PathBuf, Vec<ImportedDict>)>,
+        result: Result<(PathBuf, Vec<ImportedDict>), DictError>,
         cx: &mut Context<Self>,
     ) {
         match result {
@@ -199,12 +203,7 @@ impl DictionaryState {
         cx.notify();
     }
 
-    fn finish_remove(
-        &mut self,
-        id: String,
-        result: folio_core::Result<()>,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_remove(&mut self, id: String, result: Result<(), DictError>, cx: &mut Context<Self>) {
         match result {
             Ok(()) => {
                 ConfigHolder::edit_dictionary(cx, |dictionary| {

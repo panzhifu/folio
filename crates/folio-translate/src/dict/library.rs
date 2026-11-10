@@ -1,9 +1,9 @@
 //! 词典库：导入、删除、查词的纯文件活。
 //!
 //! 这一层不认「界面」：给目录就搬文件，给源列表就查词，返回的都是纯数据。
-//! 列表的真相源（配置里 `Config::dictionary.installed`）仍由 app 持有 —— core 只管
+//! 列表的真相源（配置里 `Config::dictionary.installed`）仍由 app 持有 —— 机制层（本 crate）只管
 //! 盘上那一半：导入是原子拷贝（先落 `.import-<id>` 再改名，失败整趟撤掉），删除连
-//! 目录带缓存一起清。`lookup_in` 是纯函数式入口：调用方给源列表，它给结果，core 的
+//! 目录带缓存一起清。`lookup_in` 是纯函数式入口：调用方给源列表，它给结果，机制 crate 的
 //! 解析测试与 app 的导入测试由此可以分开写。
 //!
 //! 词典缓存（[`Cache`]）是**进程级**的：查词一次可能跨几本词典，重复打开几十 MB
@@ -14,8 +14,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use crate::dict::{Cache, StarDict};
-use crate::error::{Error, Result};
+use crate::dict::{Cache, DictError, Result, StarDict};
 
 /// 导入完成后交回调用方的一条书目。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +49,7 @@ pub fn lookup_in(sources: &[Source], query: &str) -> Result<Vec<Hit>> {
     }
     let mut cache = cache().lock().unwrap_or_else(|poison| poison.into_inner());
     let mut hits = Vec::new();
-    let mut first_error: Option<Error> = None;
+    let mut first_error: Option<DictError> = None;
     let mut loaded = 0usize;
     for source in sources {
         let dict = match cache.get(&source.dir) {
@@ -244,15 +243,15 @@ fn unique_id(base: &str, taken: &mut BTreeSet<String>, root: &Path) -> String {
     candidate
 }
 
-fn io_error(path: &Path, err: std::io::Error) -> Error {
-    Error::Io {
+fn io_error(path: &Path, err: std::io::Error) -> DictError {
+    DictError::Io {
         path: path.to_path_buf(),
         source: Box::new(err),
     }
 }
 
-fn dict_error(path: &Path, why: impl Into<String>) -> Error {
-    Error::Dictionary {
+fn dict_error(path: &Path, why: impl Into<String>) -> DictError {
+    DictError::Dictionary {
         path: path.to_path_buf(),
         why: why.into(),
         source: None,

@@ -6,14 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-# AI 问答与选区翻译：把一段书本文交给一个外部模型、拿回一段文字（「同一件事的
-# 两张脸」，共享传输、错误分档与语言名）。从 folio-core::net 的 ai / translate
+# AI 问答：把一段书本文交给一个外部模型、拿回一段文字。从 folio-core::net 的 ai
 # 原样搬来（「换 crate 不换形状」：core 经 shim 沿用旧路径）。这一层不认识配置
 # 文件 —— 选项由调用方拆成纯字段递进来。
+#
+# 翻译机制已拆去 folio-translate（2026-11-11，阶段五），本地词典也在那边；本 crate
+# 只剩问答。形状照翻译立（同一套 Transport、同一套错误分档），语言名表直接用
+# folio-translate 的 `language_name`——一份真源，两处提示词。两条错误链的对应关系
+# 由 `From<TranslateError> for AiError` 记着，那是两个 crate 之间唯一的桥。
 
 [dependencies]
 folio-net.workspace = true
 folio-base.workspace = true
-serde.workspace = true
+# 翻译机制在这边：language_name（提示词里的语言名表）与 TranslateError（错误对应
+# 关系的另一头）都从它来。方向与拆分前一致（ai → translate），没有环。
+folio-translate.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

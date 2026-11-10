@@ -58,6 +58,13 @@ pub mod djvu;
 /// 归约到的形状、章的切法、表格摊平那一条口径都得住在一处 —— 见 [`Marker`] 与那三个
 /// `escape_*`（它们从前在两个 provider 里各有一份逐字相同的副本）。
 pub mod doc;
+/// 统一的文档接口：[`Document`](document::Document) trait、它的通用实现
+/// [`BookDocument`](document::BookDocument) 与「文件 → 文档」的那几个门面。
+///
+/// 解析器交出 [`Content`] 之后，「读者看到什么」就与格式无关了：界面只问
+/// 「可重排还是定版式」，取正文 / 取字节 / 取资源清单都走同一个 trait。原住
+/// folio-core 的 content 分区，2026-11-12 阶段五收尾下沉到这里 —— 判据见模块头。
+pub mod document;
 /// WordprocessingML（`.docx`）：一个 ZIP 里的 `word/document.xml`。
 pub mod docx;
 pub mod epub;
@@ -94,6 +101,12 @@ pub mod svg;
 /// 纯文本那一族（`.txt`），以及它与 Markdown 共用的那条链（读成文本 → 规范化 →
 /// 折成章表 → 包装）。共用件只在这一份里有一份。
 pub mod text;
+/// 解析产物的结构完整性检查：「读出来不对」只写日志，不阻塞阅读。
+///
+/// 章数为零、定版式没有页这类坏结构在**打开书**的那一趟顺手查（[`document`] 的
+/// `open` / `from_content` 都调它）；它与解析同住一个 crate，是因为判据全是
+/// 「Content 的形状对不对」，离开 [`Content`] 没有意义。
+pub mod validate;
 pub mod woff;
 pub mod woff2;
 pub mod xhtml;

@@ -1,12 +1,19 @@
 //! 统一的文档接口 —— KOReader `document/document.lua` 那一层在 Rust 里的对应物。
 //!
 //! 格式差别到 [`ContentKind`] 的两个家族为止：往上一律是 [`Document`]，界面不再问
-//! 「这是什么格式」，只问「可重排还是定版式」。「怎么解析」在
-//! [`crate::content::format::provider`]，这里管「读者看到什么」。
+//! 「这是什么格式」，只问「可重排还是定版式」。「怎么解析」在 [`crate::provider`]，
+//! 这里管「读者看到什么」。
 //!
 //! 与 KOReader 的差别只有一处：那边 `Document` 子类同时持有引擎与页缓存、还负责渲染；
-//! 这里 core 不渲染 —— [`Document`] 只给出内容与按需取字节的入口，排版与绘制在引擎
+//! 这里引擎不渲染 —— [`Document`] 只给出内容与按需取字节的入口，排版与绘制在引擎
 //! 与界面。这条边界也是它能在 `cargo test` 里被全量覆盖的原因。
+//!
+//! 原住 folio-core 的 content 分区（2026-11-12 阶段五收尾原样搬来，「换 crate 不换
+//! 形状」：core 经 `content::document` 的 re-export 沿用旧路径，消费方一行不改）。
+//! 搬家的判据：这一层只吃本 crate 的类型——trait 的错误面（`ChapterUnavailable` /
+//! `UnsupportedFormat`）本就是 [`crate::Error`] 的变体，`CoverRef` 本就住在这里；
+//! 下沉之后书内搜索（folio-search）与字体装载（folio-fonts）才能站在它上面而不必
+//! 咬住 folio-core。
 
 mod book;
 
@@ -15,7 +22,7 @@ pub use book::BookDocument;
 use std::path::Path;
 
 use crate::Result;
-use crate::content::format::{
+use crate::{
     Content, ContentKind, DocMeta, FixedDoc, FlowDoc, FontBytes, FontRef, Format, ImageRes,
     ParseBudget, Resource, ResourceKind, TocEntry,
 };
@@ -120,7 +127,7 @@ pub trait Document: Send + Sync {
     ///
     /// 与 [`render_page`](Document::render_page) 的分别是「画整页」与「画看得见的那一块」：
     /// 前者按页表那把尺出一张，后者要的是「手里那张 2048 的图里，屏幕上剩这一块，
-    /// 请按 4096 那一档重来」。单位因此仍是页表那把尺的像素（见 `content::format::PageRegion`）。
+    /// 请按 4096 那一档重来」。单位因此仍是页表那把尺的像素（见 `crate::PageRegion`）。
     ///
     /// 默认 `None`：只有栅格化引擎在那儿的那一族给得出（PDF / AZW4）；漫画与可重排的书
     /// 没有「按更高档重画」这回事。这一问不判值不值得 —— 那一格在页表的
@@ -128,7 +135,7 @@ pub trait Document: Send + Sync {
     fn render_page_region(
         &self,
         _page: usize,
-        _region: crate::content::format::PageRegion,
+        _region: crate::PageRegion,
         _width: u32,
         _height: u32,
     ) -> Option<Vec<u8>> {
@@ -139,9 +146,9 @@ pub trait Document: Send + Sync {
     /// 理由：画得出这一页不等于读得出它的字（扫描本没带 OCR、漫画包的一页就是一张图）。
     ///
     /// 按页现取、不入库：实测每页 0.3–10 ms，而一次选中只用得上看得着的那一两页
-    /// （理由与单位都写在 `content::format::PageText`）。默认 `None` = 这一族没有引擎
+    /// （理由与单位都写在 `crate::PageText`）。默认 `None` = 这一族没有引擎
     /// 能给的字；可重排的书也不实现它（它的字与行盒在排版结果里）。
-    fn page_text(&self, _page: usize) -> Option<crate::content::format::PageText> {
+    fn page_text(&self, _page: usize) -> Option<crate::PageText> {
         None
     }
 
@@ -161,7 +168,7 @@ pub trait Document: Send + Sync {
 
     /// 这本书的作者样式表（拼接后的 CSS 文本）。
     ///
-    /// 索引路径下库里只有位置清单（[`crate::content::format::FlowDoc::css_hrefs`]），
+    /// 索引路径下库里只有位置清单（[`crate::FlowDoc::css_hrefs`]），
     /// 这里按清单回容器现取：每份用它**自己所在目录**做 `url()` 绝对化，按文档序
     /// 拼接（顺序即层叠顺序）。某一份读不到就跳过并记日志 —— 与图片缺失同一个
     /// 立场：少一份样式，正文照排。调用方（阅读会话）每书取一次。
@@ -229,13 +236,13 @@ pub trait Document: Send + Sync {
     ///
     /// **由导入管线填，不是 provider 填**：provider 只交字节，它不知道书库在哪儿。
     /// 默认 `None` = 没有封面文件，读那一侧退回 `books.cover` 那个 BLOB。
-    fn cover_ref(&self) -> Option<&crate::content::assets::cover::CoverRef> {
+    fn cover_ref(&self) -> Option<&crate::CoverRef> {
         None
     }
 
     /// 填上封面描述。两族都填：封面落盘写的是同一个 `covers/<哈希>.<后缀>`、
     /// 记的是库里同两列，与「那张图是从容器抽的还是栅格化出来的」无关。
-    fn set_cover_ref(&mut self, _cover: Option<crate::content::assets::cover::CoverRef>) {}
+    fn set_cover_ref(&mut self, _cover: Option<crate::CoverRef>) {}
 
     fn cover(&self) -> Option<&[u8]> {
         match self.content() {
@@ -273,7 +280,7 @@ pub trait Document: Send + Sync {
 
     /// 第 `index` 章的**引擎就绪 XHTML**，需要时才去容器里取。
     ///
-    /// 库里只存位置不存正文（见 [`crate::content::format::ChapterLocator`] 与
+    /// 库里只存位置不存正文（见 [`crate::ChapterLocator`] 与
     /// `plans/text-out-of-db.md`），所以这是「读一本已经打开的书」唯一的正文入口：
     ///
     /// - 位置是 [`ChapterLocator::Inline`]：正文就在手上（测试、旧库兜底），直接给。
@@ -305,7 +312,7 @@ pub fn open(path: &Path) -> Result<Box<dyn Document>> {
 pub fn open_with(
     path: &Path,
     budget: ParseBudget,
-    passphrase: Option<crate::content::format::Passphrase>,
+    passphrase: Option<crate::Passphrase>,
 ) -> Result<Box<dyn Document>> {
     Ok(Box::new(BookDocument::open_with(path, budget, passphrase)?))
 }
@@ -322,8 +329,8 @@ pub fn from_content(meta: DocMeta, content: Content) -> Box<dyn Document> {
 ///
 /// 「按主键打开」那条路用它：库里存的是章节表、CSS、目录、封面与图片元数据，
 /// 而正经的正文、图片字节、内嵌字体都要回到容器里读 —— 前者按
-/// [`format::ChapterLocator`]，后两者按 `href`（见 `format::ImageRes` /
-/// `format::FontBytes`）。
+/// [`crate::ChapterLocator`]，后两者按 `href`（见 `crate::ImageRes` /
+/// `crate::FontBytes`）。
 ///
 /// `passphrase` = 库里替读者记住的那份口令（`store::passphrase_for_book`）。带口令的
 /// PDF 少了这一格，取正文与取页都会回空 —— 见 [`BookDocument::with_container`]。
@@ -331,7 +338,7 @@ pub fn with_container(
     meta: DocMeta,
     content: Content,
     path: &Path,
-    passphrase: Option<crate::content::format::Passphrase>,
+    passphrase: Option<crate::Passphrase>,
 ) -> Box<dyn Document> {
     Box::new(BookDocument::with_container(
         meta, content, path, passphrase,
@@ -340,8 +347,8 @@ pub fn with_container(
 
 /// 只取书目元信息，不建正文模型 —— 书库列书目时用这一条。
 pub fn metadata(path: &Path) -> Result<DocMeta> {
-    let provider = crate::content::format::provider_for(path).ok_or_else(|| unsupported(path))?;
-    provider.metadata(path).map_err(Into::into)
+    let provider = crate::provider_for(path).ok_or_else(|| unsupported(path))?;
+    provider.metadata(path)
 }
 
 /// 「一个 provider 都没认上」是导入失败里最常见的一种，留一句日志：

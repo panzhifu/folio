@@ -1,0 +1,32 @@
+[package]
+name = "folio-translate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 选区翻译与本地词典：「查」的两条路同住一个 crate（2026-11-11，阶段五拆分）。
+# 翻译机制从 folio-ai::translate 原样搬来，词典机制从 folio-core::dict 原样搬来
+# （「换 crate 不换形状」：core 经 shim / 模块别名沿用旧路径，消费方一行不改）。
+# 两条路互不依赖——翻译走网络、词典只碰磁盘；同 crate 是因为都属「查」的域，
+# 且都把「这一格存不存在」的判据留给调用方。这一层不认识配置文件——引擎的分发
+# （`net::translate::configured`）与词典源列表都由 folio-core / app 递进来。
+# 错误自持（TranslateError / DictError），与 folio-format / folio-net 同一条口径。
+
+[dependencies]
+# 出网地层：翻译的三只引擎都吃同一套 Transport / Request / Response。
+folio-net.workspace = true
+# 源文缓存键的 SHA-256（identity::sha256_of_bytes）。词典不用它，翻译用。
+folio-base.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# 词典包（dict）的 gzip 解压：.idx.gz / .dict.dz 都是 gzip 流（dictzip 的随机
+# 访问扩展在顺序解压下可以忽略），所以不新增解码依赖。
+flate2.workspace = true
+# 词典打不开时在 lookup_in 里记一条警告再跳过下一本（消费方只收结果与首错）。
+tracing.workspace = true
+
+[dev-dependencies]
+# 词典导入 / 删除的测试要真目录（原 folio-core 的 dev-dep 随 dict 一同搬来）。
+tempfile = "3"

@@ -148,7 +148,7 @@ mod tests {
             fn stylesheet(&self) -> String {
                 self.0.stylesheet()
             }
-            fn chapter_source(&self, index: usize) -> folio_core::Result<String> {
+            fn chapter_source(&self, index: usize) -> folio_core::content::format::Result<String> {
                 self.0.chapter_source(index)
             }
             fn font_refs_in(&self, _wanted: &[String]) -> Option<Vec<FontRef>> {

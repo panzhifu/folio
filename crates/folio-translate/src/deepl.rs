@@ -147,7 +147,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{DeepLTranslator, parse_response, source_code, target_code};
-    use crate::translate::{MAX_SOURCE_CHARS, TranslateError, Translator};
+    use crate::{MAX_SOURCE_CHARS, TranslateError, Translator};
     use folio_net::{Error, Method, Request, Response, Transport};
 
     const OK: &str = r#"{"translations":[

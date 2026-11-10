@@ -1,0 +1,49 @@
+[package]
+name = "folio-fonts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 字体域的机制收口（2026-11-12，阶段五拆分）：两条线同住一个 crate——
+# - [`text`]：字体**字节**的机制。name 表解析（names）、家族登记表（families）、
+#   随书字体的装载与子集化（load / scan）。从 folio-core::text 原样搬来。
+# - [`fonts`]：读者**自己装的**字体库。内置清单、下载 / 导入 / 删除的落盘半程、
+#   魔数识别与解回 sfnt。从 folio-core::fonts 原样搬来。
+#
+# 「换 crate 不换形状」：core 经 `pub use folio_fonts::{text, fonts}` 沿用旧路径，
+# 消费方一行不改。两条线互不依赖——text 只认字节与 folio-format 的文档接口，
+# fonts 只认清单、网络与磁盘；同 crate 是因为同属「字体」的域（与词典 / 翻译
+# 同住 folio-translate 同一条判据）。这一层不认识配置文件与书库：字体根目录由
+# 调用方递进来（`folio_base::paths::fonts_dir` 在 core 那侧拼装）。
+#
+# 错误自持（`FontsError`），与 folio-format / folio-translate 同一条口径；
+# 原 `folio_core::Error::Font` 变体随迁删除（app 侧的注册失败也改产 FontsError）。
+
+[dependencies]
+# 随书字体装载要站在统一文档接口上（`Document::fonts` / `font_refs` / `read_font`），
+# `@font-face` 的解析与 woff / woff2 的解码也在它那边。
+folio-format.workspace = true
+# 用户字体库的下载半程：Transport / Request / Sink / Cancel 与 `net::update` 同一套。
+folio-net.workspace = true
+# 目录 id 的洗名判据（`paths::is_unsafe_name_char`）与字体根目录的拼装约定。
+folio-base.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# 下载换源时记一条警告；纪律与全仓同一条：只有动作与档位可出声。
+tracing.workspace = true
+
+# 随书字体的子集化（skera）、name 表读与重建（read-fonts / write-fonts）、
+# 字节级 name 表解析（ttf-parser）。原在 folio-core，随 text 一同搬来 ——
+# text 之外全仓无人使用。与 folio-core 那边同一句注意：**必须留在主依赖区**，
+# `text::load` 不分平台，Windows / macOS 也要用。
+skera.workspace = true
+read-fonts.workspace = true
+write-fonts.workspace = true
+ttf-parser.workspace = true
+
+[dev-dependencies]
+# 下载 / 导入 / 删除的测试要真目录（原 folio-core 的 dev-dep 随 fonts 一同搬来）。
+tempfile = "3"

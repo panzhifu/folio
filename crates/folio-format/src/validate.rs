@@ -19,7 +19,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::content::format::{Content, FixedDoc, FlowDoc, TocEntry};
+use crate::{Content, FixedDoc, FlowDoc, TocEntry};
 
 /// 一份文档校验出的问题表。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -166,8 +166,7 @@ fn check_flow(flow: &FlowDoc, issues: &mut Issues) {
     for (ix, chapter) in flow.chapters.iter().enumerate() {
         // 正文可能还没取（索引那一趟只有位置，见 `ChapterText::At`）——
         // 那种情况说不了「这一章是空的」，只有正文真在手上且真为空才算。
-        if matches!(&chapter.text, crate::content::format::ChapterText::Inline(text) if text.trim().is_empty())
-        {
+        if matches!(&chapter.text, crate::ChapterText::Inline(text) if text.trim().is_empty()) {
             issues.push(
                 IssueKind::Warn,
                 &chapter.spine_href,
@@ -255,7 +254,7 @@ mod tests {
     use super::*;
     use crate::ChapterExt;
 
-    use crate::content::format::Chapter;
+    use crate::Chapter;
     #[test]
     fn empty_chapters_is_an_error() {
         let flow = FlowDoc::default();
@@ -315,7 +314,7 @@ mod tests {
 
     #[test]
     fn fixed_page_missing_image_is_a_warning() {
-        use crate::content::format::{FixedPage, PageSource};
+        use crate::{FixedPage, PageSource};
 
         let fixed = FixedDoc {
             pages: vec![FixedPage {

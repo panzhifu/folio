@@ -21,7 +21,35 @@ use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
 
-use crate::error::{Error, Result};
+/// 词典这一层的错误，**自持**（与 folio-format / folio-net 同一条口径）：core 的伞
+/// 枚举不再有 `Dictionary` 变体，消费方拿到的 Display 文案与搬来前一格不变。
+///
+/// 约定照旧：每个变体都带上下文（哪个路径、为什么），底层错误留在 `#[source]` 链上，
+/// 不压成字符串。
+#[derive(Debug, thiserror::Error)]
+pub enum DictError {
+    #[error("读 {path} 失败：{source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    /// StarDict 词典读不动：缺文件、版本不认识、索引与数据对不上。
+    ///
+    /// 单独立一条而不是复用 [`DictError::Io`]：设置页要按「这一本词典坏了」提示并让
+    /// 读者删掉重导，而不是把一份路径拼进通用的读盘错误里；导入那一趟也要能原样把它
+    /// 交给弹层。
+    #[error("词典 {path:?} 读不动：{why}")]
+    Dictionary {
+        path: PathBuf,
+        why: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
+}
+
+pub type Result<T> = std::result::Result<T, DictError>;
 
 /// `.idx` 解压后的上限。词表按 4/8 字节偏移 + 词本身算，32 MiB 已经覆盖百万词级。
 const MAX_IDX_BYTES: u64 = 32 * 1024 * 1024;
@@ -170,12 +198,12 @@ struct Files {
 impl Files {
     fn locate(dir: &Path) -> Result<Self> {
         let mut ifos = Vec::new();
-        let entries = fs::read_dir(dir).map_err(|err| Error::Io {
+        let entries = fs::read_dir(dir).map_err(|err| DictError::Io {
             path: dir.to_path_buf(),
             source: Box::new(err),
         })?;
         for entry in entries {
-            let entry = entry.map_err(|err| Error::Io {
+            let entry = entry.map_err(|err| DictError::Io {
                 path: dir.to_path_buf(),
                 source: Box::new(err),
             })?;
@@ -303,7 +331,7 @@ fn read_text(path: &Path, max: u64) -> Result<String> {
 }
 
 fn read_bytes(path: &Path, max: u64, gzip: bool) -> Result<Vec<u8>> {
-    let file = File::open(path).map_err(|err| Error::Io {
+    let file = File::open(path).map_err(|err| DictError::Io {
         path: path.to_path_buf(),
         source: Box::new(err),
     })?;
@@ -322,7 +350,7 @@ fn read_bytes(path: &Path, max: u64, gzip: bool) -> Result<Vec<u8>> {
             .by_ref()
             .take(max + 1)
             .read_to_end(&mut out)
-            .map_err(|err| Error::Io {
+            .map_err(|err| DictError::Io {
                 path: path.to_path_buf(),
                 source: Box::new(err),
             })?;
@@ -585,8 +613,8 @@ fn entity_char(name: &str) -> Option<char> {
     }
 }
 
-fn dict_error(path: &Path, why: impl Into<String>) -> Error {
-    Error::Dictionary {
+fn dict_error(path: &Path, why: impl Into<String>) -> DictError {
+    DictError::Dictionary {
         path: path.to_path_buf(),
         why: why.into(),
         source: None,
