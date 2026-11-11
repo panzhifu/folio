@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use super::baidu::{USER_AGENT, query_encode};
-use crate::net::remote::{Error, Method, Request, Response, Result, Transport};
+use crate::{Error, Method, Request, Response, Result, Transport};
 
 const OAUTH: &str = "https://openapi.baidu.com/oauth/2.0";
 
@@ -61,7 +61,7 @@ impl From<BaiduTokens> for super::auth::Token {
         Self {
             access: tokens.access_token,
             refresh: tokens.refresh_token,
-            expires_at: crate::infra::time::now() + tokens.expires_in.max(0),
+            expires_at: folio_base::time::now() + tokens.expires_in.max(0),
         }
     }
 }
@@ -245,7 +245,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::net::remote::dav::Mock;
+    use crate::dav::Mock;
 
     const TOKEN_JSON: &str =
         r#"{"access_token":"121.ab","refresh_token":"122.cd","expires_in":2592000}"#;

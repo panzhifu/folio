@@ -2249,6 +2249,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "folio-account"
+version = "0.1.4"
+dependencies = [
+ "ring",
+]
+
+[[package]]
 name = "folio-ai"
 version = "0.1.4"
 dependencies = [
@@ -2306,8 +2313,8 @@ dependencies = [
 name = "folio-core"
 version = "0.1.4"
 dependencies = [
- "axum",
  "base64 0.22.1",
+ "folio-account",
  "folio-ai",
  "folio-base",
  "folio-fonts",
@@ -2318,15 +2325,10 @@ dependencies = [
  "folio-search",
  "folio-speech",
  "folio-translate",
- "futures-util",
  "hayro",
  "image",
- "libc",
- "md-5",
  "notify",
- "quick-xml 0.42.0",
  "rars",
- "ring",
  "rusqlite",
  "rust-i18n",
  "serde",
@@ -2336,13 +2338,11 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
  "tracing-log",
  "tracing-subscriber",
  "ttf-parser",
  "ureq",
- "url",
  "zip",
 ]
 
@@ -2422,12 +2422,24 @@ dependencies = [
 name = "folio-net"
 version = "0.1.4"
 dependencies = [
+ "axum",
  "base64 0.22.1",
+ "folio-account",
  "folio-base",
+ "folio-model",
+ "futures-util",
+ "libc",
+ "md-5",
  "quick-xml 0.42.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
  "ureq",
+ "url",
 ]
 
 [[package]]

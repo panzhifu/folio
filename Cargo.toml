@@ -6,6 +6,7 @@ members = [
     "crates/folio-model",
     "crates/folio-format",
     "crates/folio-net",
+    "crates/folio-account",
     "crates/folio-translate",
     "crates/folio-fonts",
     "crates/folio-search",
@@ -29,6 +30,7 @@ folio-base = { path = "crates/folio-base" }
 folio-model = { path = "crates/folio-model" }
 folio-format = { path = "crates/folio-format" }
 folio-net = { path = "crates/folio-net" }
+folio-account = { path = "crates/folio-account" }
 folio-translate = { path = "crates/folio-translate" }
 folio-fonts = { path = "crates/folio-fonts" }
 folio-search = { path = "crates/folio-search" }

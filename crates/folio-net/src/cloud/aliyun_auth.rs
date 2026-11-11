@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use super::baidu::query_encode;
-use crate::net::remote::{Error, Method, Request, Result, Transport};
+use crate::{Error, Method, Request, Result, Transport};
 
 const API: &str = "https://open.aliyundrive.com";
 const AUTHORIZE: &str = "https://openapi.aliyundrive.com/oauth/authorize";
@@ -84,7 +84,7 @@ impl From<AliyunTokens> for super::auth::Token {
         Self {
             access: tokens.access_token,
             refresh: tokens.refresh_token,
-            expires_at: crate::infra::time::now() + tokens.expires_in.max(0),
+            expires_at: folio_base::time::now() + tokens.expires_in.max(0),
         }
     }
 }
@@ -310,8 +310,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::net::remote::Response;
-    use crate::net::remote::dav::Mock;
+    use crate::Response;
+    use crate::dav::Mock;
 
     const TOKEN_JSON: &str = r#"{"token_type":"Bearer","access_token":"ali.at","refresh_token":"ali.rt","expires_in":7200,"drive_id":"88"}"#;
     const ROTATED_JSON: &str = r#"{"token_type":"Bearer","access_token":"ali.at2","refresh_token":"ali.rt2","expires_in":7200}"#;

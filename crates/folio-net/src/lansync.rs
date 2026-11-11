@@ -4,32 +4,33 @@
 //!
 //! - 服务端那一半挂在 [`super::transfer`] 那个 axum 服务器上（`tokio` 只许住在
 //!   [`super::transfer`] 的边界里，见 [`super`] 的模块文档），它把这里的 DTO 解出来、
-//!   用 [`crate::account`] 验过账号再答；
-//! - 客户端的**编排在 [`sync_one`]**，出网口是 [`super::remote::Transport`]，与 WebDAV、
+//!   用 `folio_account` 验过账号再答；
+//! - 客户端的**编排在 [`sync_one`]**，出网口是 [`crate::Transport`]，与 WebDAV、
 //!   翻译、检查更新同一个，于是整趟往返能在测试里塞一只假传输离线跑完；
 //! - 向本机要的那几件事（书架清单、导入一本、合并写回）收在 [`LanLocal`] 这一个出口里，
 //!   由装配那一层实现 —— 书库句柄、导入管线、作业池归它管，不是这一层的事。
 //!
-//! 与 [`crate::sync`] 的分工：那里是「一台设备的全量快照长什么样、几份快照怎么合成一份」，
+//! 与 `folio_model::sync` 的分工：那里是「一台设备的全量快照长什么样、几份快照怎么合成一份」，
 //! 这里是「快照与书怎么在局域网里递给对面那台」。合并规则两边共用，一条都没重写。
 //!
 //! **账号 id 是句声称，不是凭据**：`/hello` 里那串 id 任何设备都能广播，所以它只用来
 //! 让对方决定「值不值得跟你握手」；真正的准入是之后那对 nonce 与双向证明
-//! （见 [`crate::account`]）。证明没过，任何一条数据路由都不答。
+//! （见 `folio_account`）。证明没过，任何一条数据路由都不答。
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::remote::{self, Method, Request, Response, Transport};
-use crate::account::{AccountKey, Nonce, Proof, Side};
-use crate::sync::{SNAPSHOT_VERSION, Snapshot};
+use crate as remote;
+use crate::{Method, Request, Response, Transport};
+use folio_account::{AccountKey, Nonce, Proof, Side};
+use folio_model::sync::{SNAPSHOT_VERSION, Snapshot};
 
 // 清单条目的数据形状归 sync（评审稿 Stage 2.2）：读侧要它的是 `store` 的
 // 「本机有哪些可同步的书」，而 store 不许认识网络模块。这里沿用旧路径，
 // `net::lansync::BookEntry` 的既有写法（`net/transfer/lan.rs`、界面侧）一行不改。
-pub use crate::sync::BookEntry;
+pub use folio_model::sync::BookEntry;
 
 /// 这一版局域网协议。两端各带在自己每一条报文里，`version` 比本机高的对端直接拒：
 /// 猜字段比连不上更难查。
@@ -71,14 +72,14 @@ pub struct Hello {
 /// 还有它此刻的钟。
 ///
 /// `now` 不是装饰：两端各自的表对不上是常态（飞行模式几天、手机自己同步过一次），
-/// 而局域网给了唯一一次「当场对表」的机会 —— 拿它对 [`crate::sync::Snapshot::shift_clock`]，
+/// 而局域网给了唯一一次「当场对表」的机会 —— 拿它对 [`folio_model::sync::Snapshot::shift_clock`]，
 /// 比对那些隔着云端写下来的时间戳可靠。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloReply {
     pub version: u32,
     pub account: String,
     pub nonce: String,
-    /// 对端作为接收方出示的证明（[`crate::account::Side::Responder`] 那一句）。
+    /// 对端作为接收方出示的证明（[`folio_account::Side::Responder`] 那一句）。
     pub proof: String,
     /// 之后每一条请求都要带的会话凭据。
     pub token: String,
@@ -128,7 +129,7 @@ pub struct Report {
     pub pulled: usize,
     /// 拉过来但导入拒了（不是书、坏了、带 DRM）。
     pub failed: usize,
-    /// 落进本机的进度 / 批注 / 书签条数，与 [`crate::sync::Report`] 同一口径。
+    /// 落进本机的进度 / 批注 / 书签条数，与 [`folio_model::sync::Report`] 同一口径。
     pub applied_positions: usize,
     pub applied_annotations: usize,
     pub applied_bookmarks: usize,
@@ -157,7 +158,7 @@ pub fn is_book_hash(hash: &str) -> bool {
 /// 读者填进来的那一句地址 → 请求前缀 `scheme://host:port`（不带尾斜杠）。
 ///
 /// 局域网里没人会打协议前缀：屏幕上摆的就是 `192.168.1.5:8410`。所以没写协议时补 `http` ——
-/// 这一趟本来就在局域网里走明文（ [`crate::account`] 的校验码就是为这一段明文准备的）。
+/// 这一趟本来就在局域网里走明文（ `folio_account` 的校验码就是为这一段明文准备的）。
 /// 带路径的一律不认：那说明填过来的是传书那页**上传页**的地址（后面挂着 `/?pin=…`），
 /// 我们的路由不在那底下，报错比猜意图便宜。
 pub fn normalize_peer(input: &str) -> Option<String> {
@@ -182,7 +183,7 @@ pub fn normalize_peer(input: &str) -> Option<String> {
     Some(format!("{scheme}://{rest}"))
 }
 
-/// 客户端一趟要向本机要的那几件事。与 [`crate::net::transfer::LanProvider`] 是一对：
+/// 客户端一趟要向本机要的那几件事。与 [`crate::transfer::LanProvider`] 是一对：
 /// 那一个管「被对面读」，这一个管「我们去读对面」。
 ///
 /// 实现住在装配那一层（`folio-app`）：书库句柄、导入管线、作业池、每本书的副本躺在哪儿，
@@ -295,7 +296,7 @@ fn refused(err: remote::Error, door: Door) -> Error {
 
 /// 一条回话过不过门，不过的话是哪一种失败。
 ///
-/// 两种形状都要认：[`crate::net::remote::ureq::UreqTransport`] 把非 2xx 摊进
+/// 两种形状都要认：[`crate::ureq::UreqTransport`] 把非 2xx 摊进
 /// `Err(remote::Error)`，而测试里的假传输可以直接给一个 404 的 `Response`。只认一边的话，
 /// 用例走的路径与真机上走的是两条，测过了也不算数。
 ///
@@ -336,7 +337,7 @@ pub struct Peer {
     /// `/hello` 发下来的会话凭据，之后每一条都要带。
     token: String,
     /// 对面写下的时间搬到本机钟面要加的秒数：`本机钟 - 对端钟`（与
-    /// [`crate::sync::Snapshot::shift_clock`] 的 `delta` 同一个定义）。
+    /// [`folio_model::sync::Snapshot::shift_clock`] 的 `delta` 同一个定义）。
     clock_shift: i64,
 }
 
@@ -431,7 +432,7 @@ impl Peer {
     /// 那一本书的下载地址。
     ///
     /// token 与 hash 都是十六进制，拼进查询串不需要再转义；而 token 在查询里，日志侧
-    /// [`crate::net::remote::strip_query`] 会掐掉整个查询串 —— 抓日志的人拿不到它。
+    /// [`crate::strip_query`] 会掐掉整个查询串 —— 抓日志的人拿不到它。
     pub fn file_url(&self, hash: &str) -> String {
         format!(
             "{}{ROUTE_FILE}?token={}&hash={}",
@@ -562,10 +563,11 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::sync::{Arc, Mutex};
 
-    use crate::account::{AccountKey, Nonce, Proof, Side};
-    use crate::net::remote::{self, Method, Request, Response, Sink, Transport};
-    use crate::position::Locator;
-    use crate::sync::{BookSnapshot, PositionRecord, SNAPSHOT_VERSION, Snapshot};
+    use crate as remote;
+    use crate::{Method, Request, Response, Sink, Transport};
+    use folio_account::{AccountKey, Nonce, Proof, Side};
+    use folio_model::position::Locator;
+    use folio_model::sync::{BookSnapshot, PositionRecord, SNAPSHOT_VERSION, Snapshot};
 
     use super::{
         Applied, Auth, BookEntry, Error, Hello, HelloReply, LanLocal, MAX_PULL_BOOKS, Manifest,
@@ -996,7 +998,7 @@ mod tests {
         format!("{:0<64}", short)
     }
 
-    /// 一台**真的会算**的对端：握手按 [`crate::account`] 那套数学现出回包，数据路由照手里的
+    /// 一台**真的会算**的对端：握手按 `folio_account` 那套数学现出回包，数据路由照手里的
     /// 清单与快照答。
     ///
     /// 现算而不是手抄一串字节：证明、nonce、派生顺序是协议本身，抄死了等于把实现与测试钉在
@@ -1010,7 +1012,7 @@ mod tests {
         seen: Mutex<Vec<Request>>,
         pushed: Mutex<Vec<String>>,
         /// 这次握手的会话密钥，`/auth` 那一趟用它验对面出示的证明。
-        session: Mutex<Option<crate::account::Session>>,
+        session: Mutex<Option<folio_account::Session>>,
         token: Mutex<Option<String>>,
         proven: Mutex<bool>,
         /// 三档故意使坏：回不过的证明、回别人的 id、压根没有这几条路由。

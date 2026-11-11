@@ -3,13 +3,13 @@
 //! 转发层薄得几乎不存在 —— 它存在的意义是让上层（浏览界面与导入来源）只认
 //! [`Drive`]，不必知道对面是不是与同步那节同一份客户端。WebDAV 的协议规则
 //! （PROPFIND 怎么解、`href` 怎么退让、路径怎么转义）都住在
-//! [`crate::net::remote::dav`]，那里有整套离线测试；这里不重复它们，只钉一件事：
+//! [`crate::dav`]，那里有整套离线测试；这里不重复它们，只钉一件事：
 //! `Drive` 这条转发线真的通（路径、认证、字节都到位）。
 
 use std::sync::Arc;
 
 use super::{Drive, Entry};
-use crate::net::remote::{
+use crate::{
     Cancel, RemoteStore, Result, Sink, Transport,
     dav::{self, Client},
 };
@@ -65,13 +65,13 @@ impl Drive for DavDrive {
 #[cfg(test)]
 mod tests {
     //! 转发层只钉一条：`Drive` 这条线真的通。WebDAV 的协议规则在
-    //! [`crate::net::remote::dav`] 的测试里有整套，不在这里重测。
+    //! [`crate::dav`] 的测试里有整套，不在这里重测。
 
     use std::sync::Arc;
 
     use super::DavDrive;
-    use crate::net::remote::dav::Mock;
-    use crate::net::remote::{Cancel, RemoteStore, Sink, Transport};
+    use crate::dav::Mock;
+    use crate::{Cancel, RemoteStore, Sink, Transport};
 
     /// 攒字节的落点，让「下了什么」能被断言。
     struct Buffer(Vec<u8>);
@@ -109,7 +109,7 @@ mod tests {
           </d:response>
         </d:multistatus>"#;
 
-    fn drive(responses: Vec<crate::net::remote::Response>) -> (DavDrive, Arc<Mock>) {
+    fn drive(responses: Vec<crate::Response>) -> (DavDrive, Arc<Mock>) {
         let mock = Arc::new(Mock::new(responses));
         (
             DavDrive::open(
@@ -124,16 +124,13 @@ mod tests {
 
     #[test]
     fn drive_lists_a_layer_and_carries_the_credentials() {
-        let (drive, mock) = drive(vec![crate::net::remote::Response::new(
-            207,
-            SHELF.as_bytes().to_vec(),
-        )]);
+        let (drive, mock) = drive(vec![crate::Response::new(207, SHELF.as_bytes().to_vec())]);
         let entries = drive.list("").expect("应当解析出列表");
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["斗战狂潮", "shejie.epub"]);
 
         let req = mock.last_request();
-        assert_eq!(req.method, crate::net::remote::Method::Propfind);
+        assert_eq!(req.method, crate::Method::Propfind);
         assert_eq!(req.url, "https://dav.example.com/dav/");
         assert!(
             req.headers
@@ -145,7 +142,7 @@ mod tests {
 
     #[test]
     fn drive_downloads_into_the_sink() {
-        let (drive, mock) = drive(vec![crate::net::remote::Response::new(200, Vec::new())]);
+        let (drive, mock) = drive(vec![crate::Response::new(200, Vec::new())]);
         let mut sink = Buffer(Vec::new());
         let got = drive
             .download("books/蜗牛.epub", &mut sink, &Cancel::new())

@@ -13,6 +13,24 @@ publish = false
 
 [dependencies]
 folio-base.workspace = true
+# 同步/传书的 DTO（folio_model::sync 的快照与清单类型）与云上传的书目行。
+folio-model.workspace = true
+# 局域网两族的账号证明（握手要的那把密钥）。
+folio-account.workspace = true
+# 各协议的消息与清单解析；update 的包校验；OPDS 的相对地址。
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+url.workspace = true
+# 传书的 axum 服务器（上传页 + multipart）。tokio 被这一族关在自己家里：
+# 出网的那一半照旧全同步。
+tokio.workspace = true
+axum.workspace = true
+# 云引擎的 contentHash 算法（md-5）、传书的流式上传（futures-util 的 TryStream）与
+# 局域网地址探测（libc）。原 folio-core 的依赖随模块同行 —— core 内没有第二个用户。
+md-5.workspace = true
+futures-util.workspace = true
+libc.workspace = true
 base64.workspace = true
 quick-xml.workspace = true
 ureq.workspace = true
@@ -22,3 +40,7 @@ tracing.workspace = true
 # 假传输（`dav::Mock`）：folio-core 的网盘测试与传书测试共用这一个。
 [features]
 test-support = []
+
+[dev-dependencies]
+# 传输与落盘的测试要真目录（原 folio-core 的 dev-dep 随测试一同搬来）。
+tempfile = "3"

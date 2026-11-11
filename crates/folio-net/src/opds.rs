@@ -12,7 +12,8 @@ use quick_xml::{Reader, XmlVersion};
 use serde_json::Value;
 use url::Url;
 
-use super::remote::{self, Method, Request, Transport};
+use crate as remote;
+use crate::{Method, Request, Transport};
 
 /// 一页 OPDS 目录。导航条目与出版物混在 `entries` 里，由 [`Entry::navigation`]
 /// 与 [`Entry::acquisitions`] 区分。
@@ -563,7 +564,7 @@ fn collapse(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Entry, Error, Feed, auth_header, parse, resolve};
-    use crate::net::remote::{Cancel, Method, Request, Response, Sink, Transport};
+    use crate::{Cancel, Method, Request, Response, Sink, Transport};
 
     const ATOM: &str = r#"<?xml version="1.0" encoding="utf-8"?>
     <feed xmlns="http://www.w3.org/2005/Atom">
@@ -692,7 +693,7 @@ mod tests {
 
     struct Mock(Response, std::sync::Mutex<Option<Request>>);
     impl Transport for Mock {
-        fn request(&self, req: Request) -> crate::net::remote::Result<Response> {
+        fn request(&self, req: Request) -> crate::Result<Response> {
             *self.1.lock().unwrap() = Some(req);
             Ok(self.0.clone())
         }
@@ -701,8 +702,8 @@ mod tests {
             _req: Request,
             _sink: &mut dyn Sink,
             _cancel: &Cancel,
-        ) -> crate::net::remote::Result<u64> {
-            Err(crate::net::remote::Error::Cancelled)
+        ) -> crate::Result<u64> {
+            Err(crate::Error::Cancelled)
         }
     }
 

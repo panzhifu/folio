@@ -9,7 +9,7 @@
 //!
 //! 流程：浏览器开 `http://<设备IP>:<port>/` → 单页（拖拽 / 多选，XHR
 //! 逐文件）→ multipart **流式**落进 `inbox_dir`（块进块写，不进内存）→ 每个文件
-//! 完成即 `on_file(path)` → app 侧把路径包成 [`crate::ingest::import::PathsSource`] 提交
+//! 完成即 `on_file(path)` → app 侧把路径包成 `ingestcrate::ingest::import::PathsSource` 提交
 //! 导入队列 → 导入成功后清掉收件箱里的原件，失败保留待查。
 //!
 //! 安全：**不设配对码** —— 同一 Wi-Fi 里能连上这个端口的设备就能传书，所以这台服务
@@ -37,12 +37,38 @@ use axum::http::header;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 
-use crate::error::{Error, IoResultExt as _, Result};
-use crate::infra::paths;
+use folio_base::paths;
 
 mod lan;
 
 pub use lan::{LanConfig, LanProvider};
+
+/// 传书本地这半的错误：**带标签的 I/O**。原来住在 core 的伞错误里（`Error::Io`），
+/// 随阶段三搬迁自持 —— 监听端口的绑定失败、收件目录建不出来、服务线程起不来，
+/// 读者看到的每一句都该说得出是哪一格出的事，标签就是那个格子（文件路径，
+/// 或 `0.0.0.0:8080` 这类套接字地址）。
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("读 {path} 失败：{source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+}
+
+impl Error {
+    /// 一条 I/O 错误套上出事的格子。原始错误留在 `source` 链上。
+    fn io_at(path: &std::path::Path, err: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Io {
+            path: path.to_path_buf(),
+            source: Box::new(err),
+        }
+    }
+}
+
+/// 传书这半的 `Result`。
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// 上传页。内嵌而非资产：这页只有一个用途，跟着二进制走，部署永远不缺它。
 const UPLOAD_PAGE: &str = include_str!("transfer_page.html");
@@ -114,8 +140,11 @@ impl TransferServer {
             )
             .into(),
         })?;
-        let addr = listener.local_addr().io_path(Path::new("0.0.0.0"))?;
-        std::fs::create_dir_all(&config.inbox_dir).io_path(&config.inbox_dir)?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| Error::io_at(Path::new("0.0.0.0"), e))?;
+        std::fs::create_dir_all(&config.inbox_dir)
+            .map_err(|e| Error::io_at(&config.inbox_dir, e))?;
 
         let (notify, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let inbox = config.inbox_dir.clone();
@@ -123,10 +152,7 @@ impl TransferServer {
         let thread = std::thread::Builder::new()
             .name("folio-transfer".to_string())
             .spawn(move || serve(listener, inbox, on_file, lan, shutdown_rx))
-            .map_err(|err| Error::Io {
-                path: PathBuf::from("folio-transfer"),
-                source: Box::new(err),
-            })?;
+            .map_err(|err| Error::io_at(Path::new("folio-transfer"), err))?;
         tracing::info!("transfer: 传书服务起在 {addr}");
         // 顺手把探到的局域网地址记一行：真机上「地址点不开」最常见的原因就是这一格
         // 空着（或者报错了网卡），日志里有它，下一次不必再靠猜。

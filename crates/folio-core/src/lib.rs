@@ -27,7 +27,6 @@ rust_i18n::i18n!("locales", fallback = "en");
 // 依赖方向是单向的：`content` 可以依赖 `infra`，但不依赖 `store` / `ingest`；
 // `ingest` 同时碰容器、文件系统与数据库（那是它的职责）；`infra` 谁都不依赖。
 // 这条方向是「引擎能在没有数据库的情况下跑」与「core 能被 cargo test 全量覆盖」的前提。
-pub mod account;
 pub mod backup;
 pub mod cache;
 pub mod content;
@@ -62,6 +61,11 @@ pub use folio_translate::dict;
 // （设置页的字体库、平台注册）都解析到它，消费方一行不改；错误词表跟着机制走
 // （`FontsError` 自持，本 crate 的 `Error::Font` 变体删除）。
 pub use folio_fonts::{fonts, text};
+
+// 账号已独立成 `folio-account` crate（2026-11-12，阶段三拆分；原 account.rs 原样搬去，
+// ring 随行）。旧路径沿用：`folio_core::account::*`（config 的 AccountKey 那格、
+// lansync / transfer 的握手）都解析到它，消费方一行不改。
+pub use folio_account as account;
 
 // 书内搜索已独立成 `folio-search` crate（2026-11-12，阶段五收尾；原 search.rs 原样搬去）。
 // 旧路径沿用：`folio_core::search::*`（app 的搜索框、阅读会话与整架搜索）都解析到它，

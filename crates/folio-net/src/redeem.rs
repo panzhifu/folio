@@ -9,7 +9,7 @@
 
 use serde::Deserialize;
 
-use super::remote::{Method, Request, Response, Transport};
+use crate::{Method, Request, Response, Transport};
 
 /// 兑换服务端的入口。挂在 CloudBase HTTP 网关的默认域名上，路径 `folio-redeem`。
 ///
@@ -123,7 +123,7 @@ pub fn valid_order(order: &str) -> bool {
     (16..=40).contains(&bytes.len()) && bytes.iter().all(u8::is_ascii_digit)
 }
 
-/// 兑一次。`device` 是这台安装的稳定 id（[`crate::sync`] 那一格），服务端拿它绑「这单归谁」。
+/// 兑一次。`device` 是这台安装的稳定 id（`folio_model::sync` 那一格），服务端拿它绑「这单归谁」。
 pub fn redeem(transport: &dyn Transport, order: &str, device: &str) -> Result<Outcome, Error> {
     let order = order.trim();
     if !valid_order(order) {
@@ -260,7 +260,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{Outcome, Release, parse, parse_release, redeem, release, valid_order};
-    use crate::net::remote::{Cancel, Method, Request, Response, Sink, Transport};
+    use crate::{Cancel, Method, Request, Response, Sink, Transport};
 
     /// 一次性假传输：把要回的东西排好队，同时留下发出去的请求供用例检查。
     struct Mock {
@@ -287,7 +287,7 @@ mod tests {
     }
 
     impl Transport for Mock {
-        fn request(&self, req: Request) -> crate::net::remote::Result<Response> {
+        fn request(&self, req: Request) -> crate::Result<Response> {
             self.seen.lock().unwrap().push(req.clone());
             self.answers
                 .lock()
@@ -302,7 +302,7 @@ mod tests {
             _req: Request,
             _sink: &mut dyn Sink,
             _cancel: &Cancel,
-        ) -> crate::net::remote::Result<u64> {
+        ) -> crate::Result<u64> {
             unreachable!("兑换只有普通请求，没有流式下载")
         }
     }

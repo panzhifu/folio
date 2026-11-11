@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use super::{APP_ROOT, AliyunDrive, ROOT_ID};
-use crate::net::remote::dav::Mock;
-use crate::net::remote::{Cancel, Error, Method, RemoteStore, Response, Sink, Transport};
+use crate::dav::Mock;
+use crate::{Cancel, Error, Method, RemoteStore, Response, Sink, Transport};
 
 fn ok(body: &str) -> Response {
     Response::new(200, body.as_bytes().to_vec())
@@ -18,7 +18,7 @@ fn drive_with(responses: Vec<Response>) -> (AliyunDrive, Arc<Mock>) {
     (drive, mock)
 }
 
-fn body_of(req: &crate::net::remote::Request) -> serde_json::Value {
+fn body_of(req: &crate::Request) -> serde_json::Value {
     serde_json::from_slice(&req.body).expect("请求体该是 JSON")
 }
 

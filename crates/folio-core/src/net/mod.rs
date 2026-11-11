@@ -1,40 +1,32 @@
-//! 出网与入网：folio 与外部世界打交道的两条路。
+//! 网络的**入口层**：配置到参数的挑选都收在这里，协议与机制住在别处。
 //!
-//! - [`remote`] —— 远端传输的**协议与编排**。传输抽象与 WebDAV 已独立成
-//!   [`folio_net`] crate（「换 crate 不换形状」：这里沿用旧路径，消费方一行不改）。
-//!   协议规则与实现分开，所以它们离线可测。
-//! - [`translate`] —— 选区翻译：引擎 trait 与三只引擎（Google 免 key、OpenAI 兼容、
-//!   DeepL）的请求/响应解析。机制已独立成 [`folio_translate`] crate（词典也在那边）；
-//!   走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测（假传输 + fixture）。
-//! - [`ai`] —— 选区问 AI 与切章规则草案：**一层** provider（OpenAI 兼容的
-//!   `chat/completions`），地址与密钥共用 [`translate`] 那一档，错误分档与响应解析的形状
-//!   也照它（机制在 [`folio_ai`] crate，两条错误链的对应关系由那一侧的 `From` 记着），
-//!   所以同样离线可测（假传输 + 固定应答）。
-//! - [`update`] —— 检查更新：问发布仓要「最新那版」，比版本、挑这一端的包、验摘要。
-//!   走的也是 [`remote`] 那个 `Transport`，所以它一样离线可测（假传输 + fixture JSON）。
-//! - [`redeem`] —— 会员兑换：把一个爱发电订单号换回会员天数。付没付过钱只能由服务端判
-//!   （爱发电的 api token 不能进客户端），所以这一层只管形状、一次 POST、以及读回应答。
-//! - [`transfer`] —— **Wi-Fi 传书**：设备起一个 HTTP 服务器，局域网浏览器上传书。
-//! - [`lansync`] —— **局域网同步**的协议形状：同账号的两台设备怎么互相发现、怎么把书架
-//!   清单与快照递给对面。它自己不起服务器（挂在 [`transfer`] 上）、不拨连接（走
-//!   [`remote`] 那个 `Transport`），所以这一层离线可测。
-//! - [`cloud`] —— **网盘取书**：把「另一头存着书的存储」抽象成一个 `Drive`
-//!   （列一层、流式下载），WebDAV 与百度各一份实现，给浏览界面与导入来源共用。
-//!   走的也是 [`remote`] 那个 `Transport`，离线可测。
+//! - [`remote`] —— 传输抽象与 WebDAV，实现在 [`folio_net`] crate（「换 crate 不换
+//!   形状」：这里沿用旧路径，消费方一行不改）。
+//! - [`translate`] —— 选区翻译的入口：按配置挑引擎的 `configured`。引擎机制在
+//!   [`folio_translate`]（词典也在那边），走的也是 [`remote`] 那个 `Transport`。
+//! - [`ai`] —— 选区问 AI 的入口：按配置挑引擎与判「这一格存不存在」（地址空 / 没填
+//!   key 不出网）。机制在 [`folio_ai`]，形状照 [`translate`] 立，两条错误链的对应
+//!   关系由那一侧的 `From` 记着。
+//! - [`cloud`] —— 网盘的入口：[`provider`] 契约吃 [`crate::infra::config::Cloud`]，
+//!   实现住在 app 侧。引擎机制（`Drive` 与各网盘实现）在 `folio_net::cloud`，
+//!   这里 re-export 沿旧路径。
 //!
-//! **`tokio` 只许出现在 [`transfer`] 里**。core 其余部分是同步形状，公共签名不漏
-//! `Future`；传书服务器要「少量线程轮转服务大量连接」的现成调度与 multipart 的
-//! 现成流式解析，才把它关在这一个模块内。这条边界写在 [`transfer`] 的模块文档里，
-//! 并由本模块的文档再钉一次。
+//! 其余的网络机制已随阶段三扩容搬去 [`folio_net`]（2026-11-12）：OPDS、更新检查、
+//! 会员兑换、Wi-Fi 传书（axum 服务器）与局域网同步的协议——本模块 re-export 沿
+//! 旧路径，`crate::net::opds::*` 这类写法一行不改。`tokio` / `axum` 跟着传书那族
+//! 进了 folio-net，被关在那两族里；core 侧从此是纯同步形状，公共签名不漏 `Future`。
 
 pub mod ai;
 pub mod cloud;
-pub mod lansync;
-pub mod opds;
-pub mod redeem;
-pub mod transfer;
 pub mod translate;
-pub mod update;
+
+// 协议与机制已随阶段三扩容搬去 folio-net（2026-11-12）：
+// - [`cloud`] 的引擎半边（Drive trait 与各网盘实现）在 `folio_net::cloud`，这里留
+//   provider 契约（吃 config::Cloud 的入口层）；
+// - OPDS / 更新检查 / 会员兑换 / 局域网两族在 `folio_net::{opds, update, redeem,
+//   lansync, transfer}`（transfer 的 axum 服务器与 lansync 的服务端同进同退）。
+// 旧路径沿用：`crate::net::opds::*` 这类写法（app 各屏与服务）一行不改。
+pub use folio_net::{lansync, opds, redeem, transfer, update};
 
 // 传输层已独立成 `folio-net` crate（Transport / RemoteStore / Sink / WebDAV）。
 // 旧路径沿用：`folio_core::net::remote::*` 与 crate 内的 `crate::net::remote::*`

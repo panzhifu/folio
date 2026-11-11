@@ -31,6 +31,8 @@ folio-speech.workspace = true
 folio-fonts.workspace = true
 # 书内搜索（原 search.rs）。旧路径经 lib.rs 的模块别名沿用。
 folio-search.workspace = true
+# 账号（原 account.rs）。旧路径经 lib.rs 的模块别名沿用；ring 随它离开本 crate。
+folio-account.workspace = true
 # 排版引擎（原 layout/）。旧路径经 lib.rs 的模块别名沿用。
 folio-render.workspace = true
 rusqlite.workspace = true
@@ -45,25 +47,17 @@ zip.workspace = true
 base64.workspace = true
 # 内容哈希（`identity`）：书的身份是它的内容，不是文件路径。
 sha2.workspace = true
-md-5.workspace = true
-# 账号密钥（`account`）：HMAC-SHA256 与 OS 熵。为什么这里用 `ring` 而不是 `hmac`，
-# 连同 Android 编译图的实测一起写在根 Cargo.toml 那一条。
-ring.workspace = true
+# 账号密钥已随 account 搬去 folio-account（ring 跟着走）；md-5 / futures-util / libc
+# 随 cloud 引擎与 transfer 服务器搬去 folio-net —— core 内都没有第二个用户。
 # 文件夹监听（`watch`）：事件驱动的新书自动入库。
 notify.workspace = true
 # 同步 HTTP（生产已随传输层搬去 folio-net；transfer 的测试还要用它调自己的服务器）。
 ureq.workspace = true
-url.workspace = true
 # 传书服务报的局域网地址要枚举网卡（`transfer::lan_addresses` 的 getifaddrs）：
 # 只靠 UDP 默认路由探，Android 上会探到蜂窝那张卡的运营商地址。libc 本来就在锁里。
-libc.workspace = true
 # Wi-Fi 传书服务器（`transfer`）。tokio 只许在这个模块里用 —— 见模块文档的边界。
-tokio.workspace = true
-axum.workspace = true
 # 传书那台服务器上局域网同步的路由要流式送一本书（见根 Cargo.toml 为什么它不新增依赖树）。
-futures-util.workspace = true
 # WebDAV / OPDS 的 XML（dav 已随传输层搬去 folio-net；opds 还在用）。
-quick-xml.workspace = true
 # 排版断行与字体回退已随排版引擎搬去 folio-render。
 rust-i18n.workspace = true
 # 日志：core 这边只管「说了什么」——`tracing` 的宏与 span，配置在 `Config::logging`，

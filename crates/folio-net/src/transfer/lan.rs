@@ -7,7 +7,7 @@
 //! **这里的门与传书那条不一样，别混用判据**：传书是一条 URL 配一个八位码，服务的是
 //! 「手上没有账号的人」；这里只认账号，而账号 id 抄得来（它就是 `HMAC(密钥)` 的前 8 字节，
 //! 本来就准备在局域网里广播），所以它**不是凭据**，只回答「值不值得跟你握手」。真正放行
-//! 读权限的是那对 nonce 上的双向证明（见 [`crate::account`]）：
+//! 读权限的是那对 nonce 上的双向证明（见 `folio_account`）：
 //!
 //! ```text
 //! POST /hello   {version, account, nonceA}   → {nonceB, proofB, token, now}
@@ -42,11 +42,11 @@ use serde::Deserialize;
 use tokio::io::AsyncReadExt as _;
 
 use super::{Gate, Refusal, TransferState};
-use crate::account::{AccountKey, Nonce, Proof, Side};
-use crate::net::lansync::{
+use crate::lansync::{
     Auth, BookEntry, Hello, HelloReply, MAX_PUSH_BYTES, Manifest, PROTOCOL_VERSION, ROUTE_AUTH,
     ROUTE_FILE, ROUTE_HELLO, ROUTE_MANIFEST, ROUTE_SNAPSHOT, is_book_hash,
 };
+use folio_account::{AccountKey, Nonce, Proof, Side};
 
 /// 一次局域网同步会话的存活时长。局域网里一趟往返在秒级，给到十分钟只为了让「拉书拉到一半
 /// 屏幕熄了」不必从头握手。
@@ -66,7 +66,7 @@ const MAX_SNAPSHOT: usize = 32 * 1024 * 1024;
 /// 局域网同步的配置。**没有它这几条路由一概 404**：传书可以单独开着，局域网同步是另一个决定。
 #[derive(Clone)]
 pub struct LanConfig {
-    /// 本机那把账号密钥。它不进日志、也不进 `Debug`（见 [`crate::account`]）。
+    /// 本机那把账号密钥。它不进日志、也不进 `Debug`（见 `folio_account`）。
     pub key: AccountKey,
     /// 本机书架与本机进度怎么读怎么写 —— 由装配这个服务的那一层给（见 [`LanProvider`]）。
     pub provider: Arc<dyn LanProvider>,
@@ -95,7 +95,7 @@ pub trait LanProvider: Send + Sync + 'static {
     /// 本机这一份全量快照的 JSON。对面拉走它去合自己的。
     fn snapshot(&self) -> Result<String, String>;
 
-    /// 收下对面推过来的那份并**就地合并进本机**。合并规则一条都不重写，见 [`crate::sync`]。
+    /// 收下对面推过来的那份并**就地合并进本机**。合并规则一条都不重写，见 `folio_model::sync`。
     fn apply_snapshot(&self, json: &[u8]) -> Result<(), String>;
 }
 
@@ -108,7 +108,7 @@ struct Session {
     /// 本机那一半的 nonce 不单独存：它只在 `/hello` 的响应里用一次（对面要拿两半拼出同一个
     /// 会话密钥），而这里的这一格已经是拼好的结果。存两样能算出对方的东西就是第二个
     /// 可以不一致的副本。
-    account: crate::account::Session,
+    account: folio_account::Session,
     /// 什么时候作废。
     until: Instant,
     /// `/auth` 过了没有。没过之前任何数据路由都不答。
@@ -144,7 +144,7 @@ impl LanState {
         &self,
         peer: IpAddr,
         peer_nonce: &Nonce,
-    ) -> Option<(String, Nonce, crate::account::Session)> {
+    ) -> Option<(String, Nonce, folio_account::Session)> {
         let my_nonce = Nonce::generate()?;
         let token = Nonce::generate()?;
         // 派生顺序两端必须一致：**先发起方那半，后接收方那半**。这里是服务器，所以对面那半
@@ -439,7 +439,7 @@ async fn snapshot_put(
 }
 
 /// 此刻的 UTC 秒。对面拿它和自己这一个相减就是钟差，用来平移读回来的那份快照
-/// （见 [`crate::sync::Snapshot::shift_clock`]）。
+/// （见 [`folio_model::sync::Snapshot::shift_clock`]）。
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -453,12 +453,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::account::{AccountKey, Nonce, Proof, Side};
-    use crate::net::lansync::{
+    use crate::lansync::{
         Auth, BookEntry, Hello, HelloReply, Manifest, PROTOCOL_VERSION, ROUTE_AUTH, ROUTE_FILE,
         ROUTE_HELLO, ROUTE_MANIFEST, ROUTE_SNAPSHOT,
     };
-    use crate::net::transfer::{LanConfig, LanProvider, TransferConfig, TransferServer};
+    use crate::transfer::{LanConfig, LanProvider, TransferConfig, TransferServer};
+    use folio_account::{AccountKey, Nonce, Proof, Side};
     use serde::Serialize;
 
     /// 一本书的身份在报文里是 64 个十六进制字符，测试里就用两个好读的前缀补齐。
@@ -862,15 +862,15 @@ mod tests {
     /// **客户端那一半与这台上的一半真在一根套接头上遇一次。**
     ///
     /// 上面那几条测的都是「手写的请求打得过服务器」，而界面将来发的是
-    /// [`crate::net::lansync::sync_one`] 拼出来的请求 —— 两边各写各的时，查询串里叫
+    /// [`crate::lansync::sync_one`] 拼出来的请求 —— 两边各写各的时，查询串里叫
     /// `token` 还是 `tok`、PUT 的 body 是不是那份合并后的快照，都只有跑通一次才看得见。
     #[test]
     fn the_client_half_meets_the_server_half_over_a_real_socket() {
         use std::sync::Mutex;
 
         use super::unix_now;
-        use crate::net::lansync::{self, Applied, LanLocal};
-        use crate::net::remote::ureq;
+        use crate::lansync::{self, Applied, LanLocal};
+        use crate::ureq;
 
         /// 发起那一台：记下被要求下拉的 URL，合并那一步只交出一样东西 —— 一句「这是本机
         /// 合完的那一份」，好让断言落在**推回去的到底是哪一份**上。
@@ -893,7 +893,7 @@ mod tests {
 
             fn merge_and_apply(
                 &self,
-                remotes: &[crate::sync::Snapshot],
+                remotes: &[folio_model::sync::Snapshot],
                 _now: i64,
             ) -> std::result::Result<Applied, String> {
                 let mut dumped = self.merged.lock().unwrap();
@@ -951,7 +951,7 @@ mod tests {
             "该读到服务器的快照：{}",
             merged[0]
         );
-        let rebased = serde_json::from_str::<crate::sync::Snapshot>(&merged[0])
+        let rebased = serde_json::from_str::<folio_model::sync::Snapshot>(&merged[0])
             .unwrap()
             .exported_at;
         assert!(

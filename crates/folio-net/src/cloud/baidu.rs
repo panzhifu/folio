@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use md5::{Digest as _, Md5};
 
 use super::{Drive, Entry};
-use crate::net::remote::{
+use crate::{
     Cancel, Error, Method, RemoteStore, Request, Response, Result, Sink, Source, Transport,
 };
 
@@ -559,7 +559,7 @@ pub(super) fn query_encode(value: &str) -> String {
 ///
 /// - **少一处漏带**：从前五处各写一遍 `format!("…&access_token={}", query_encode(…))`，
 ///   新增一个接口时最容易忘的就是这一段；
-/// - **脱敏只认一种形状**：日志脱敏（[`crate::net::remote::Request`] 的 `Debug`）按
+/// - **脱敏只认一种形状**：日志脱敏（[`crate::Request`] 的 `Debug`）按
 ///   `access_token=` 这个键名遮值，拼法多一种就多一处遮不住的地方。
 ///
 /// 已经带查询串的 URL 用 `&` 接，否则用 `?` —— dlink 那种自带一长串参数的正好走前一支。
@@ -640,7 +640,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::net::remote::dav::Mock;
+    use crate::dav::Mock;
 
     const LIST_JSON: &str = r#"{"errno":0,"list":[
         {"fs_id":1111,"path":"/我的书/斗战狂潮.epub","server_filename":"斗战狂潮.epub","isdir":0,"size":15144675},

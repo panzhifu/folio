@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::{Drive, Entry};
-use crate::net::remote::{
+use crate::{
     Cancel, Error, Method, RemoteStore, Request, Response, Result, Sink, Source, Transport,
 };
 
@@ -411,7 +411,7 @@ impl Drive for AliyunDrive {
     }
 }
 
-/// 阿里云盘的状态挡板：401 / 403 各自的语义与 [`crate::net::remote::Error`] 对齐。
+/// 阿里云盘的状态挡板：401 / 403 各自的语义与 [`crate::Error`] 对齐。
 ///
 /// 错误体里带 `code` 的（`AccessTokenInvalid` / `AccessTokenExpired` / `I400JD`）
 /// 一律归认证 —— 界面上的动作只有「重新授权」，不该按 HTTP 状态再分一次。
@@ -533,4 +533,5 @@ struct PartInfo {
 }
 
 #[cfg(test)]
+#[path = "aliyun_tests.rs"]
 mod tests;

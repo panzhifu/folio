@@ -46,7 +46,9 @@ crates/
   folio-model/   公共数据模型：诸 crate 共用的类型，只有数据（三条规矩见其 lib.rs）
   folio-format/  文件格式解析：字节 + 路径 → 统一文档模型（21 个 provider、DOM、CSS、scan、
                  Document trait 与 BookDocument 门面）
-  folio-net/     出网地层：Transport / RemoteStore / Sink 与 WebDAV（原 core::net::remote）
+  folio-net/     网络面：Transport / RemoteStore / WebDAV + OPDS / 更新 / 兑换 /
+                 网盘引擎与局域网两族（原 core::net 的机制半边，阶段三扩容）
+  folio-account/ 账号：一台安装自持的 128-bit 密钥与局域网双向证明（ring 唯一用户）
   folio-translate/ 选区翻译三只引擎与本地 StarDict 词典（原 folio-ai::translate 与 core::dict）
   folio-ai/      AI 问答：一层 provider 与三档预设问法（原 core::net::ai）
   folio-render/  排版引擎：DOM + 样式 → 扁平的块盒 / 行盒两张表（原 core::layout）
@@ -54,7 +56,7 @@ crates/
   folio-fonts/   字体域：随书字体装载与子集化（text）+ 用户字体库下载落盘（fonts）；
                  skera / read-fonts / write-fonts / ttf-parser 只在这里
   folio-search/  书内搜索：现读现扫不建索引，只认一本书与一个查询词（原 core::search）
-  folio-core/    引擎：锚点与命中、书库（SQLite）、导入、剩余的网络面；
+  folio-core/    引擎：锚点与命中、书库（SQLite）、导入、网络的入口层；
                  内部按 content / store / ingest / net / infra 单向分区
   folio-app/     应用壳：GPUI 界面、平台入口、原生桥；src/ui/ 依赖方向只有一条
                  shell ▶ features ▶ components ▶ services ▶ foundation（host / platform 在两侧），

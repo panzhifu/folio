@@ -30,7 +30,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::Drive;
-use crate::net::remote::{Cancel, Error, RemoteStore, Result, Sink, Source, Transport};
+use crate::{Cancel, Error, RemoteStore, Result, Sink, Source, Transport};
 
 /// 一对凭据。`expires_at` 是**绝对时刻**（Unix 秒）；0 = 未知（手贴 token 那条路没有
 /// 这个数）——未知就不做主动续期，等 401 再说。
@@ -120,7 +120,7 @@ impl SharedTokenSource {
         if token.access.is_empty() {
             return true;
         }
-        token.expires_at > 0 && crate::infra::time::now() >= token.expires_at - EXPIRY_MARGIN
+        token.expires_at > 0 && folio_base::time::now() >= token.expires_at - EXPIRY_MARGIN
     }
 
     /// 持锁续期：换到的新凭据先落 [`TokenStore`]，再替换内存里的那一份。
@@ -287,7 +287,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
-    use crate::net::remote::dav::{Entry, Mock};
+    use crate::dav::{Entry, Mock};
 
     /// 可编程的假 Refresher：每次续期换一支新 refresh_token（模拟轮换），记录调用数。
     struct FakeRefresher {
@@ -321,7 +321,7 @@ mod tests {
                 access: format!("access-{n}"),
                 // 轮换：新的一支里带旧的那支做记号，断言「用的正是上一轮换出来的」。
                 refresh: format!("{refresh_token}-{n}"),
-                expires_at: crate::infra::time::now() + 3600,
+                expires_at: folio_base::time::now() + 3600,
             })
         }
     }
@@ -371,7 +371,7 @@ mod tests {
     fn a_valid_token_is_handed_out_without_a_refresh() {
         let refresher = FakeRefresher::working();
         let source = source(
-            token("a0", "r0", crate::infra::time::now() + 3600),
+            token("a0", "r0", folio_base::time::now() + 3600),
             refresher.clone(),
             FakeStore::new(),
         );
@@ -410,7 +410,7 @@ mod tests {
         let refresher = FakeRefresher::working();
         let store = FakeStore::new();
         let source = source(
-            token("a0", "r0", crate::infra::time::now() + 3600),
+            token("a0", "r0", folio_base::time::now() + 3600),
             refresher.clone(),
             store.clone(),
         );
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn a_failed_refresh_keeps_the_original_error() {
         let source = source(
-            token("a0", "r0", crate::infra::time::now() + 3600),
+            token("a0", "r0", folio_base::time::now() + 3600),
             FakeRefresher::broken(),
             FakeStore::new(),
         );

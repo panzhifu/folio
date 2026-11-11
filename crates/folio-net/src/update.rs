@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-use super::remote::{Cancel, Error as TransportError, Method, Request, Sink, Transport};
+use crate::{Cancel, Error as TransportError, Method, Request, Sink, Transport};
 
 /// 最新发布版那条 release 的 API 地址。
 pub const LATEST_API: &str = "https://api.github.com/repos/panzhifu/folio/releases/latest";
@@ -352,7 +352,7 @@ fn hex(bytes: &[u8]) -> String {
 ///   而症状是安装器报一句看不懂的错。所以先写 `dest.part`，`Sink::finish` 才改名。
 /// - **下之前先清掉上一轮的残留**。一个 APK 三十来 MB，装在读者手机上不是我们该占的地方；
 ///   下载目录里同一时刻只该有一个候选。
-/// - **取消只在块与块之间生效**（[`super::remote::Transport::download`] 那条契约），
+/// - **取消只在块与块之间生效**（[`crate::Transport::download`] 那条契约），
 ///   所以「取消」之后最多还会多写一个块，不会留下半开的 fd。
 pub fn download_to_file(
     transport: &dyn Transport,
@@ -386,7 +386,7 @@ pub fn download_to_file(
     let request = Request::new(Method::Get, url.to_owned());
     match transport.download(request, &mut sink, cancel) {
         Ok(_) => Ok(()),
-        Err(super::remote::Error::Cancelled) => Err(Error::Unreachable("已取消".into())),
+        Err(crate::Error::Cancelled) => Err(Error::Unreachable("已取消".into())),
         Err(other) => Err(other.into()),
     }
 }
@@ -537,8 +537,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    use super::super::remote::{Cancel, Request, Response, Sink, Transport};
     use super::*;
+    use crate::{Cancel, Request, Response, Sink, Transport};
 
     struct Mock {
         answers: Mutex<VecDeque<Result<Response, TransportError>>>,
@@ -569,7 +569,7 @@ mod tests {
     }
 
     impl Transport for Mock {
-        fn request(&self, req: Request) -> super::super::remote::Result<Response> {
+        fn request(&self, req: Request) -> crate::Result<Response> {
             self.seen.lock().unwrap().push(req);
             self.answers
                 .lock()
@@ -583,7 +583,7 @@ mod tests {
             _req: Request,
             _sink: &mut dyn Sink,
             _cancel: &Cancel,
-        ) -> super::super::remote::Result<u64> {
+        ) -> crate::Result<u64> {
             // 这一层不下东西；下载的用例住在 app 侧。
             Err(TransportError::Cancelled)
         }
@@ -833,7 +833,7 @@ mod tests {
     }
 
     impl Transport for Chunked {
-        fn request(&self, _req: Request) -> super::super::remote::Result<Response> {
+        fn request(&self, _req: Request) -> crate::Result<Response> {
             unreachable!("下载这一路不走 request")
         }
 
@@ -842,10 +842,10 @@ mod tests {
             _req: Request,
             sink: &mut dyn Sink,
             cancel: &Cancel,
-        ) -> super::super::remote::Result<u64> {
+        ) -> crate::Result<u64> {
             if self.status != 200 {
                 sink.abort();
-                return Err(super::super::remote::Error::Unexpected {
+                return Err(crate::Error::Unexpected {
                     status: self.status,
                 });
             }
@@ -853,12 +853,12 @@ mod tests {
             for chunk in &self.chunks {
                 if cancel.triggered() {
                     sink.abort();
-                    return Err(super::super::remote::Error::Cancelled);
+                    return Err(crate::Error::Cancelled);
                 }
-                sink.write(chunk).map_err(super::super::remote::Error::Io)?;
+                sink.write(chunk).map_err(crate::Error::Io)?;
                 written += chunk.len() as u64;
             }
-            sink.finish().map_err(super::super::remote::Error::Io)?;
+            sink.finish().map_err(crate::Error::Io)?;
             Ok(written)
         }
     }

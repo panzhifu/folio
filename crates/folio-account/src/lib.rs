@@ -1,5 +1,10 @@
 //! 账号：一台安装自持的一把 128-bit 密钥，与「两台设备算不算同一个账号」的判据。
 //!
+//! 独立成 crate（2026-11-12，阶段三拆分；原 folio-core::account 原样搬来，「换 crate
+//! 不换形状」：core 经模块别名沿用旧路径）。判据：它的全部依赖就是 `ring`（HMAC 与
+//! OS 熵），而它同时被 core 的配置 schema（`AccountKey` 那格）与 folio-net 的局域网
+//! 两族（传书 / 同步握手）消费 —— 住在任何一边都会让另一边绕路。
+//!
 //! 局域网同步没有服务器可问，所以「账号」不可能是一条权威记录 —— 它能有的全部含义是
 //! **两台设备各自持有同一把密钥**这件事本身。本模块因此只管三件事：密钥的生成与编解码、
 //! 由密钥派生的账号 id 与肉眼校验码、以及一次连接开头那对双向证明。
@@ -309,7 +314,7 @@ impl fmt::Debug for Proof {
 
 #[cfg(test)]
 mod tests {
-    use crate::account::{
+    use crate::{
         AccountId, AccountKey, CHECK_CODE_LEN, ID_LEN, KEY_LEN, NONCE_LEN, Proof, Side, from_hex,
         to_hex,
     };
@@ -452,14 +457,8 @@ mod tests {
             "两个 nonce 相同就是熵源退化"
         );
         assert_eq!(first.to_hex().len(), NONCE_LEN * 2);
-        assert_eq!(
-            crate::account::Nonce::from_hex(&first.to_hex()),
-            Some(first)
-        );
-        assert_eq!(
-            crate::account::Nonce::from_hex(&second.to_hex()),
-            Some(second)
-        );
+        assert_eq!(crate::Nonce::from_hex(&first.to_hex()), Some(first));
+        assert_eq!(crate::Nonce::from_hex(&second.to_hex()), Some(second));
     }
 
     #[test]
@@ -484,7 +483,7 @@ mod tests {
         );
     }
 
-    fn nonce() -> crate::account::Nonce {
-        crate::account::Nonce::generate().expect("OS 熵在测试里必定可用")
+    fn nonce() -> crate::Nonce {
+        crate::Nonce::generate().expect("OS 熵在测试里必定可用")
     }
 }

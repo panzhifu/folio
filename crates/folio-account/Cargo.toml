@@ -1,0 +1,16 @@
+[package]
+name = "folio-account"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# 账号：一台安装自持的一把 128-bit 密钥与局域网双向证明（原 folio-core::account，
+# 2026-11-12 阶段三拆分；「换 crate 不换形状」：core 经模块别名沿用旧路径）。
+# 独立的判据：它的全部依赖就是 `ring`，而它同时被 core 的配置 schema 与 folio-net
+# 的局域网两族消费——住在任何一边都会让另一边绕路。`ring` 因此离开 folio-core 的
+# 依赖树（core 内它没有第二个用户）。
+
+[dependencies]
+ring.workspace = true
