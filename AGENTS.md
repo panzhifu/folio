@@ -29,9 +29,8 @@ Folio：Rust + [gpui-kit](https://gpui-kit.com) 写的原生 GPU 阅读器，覆
 
 **别把设计稿当现状**：各篇明确标了「现状 ≠ 目标」的地方 —— `format.md` 末行只
 剩 API 6（写回）尚未实现（1–5 已有对应物，4 资源清单于 4015abf 落地）、`地基.md`
-的 settings 层仍在 core、`储存.md` 的 store 拆 crate 停在路线图阶段四、
-`软件架构.md` §7 的阶段二~四各有卡点（阶段五已收尾）。动这些之前先读对应段落，
-别照着文档以为已经有代码。
+的 settings 层仍在 core。拆分路线图（`软件架构.md` §7）五个阶段已于 2026-11-12
+全部收尾，路线图本身成了记录。动这些之前先读对应段落，别照着文档以为已经有代码。
 
 [README.md](README.md)（英文，读者向）/ [CHANGELOG.md](CHANGELOG.md) /
 [packaging/README.md](packaging/README.md)（安装包里非代码资产：图标、desktop 条目）。
