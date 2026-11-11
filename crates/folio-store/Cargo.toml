@@ -1,0 +1,37 @@
+[package]
+name = "folio-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# SQLite 书库存储（原 folio-core::store，2026-11-12 阶段四拆分；「换 crate 不换形状」：
+# core 经模块别名沿用旧路径，消费方一行不改）。[`Store`] 是 `Send + Sync` 的：连接锁
+# 在内部的一把 `Mutex` 上，界面线程与后台线程（导入管线）共用同一份句柄。
+#
+# 锁纪律：**一次调用只上锁一次**。公开方法只负责「拿守卫 + 调对应的 `*_in(&conn, ..)`
+# 私有助手」，助手内部绝不再碰 `conn` —— `Mutex` 不可重入，方法套方法就是自锁。
+#
+# 错误自持（`Error`）：`Sql` / `Json` / 带标签的本地 I/O / 集合名校验，原 core 伞枚举
+# 的 `Sql` / `EmptyCollectionName` 两格删除，伞枚举经 `From` 收编整条链。
+# 书库资产的落盘约定（封面 / 缩略图，原 folio-core::content::assets）同住这里——
+# 它就是「封面写到哪儿、缩略图挂在哪」的规则本部，store 与导入管线两边都用。
+
+[dependencies]
+# 类型词汇：记录行、锚点、同步 DTO（含 Plan 族——store 是它的第三个消费方）与分组。
+folio-model.workspace = true
+# 统一文档接口与格式类型：按主键打开（with_container）与章表类型都从它来。
+folio-format.workspace = true
+# 时间、路径、身份（content_hash）与作业层的引用。
+folio-base.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+# 缩略图那一脚：解码字节、按边长缩、JPEG 落盘。
+image.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

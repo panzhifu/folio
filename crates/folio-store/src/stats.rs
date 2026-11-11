@@ -9,11 +9,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::infra::time::{
+use crate::{ReadingRecord, Store};
+use folio_base::time::{
     HOURS_PER_DAY, civil_from_days, days_from_civil, days_in_month, local_day, local_hour,
     weekday_monday0,
 };
-use crate::store::{ReadingRecord, Store};
 
 /// 里的一档。「总」看全部历史，「日 / 周 / 月 / 年」看一个可翻页的窗口。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -234,7 +234,7 @@ impl Snapshot {
                 Vec::new()
             }
         };
-        let today = local_day(crate::infra::time::now(), tz_offset_secs);
+        let today = local_day(folio_base::time::now(), tz_offset_secs);
         Self::build(records, range, anchor, today, tz_offset_secs)
     }
 
@@ -610,8 +610,8 @@ fn streaks(days: &[DayStat], today: i64) -> (usize, usize, Option<(i64, i64)>) {
 #[cfg(test)]
 mod tests {
     use super::{Range, SESSION_BUCKETS, Snapshot, days_from_civil, weekday_monday0};
-    use crate::infra::time::day_start;
-    use crate::store::ReadingRecord;
+    use crate::ReadingRecord;
+    use folio_base::time::day_start;
 
     fn record(book_id: i64, title: &str, day: i64, hour: i64, seconds: i64) -> ReadingRecord {
         ReadingRecord {

@@ -48,6 +48,7 @@ pub mod anchor;
 pub mod char_class;
 pub mod content;
 pub mod format;
+pub mod group;
 pub mod novel;
 pub mod position;
 pub mod reading;

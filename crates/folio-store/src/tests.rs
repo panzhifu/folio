@@ -7,16 +7,15 @@ use std::path::{Path, PathBuf};
 
 use crate::AnnotationStyle;
 use crate::ChapterExt;
-use crate::FlowDocExt;
-use crate::Reader;
 use crate::Store;
-use crate::content::format::{
+use crate::{MIGRATIONS, StaleReason};
+use folio_format::ext::FlowDocExt;
+use folio_format::{
     Chapter, ChapterLocator, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
     PageSource, Series, TocEntry, guess_media_type,
 };
-use crate::position::Locator;
-use crate::store::{MIGRATIONS, StaleReason};
-use crate::{BookSettings, BookSettingsExt};
+use folio_model::position::Locator;
+use folio_model::reading::BookSettings;
 
 fn meta(title: &str) -> DocMeta {
     DocMeta {
@@ -390,7 +389,7 @@ fn a_fixed_document_is_not_perpetually_stale() {
         })
         .unwrap()
     };
-    assert_eq!(version, crate::content::format::INDEX_VERSION);
+    assert_eq!(version, folio_format::INDEX_VERSION);
     assert_eq!(
         store.stale_reason(id).unwrap(),
         None,
@@ -487,7 +486,7 @@ fn adding_the_same_path_twice_updates_in_place() {
 ///
 /// 注意这里**没有正文**：正文不在库里（`the_text_never_reaches_the_database` 钉这一条），
 /// 所以「往返」这个词覆盖的只有索引 —— 正文的往返在
-/// `crate::content::document::book::tests` 里对容器测。
+/// `folio_format::document::book::tests` 里对容器测。
 #[test]
 fn the_index_roundtrips_through_the_store() {
     let store = Store::in_memory().unwrap();
@@ -643,7 +642,7 @@ fn the_v21_migration_keeps_old_rows_reading_as_the_straight_line() {
             [],
         )
         .unwrap();
-        let anchor = crate::content::anchor::TextAnchor {
+        let anchor = folio_model::TextAnchor {
             chapter: 0,
             start: 4,
             end: 8,
@@ -912,11 +911,8 @@ fn a_changed_file_or_an_old_index_is_reported_as_stale() {
         "文件换过要认出来"
     );
 
-    // 重扫之后又可信了，而且章表跟着新的文件走。
-    folio_core_reindex(&store, id);
-    assert_eq!(store.stale_reason(id).unwrap(), None);
-    assert_eq!(store.load_flow(id).unwrap().unwrap().chapters.len(), 2);
-
+    // 「重扫之后又可信了、章表跟着新文件走」那半条是 reindex 的契约，集成门在
+    // folio-core 的 tests/reindex_contract.rs（编排住在 core，那边才有 reindex）。
     // 索引是旧算法算的。
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
@@ -928,10 +924,6 @@ fn a_changed_file_or_an_old_index_is_reported_as_stale() {
     // 文件删了：这是「读不了」，比另外两种严重。
     std::fs::remove_file(&path).unwrap();
     assert_eq!(store.stale_reason(id).unwrap(), Some(StaleReason::Missing));
-}
-
-fn folio_core_reindex(store: &Store, id: i64) {
-    crate::reindex(store, id).unwrap();
 }
 
 /// 读回 `books.rules_hash` 那一格（库文件契约，不碰私有字段）。
@@ -976,7 +968,7 @@ fn a_txt_book_notices_that_the_rule_table_changed() {
 
     // 落库那一趟把**生效那套表**的哈希记下了：直接问规则层，不走 `rules_hash` 那把尺，
     // 否则这条门会变成自己验自己。
-    let active = crate::content::format::novel::rules::CompiledRules::builtin()
+    let active = folio_format::novel::rules::CompiledRules::builtin()
         .content_hash()
         .to_string();
     assert_eq!(
@@ -1007,10 +999,8 @@ fn a_txt_book_notices_that_the_rule_table_changed() {
         "没记哈希的 `.txt` 不许当成可信"
     );
 
-    // 重扫一趟自己好：新哈希落库，判据重新闭合。
-    folio_core_reindex(&store, id);
-    assert_eq!(rules_hash_column(&db, id).as_deref(), Some(active.as_str()));
-    assert_eq!(store.stale_reason(id).unwrap(), None);
+    // 「重扫一趟自己好」那半条是 reindex 的契约，集成门在 folio-core 的
+    // tests/reindex_contract.rs（编排住在 core，那边才有 reindex）。
 }
 
 /// **除 `.txt` 以外的格式不许看那一格**。判据问的是「这个格式的索引算不算自那张表」，
@@ -1043,79 +1033,9 @@ fn a_book_that_never_read_the_rule_table_ignores_the_column() {
     );
 }
 
-/// **重扫一本书不许动读者的数据**（`plans/导入管线.md` §九 那条门）。
-///
-/// 旧形状下这条会红，而且红在最要命的那一格：`annotations.chapter_id` 带着
-/// `ON DELETE CASCADE` 挂在 `chapters(id)` 上，而 `save_flow_in` 落库的第一句是
-/// 「删光这本书的章行再重插」—— 于是**每重扫一次就清空一次批注**，界面上那句
-/// 「位置与批注都还在」是一句谎话。触发它的路是日常的：文件被换过、
-/// `INDEX_VERSION` 被 bump 过一次（动了那台分章引擎时必须 bump），或者
-/// `.txt` 那一本的规则表换了（`RulesChanged`）。
-///
-/// 五问合一条，因为「重扫」这个动作的正确性本来就是一个整体：
-/// 不重读来源、不改文件名、不新增记录、章表真的跟着新内容走了、读者的批注还在。
-/// 分开写会漏掉组合出来的状态（比如「章表更新了但批注没了」）。
-#[test]
-fn reindexing_keeps_the_reader_data_and_touches_no_new_record() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("folio.db");
-    // 副本躺在书库里，与真实导入之后的位置同形（重扫读的是它，不是来源）。
-    let copy = dir.path().join("copy.md");
-    std::fs::write(&copy, "# 一\n\n正文\n").unwrap();
-
-    let store = Store::open_at(&db).unwrap();
-    let id = store.add_book(&copy, &meta("A")).unwrap();
-    store
-        .save_flow(id, &flow(&[("一", "正文")]), Format::Markdown)
-        .unwrap();
-    let before_rows = store.list_books().unwrap().len();
-
-    // 读者在这一章划了一条批注：章 0 的第 1 个字之后（插入点，避开长度边界）。
-    let anchor = crate::content::anchor::TextAnchor {
-        chapter: 0,
-        start: 1,
-        end: 1,
-        exact: String::new(),
-        prefix: String::new(),
-        suffix: String::new(),
-        path: "/html[1]/body[1]/p[1]#0".into(),
-    };
-    store
-        .add_annotation(
-            id,
-            &anchor,
-            "这一段写得真好",
-            "amber",
-            AnnotationStyle::default(),
-        )
-        .unwrap();
-    assert_eq!(store.annotations(id).unwrap().len(), 1);
-
-    // 文件被换掉（多了一章），然后重扫 —— 走的就是 `stale_reason` 之后那条路。
-    std::fs::write(&copy, "# 一\n\n正文\n\n# 二\n\n又一章\n").unwrap();
-    crate::reindex(&store, id).unwrap();
-
-    assert_eq!(
-        store.load_flow(id).unwrap().unwrap().chapters.len(),
-        2,
-        "章表要跟着新文件走，否则这条测试没在验真的重扫"
-    );
-    assert_eq!(
-        store.annotations(id).unwrap().len(),
-        1,
-        "重扫不该清掉读者的批注（§九：历史批注一条都不漂）"
-    );
-    assert_eq!(
-        store.book(id).unwrap().unwrap().path,
-        copy.to_string_lossy(),
-        "重扫不重读来源、也不改副本文件名"
-    );
-    assert_eq!(
-        store.list_books().unwrap().len(),
-        before_rows,
-        "重扫不该新增记录"
-    );
-}
+// 「重扫一本书不许动读者的数据」的五问门（`plans/导入管线.md` §九）搬去了
+// folio-core 的 tests/reindex_contract.rs：它验的是 reindex 编排（core）与 store
+// 的配合，两边各留半份只会削弱门。
 
 /// 打开过的书排在从没打开过的前面。
 #[test]
@@ -1518,7 +1438,7 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
     // 补上之后：从「缺身份」那张清单里消失，而按哈希能找回来。
     let hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     store
-        .set_content_hash(rows[0].id, hash, crate::infra::identity::HASH_ALGO)
+        .set_content_hash(rows[0].id, hash, folio_base::identity::HASH_ALGO)
         .unwrap();
     assert!(store.rows_missing_hash().unwrap().is_empty());
     assert_eq!(
@@ -1532,7 +1452,7 @@ fn the_v12_migration_adds_identity_columns_without_backfilling_them() {
         .unwrap()
         .query_row("SELECT hash_algo FROM books WHERE id = 1", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(algo, crate::infra::identity::HASH_ALGO);
+    assert_eq!(algo, folio_base::identity::HASH_ALGO);
 
     // 索引只建在非空那一段上：老库此刻绝大多数行是 NULL，全表索引是给空值建 B 树。
     let indexed: i64 = rusqlite::Connection::open(&db)
@@ -1572,7 +1492,7 @@ fn the_identity_index_skips_rows_without_a_hash_or_size() {
         .unwrap();
     let hash = "aa".repeat(32);
     store
-        .set_content_hash(hashed, &hash, crate::infra::identity::HASH_ALGO)
+        .set_content_hash(hashed, &hash, folio_base::identity::HASH_ALGO)
         .unwrap();
 
     assert_eq!(
@@ -1642,10 +1562,10 @@ fn the_v14_migration_brings_back_char_len_as_nullable() {
     assert_eq!((known, unknown), (0, 2), "降级读数要能说清几章不知道");
 
     // 新写的一份：正文在手，字数建的时候就数出来，落库读回一致。
-    let fresh = crate::content::format::FlowDoc {
+    let fresh = folio_format::FlowDoc {
         chapters: vec![
-            crate::content::format::Chapter::inline("一", "<p>正文四个字</p>"),
-            crate::content::format::Chapter::inline("二", "<p>短</p>"),
+            folio_format::Chapter::inline("一", "<p>正文四个字</p>"),
+            folio_format::Chapter::inline("二", "<p>短</p>"),
         ],
         ..Default::default()
     };
@@ -1830,7 +1750,7 @@ fn every_shelf_query_can_report_progress() {
     let groups = store.collection_groups().unwrap();
     let loose = groups
         .iter()
-        .find(|g| g.name == crate::group::UNGROUPED)
+        .find(|g| g.name == folio_model::group::UNGROUPED)
         .expect("末尾该有「未分组」那一组");
     assert_eq!(loose.items.len(), 1, "未分组那条要查得出来");
     assert_eq!(loose.items[0].id, b);
@@ -1876,12 +1796,12 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
 
     // 两本共用同一份封面字节。
     let cover = b"pretend-jpeg-cover-bytes";
-    let hash = crate::content::assets::cover::write(root, cover, "image/jpeg").unwrap();
+    let hash = crate::assets::cover::write(root, cover, "image/jpeg").unwrap();
     let hash_hex = hash.to_hex();
 
     let mut with_cover = flow(&[("一", "正文")]);
     with_cover.cover = Some(cover.to_vec());
-    with_cover.cover_ref = Some(crate::content::assets::cover::CoverRef {
+    with_cover.cover_ref = Some(crate::assets::cover::CoverRef {
         hash: hash_hex.clone(),
         mime: "image/jpeg".into(),
     });
@@ -1896,7 +1816,7 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
     assert_eq!(store.book_cover(b).unwrap().as_deref(), Some(&cover[..]));
 
     // 两本指向**同一个**文件 —— 这是「按封面自己的字节哈希命名」的全部收益。
-    let file_a = crate::content::assets::cover::cover_path(root, &hash_hex, "image/jpeg");
+    let file_a = crate::assets::cover::cover_path(root, &hash_hex, "image/jpeg");
     assert!(file_a.is_file(), "封面该真的落盘了");
 
     // 2) 两本共用一张时删掉一本不能把文件带走（封面是**它自己字节**的身份，
@@ -2123,20 +2043,29 @@ fn the_book_settings_column_round_trips_across_a_reopen() {
         "新书该读成「完全跟随默认」"
     );
 
-    let base = Reader::default();
-    let mut wanted = base.clone();
-    wanted.font_size = 22.0;
-    wanted.margin_x = 40.0;
-    let mut settings = BookSettings::default();
-    settings.record_reader(&base, &wanted);
+    let settings = BookSettings {
+        reader: std::collections::BTreeMap::from([
+            ("font_size".to_string(), serde_json::json!(22.0)),
+            ("margin_x".to_string(), serde_json::json!(40.0)),
+        ]),
+        appearance: Default::default(),
+    };
     store.set_book_settings(id, &settings).unwrap();
     drop(store);
 
     let again = Store::open_at(&db).unwrap();
     let got = again.book_settings(id).unwrap();
     assert_eq!(got, settings, "差量原样回来，一格不多一格不少");
-    assert_eq!(got.effective_reader(&base).font_size, 22.0);
-    assert_eq!(got.effective_reader(&base).margin_x, 40.0);
+    // 生效值怎么算（差量盖默认）的门在 folio-core 的 book_settings 测试里；
+    // 这里钉的是**列往返**：差量原样回来，一格不多一格不少。
+    assert_eq!(
+        got.reader.get("font_size").and_then(|v| v.as_f64()),
+        Some(22.0)
+    );
+    assert_eq!(
+        got.reader.get("margin_x").and_then(|v| v.as_f64()),
+        Some(40.0)
+    );
 
     // 「恢复本书默认」= 写回空差量，而空差量在 SQL 里是空串（不是 `null`、不是 `{}`）。
     again

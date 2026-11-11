@@ -2324,6 +2324,7 @@ dependencies = [
  "folio-render",
  "folio-search",
  "folio-speech",
+ "folio-store",
  "folio-translate",
  "hayro",
  "image",
@@ -2471,6 +2472,22 @@ dependencies = [
  "async-channel",
  "tracing",
  "tts",
+]
+
+[[package]]
+name = "folio-store"
+version = "0.1.4"
+dependencies = [
+ "folio-base",
+ "folio-format",
+ "folio-model",
+ "image",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

@@ -17,10 +17,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::types::{BookMeta, BookRow, Collection, ShelfItem};
 use super::{Store, now};
 use crate::Result;
-use crate::content::format::{DocMeta, Format, Series};
-use crate::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
-use crate::infra::book_settings::BookSettings;
-use crate::position::Locator;
+use folio_format::{DocMeta, Format, Series};
+use folio_model::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
+use folio_model::position::Locator;
+use folio_model::reading::BookSettings;
 
 /// 多值的那几格（作者、贡献者、主题词）在库里是**换行拼接**的一列。
 ///
@@ -215,7 +215,7 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     // 两格要么都有、要么都没有：只剩一格拼不出文件名（见 `load_flow_in` 同一句）。
     let cover_ref = match (cover_hash, cover_mime) {
         (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-            Some(crate::content::assets::cover::CoverRef { hash, mime })
+            Some(crate::assets::cover::CoverRef { hash, mime })
         }
         _ => None,
     };
@@ -288,7 +288,7 @@ impl Store {
     /// 「这本书是不是已经在了」不由这里判——管线在落地之前就按内容哈希判过重了
     /// （[`Store::book_by_hash`]）。这里只管把那一行写成现在这个样子。
     ///
-    /// 会走到 `ON CONFLICT` 臂的只有**重扫**那一条路（[`crate::ingest::import::reindex`]）：
+    /// 会走到 `ON CONFLICT` 臂的只有**重扫**那一条路（[`folio_core::ingest::import::reindex`]）：
     /// 新导入按哈希判重提前返回，自愈走 [`Store::retarget_book_path`]。所以这一臂刷新的
     /// 只该是「那份文件的事实」（格式、大小、修改时间与那几书目列），**不碰 title / authors**
     /// ——重扫解析的是哈希名副本，无内嵌书名的格式（PDF / TXT）会把标题回落成文件主名，
@@ -432,7 +432,7 @@ impl Store {
             return Ok(None);
         };
         let root = book_root(Path::new(&path));
-        let Some(found) = crate::content::assets::cover::resolve(&root, &hash, &mime) else {
+        let Some(found) = crate::assets::cover::resolve(&root, &hash, &mime) else {
             // 描述在、文件不在：`covers/` 被清过，或库是别处拷来的（没有 `covers/`）。
             // 这一档**只记 debug**：它是「这本书现在没有封面」的正常状态，
             // 而每一帧的书架都会问一遍，warn 会刷爆日志。
@@ -620,7 +620,7 @@ impl Store {
     /// 还没算过内容身份的行（`content_hash IS NULL`），整行交出去。
     ///
     /// 这是懒补的那半张清单：补齐作业按它逐本算哈希、把旧名字的副本改成哈希名、回写
-    /// 位置（`Cleanup` 档，见 `crate::infra::task::Priority` 与 `crate::ingest::import::backfill_copies`）。
+    /// 位置（`Cleanup` 档，见 `folio_base::task::Priority` 与 `folio_core::ingest::import::backfill_copies`）。
     /// 空表 = 全库都已认得自己的书。
     /// 按 `id` 排是为了断言可复现，也让一次中断之后剩下的那批是确定的。
     pub fn rows_missing_hash(&self) -> Result<Vec<BookRow>> {
@@ -708,7 +708,7 @@ impl Store {
         if others > 0 {
             return Ok(None);
         }
-        Ok(Some(crate::content::assets::cover::cover_path(
+        Ok(Some(crate::assets::cover::cover_path(
             &book_root(Path::new(&path)),
             &hash,
             &mime,
@@ -849,7 +849,7 @@ impl Store {
 
     /// 书架分组：先按 `query` 过滤，再按 `by` 分。
     ///
-    /// 分组本身是纯函数（[`crate::group::group_shelf`]），这里只负责先取书架。
+    /// 分组本身是纯函数（[`folio_model::group::group_shelf`]），这里只负责先取书架。
     /// 集合那种「组是读者建的、存在库里」的情形不走这里，见
     /// [`Store::collection_groups`]。
     pub fn shelf_grouped(&self, query: &str, by: GroupBy) -> Result<Vec<ShelfGroup>> {
@@ -921,7 +921,7 @@ impl Store {
     /// 入口，没有叫「未分组」的那一页 —— 整架那一片本身就是它）。
     ///
     /// 「未分组」是筛出来的、不是存出来的：库里没有一个叫这个名字的组，它是
-    /// [`Store::collection_groups`] 末尾追加的那一格（名字用 [`crate::group::UNGROUPED`]）。
+    /// [`Store::collection_groups`] 末尾追加的那一格（名字用 [`folio_model::group::UNGROUPED`]）。
     pub fn shelf_ungrouped(&self, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::shelf_in_no_collection_in(&conn, query)
@@ -1060,10 +1060,10 @@ mod grouping {
 
     use std::path::{Path, PathBuf};
 
+    use crate::ShelfItem;
     use crate::Store;
-    use crate::content::format::{DocMeta, Format};
-    use crate::group::{GroupBy, UNGROUPED};
-    use crate::store::ShelfItem;
+    use folio_format::{DocMeta, Format};
+    use folio_model::group::{GroupBy, UNGROUPED};
 
     fn meta(title: &str, author: &str) -> DocMeta {
         DocMeta {
@@ -1267,7 +1267,7 @@ pub enum StaleReason {
     Missing,
     /// 源文件换了（大小或修改时间对不上）—— 位置还在，指的却是别的内容。
     Changed,
-    /// 索引是旧引擎算的（[`crate::content::format::INDEX_VERSION`] 对不上）：
+    /// 索引是旧引擎算的（[`folio_format::INDEX_VERSION`] 对不上）：
     /// 切章的算法、位置方案或页表算法改过。
     OldIndex,
     /// 分章那套**规则数据**换了（`.txt`，`books.rules_hash` 对不上）。
@@ -1331,7 +1331,7 @@ impl Store {
         let Ok(meta) = meta else {
             return Ok(Some(StaleReason::Missing));
         };
-        if row.version != crate::content::format::INDEX_VERSION {
+        if row.version != folio_format::INDEX_VERSION {
             return Ok(Some(StaleReason::OldIndex));
         }
         let now_mtime = meta
@@ -1353,7 +1353,7 @@ impl Store {
         // NULL 则**不**跳过：v22 之前入库的老行没记这一格，而它正是该重扫的那批
         // （老序号按当时那套规则算的，而当时那套规则今天可能已经换了）。
         let format = Format::parse(&row.format);
-        let want = format.and_then(crate::content::format::rules_hash);
+        let want = format.and_then(folio_format::rules_hash);
         if let Some(want) = want
             && row.rules_hash.as_deref() != Some(want.as_str())
         {

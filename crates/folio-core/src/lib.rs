@@ -13,8 +13,7 @@ rust_i18n::i18n!("locales", fallback = "en");
 
 // ── 分区。判据是「谁依赖谁」，写在各自的 mod.rs 里 ──
 //
-//     content/   内容与文档：文档接口 / 锚点 / 命中 / 批注（DOM 与 CSS 来自 folio-format）
-//     store/     SQLite：书目、进度、批注、集合、统计
+//     content/   内容与文档：锚点 / 命中 / 批注（DOM 与 CSS 来自 folio-format）
 //     ingest/    书怎么进来：导入管线、扫描、监听、身份、校验
 //     net/       出网与入网：网盘、OPDS、传书、同步（传输层已独立成 folio-net；
 //                翻译/AI 的机制在 folio-translate / folio-ai，旧路径经 net/ 下的 shim 沿用）
@@ -31,13 +30,11 @@ pub mod backup;
 pub mod cache;
 pub mod content;
 pub mod error;
-pub mod group;
 pub mod infra;
 pub mod ingest;
 pub mod net;
 pub mod reader;
 pub mod services;
-pub mod store;
 pub mod sync;
 
 // 排版引擎已独立成 `folio-render` crate（「换 crate 不换形状」）。
@@ -61,6 +58,13 @@ pub use folio_translate::dict;
 // （设置页的字体库、平台注册）都解析到它，消费方一行不改；错误词表跟着机制走
 // （`FontsError` 自持，本 crate 的 `Error::Font` 变体删除）。
 pub use folio_fonts::{fonts, text};
+
+// 书库已独立成 `folio-store` crate（2026-11-12，阶段四拆分；原 store/ 与书库资产的
+// 落盘约定原样搬去，rusqlite 随行）。旧路径沿用：`folio_core::store::*`（app 的
+// 各服务、sync 编排）与 crate 内 `crate::store::*`（ingest、backup）都解析到它，
+// 消费方一行不改；错误自持（`Error::Sql` / `Error::EmptyCollectionName` 两格随迁
+// 删除，伞枚举经 `From` 收编整条链）。
+pub use folio_store as store;
 
 // 账号已独立成 `folio-account` crate（2026-11-12，阶段三拆分；原 account.rs 原样搬去，
 // ring 随行）。旧路径沿用：`folio_core::account::*`（config 的 AccountKey 那格、
@@ -94,7 +98,7 @@ pub use folio_model::position;
 pub use error::{Error, ImportReject, Result};
 pub use folio_format::ext::{ChapterExt, FlowDocExt, FormatExt, PageTextExt};
 pub use folio_model::Tag;
-pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
+pub use folio_model::group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 // BookSettings 的数据半边在 folio-model（阶段二下沉）；咬配置的行为经这个扩展 trait
 // 挂回去 —— 调用方引一次 trait，方法语法不变（与 folio-format::ext 同一条画法）。
 pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings, BookSettingsExt};

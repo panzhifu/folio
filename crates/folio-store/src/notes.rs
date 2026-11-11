@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::content::assets::cover::CoverRef;
-use crate::store::Store;
+use crate::Store;
+use crate::assets::cover::CoverRef;
 
 /// 清单里的一行。书签与批注各占一行，字段是两族的并集 —— 与目录面板「批注」那一格
 /// 同一个形状，只是出处那句在这里由库里的章标题表给（这一屏没有排版可问）。
@@ -47,7 +47,7 @@ pub struct BookGroup {
 
 /// 从库里折出按书分组的清单。整趟只在切进这一屏（或本屏删改之后）跑一次，
 /// `render` 拿到的已经是能直接画的东西。
-pub fn load_groups(store: &Store) -> crate::error::Result<Vec<BookGroup>> {
+pub fn load_groups(store: &Store) -> crate::Result<Vec<BookGroup>> {
     let mut groups: HashMap<i64, BookGroup> = HashMap::new();
     for card in store.all_annotations()? {
         let annotation = &card.annotation;
@@ -178,11 +178,8 @@ fn cover_bytes(
     book_id: i64,
 ) -> Option<Vec<u8>> {
     let small = cover.and_then(|(root, description)| {
-        let path = crate::content::assets::thumb::thumb_path(
-            root,
-            crate::infra::paths::THUMB_LIST_PX,
-            description,
-        );
+        let path =
+            crate::assets::thumb::thumb_path(root, folio_base::paths::THUMB_LIST_PX, description);
         std::fs::read(path).ok()
     });
     if small.is_some() {
@@ -195,9 +192,9 @@ fn cover_bytes(
 mod tests {
     use super::{BookGroup, MarkEntry, counts, load_groups, matches_query, snippet};
     use crate::ChapterExt;
-    use crate::content::anchor::TextAnchor;
-    use crate::content::format::{Chapter, DocMeta, FlowDoc, Format};
-    use crate::store::{AnnotationStyle, Store};
+    use crate::{AnnotationStyle, Store};
+    use folio_format::{Chapter, DocMeta, FlowDoc, Format};
+    use folio_model::TextAnchor;
     use std::path::Path;
 
     fn meta(title: &str) -> DocMeta {

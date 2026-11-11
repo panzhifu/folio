@@ -14,7 +14,7 @@
 
 use rusqlite::params;
 
-use crate::error::ImportReject;
+use folio_format::ImportReject;
 
 use super::Store;
 
@@ -22,7 +22,7 @@ use super::Store;
 /// （要长期翻的在 `books` 与「信息」那一页）。掉的是最老的那些。
 pub const IMPORT_LOG_KEEP: i64 = 500;
 
-/// 一本导入进来的书最后怎么样了。与 [`ImportReport`](crate::ingest::import::ImportReport)
+/// 一本导入进来的书最后怎么样了。与 [`ImportReport`](folio_core::ingest::import::ImportReport)
 /// 那五个类别一一对应，只是这里说的是**一本**，而报表数的是**一批**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportLanding {
@@ -154,9 +154,9 @@ mod tests {
 
     use std::path::Path;
 
-    use crate::content::format::{DocMeta, Format};
-    use crate::error::ImportReject;
-    use crate::store::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry, Store};
+    use crate::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry, Store};
+    use folio_format::ImportReject;
+    use folio_format::{DocMeta, Format};
 
     fn open(dir: &Path) -> Store {
         Store::open_at(&dir.join("folio.db")).unwrap()

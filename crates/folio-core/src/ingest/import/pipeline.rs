@@ -686,9 +686,12 @@ struct Pending {
 /// 从外面造不出半截状态），所以不假造就钉不住「这一段确实调了 [`unwind_landing`]」。
 /// 生产编译里 `#[cfg(not(test))]` 那一份就是直接调用，一句多余的话都不留。
 #[cfg(not(test))]
-fn landing<T>(which: &'static str, call: impl FnOnce() -> Result<T>) -> Result<T> {
+fn landing<T, E: Into<Error>>(
+    which: &'static str,
+    call: impl FnOnce() -> std::result::Result<T, E>,
+) -> Result<T> {
     let _ = which;
-    call()
+    call().map_err(Into::into)
 }
 
 // [`landing`] 的测试那一版把旗子按**线程**放：一批并行时真正导书的是 worker 线程，
@@ -707,14 +710,17 @@ pub(crate) fn fail_landing(which: Option<&'static str>) {
 }
 
 #[cfg(test)]
-fn landing<T>(which: &'static str, call: impl FnOnce() -> Result<T>) -> Result<T> {
+fn landing<T, E: Into<Error>>(
+    which: &'static str,
+    call: impl FnOnce() -> std::result::Result<T, E>,
+) -> Result<T> {
     if FAIL_LANDING.with(|slot| slot.get()) == Some(which) {
         return Err(Error::Io {
             path: PathBuf::from(which),
             source: "测试按下去的假失败".to_string().into(),
         });
     }
-    call()
+    call().map_err(Into::into)
 }
 
 /// §一 步 3、4、5 的前半：算身份 → 三层判定 → 判重 → 在暂存区里换成看得懂的名字。

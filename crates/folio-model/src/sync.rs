@@ -171,3 +171,58 @@ pub struct Tombstone {
     pub uid: String,
     pub deleted_at: i64,
 }
+
+/// 本机快照 + 因为还没有 `content_hash` 而没进来的书数。
+///
+/// 阶段二落地时它留在 core（消费方只有 sync 与 store 两处）；阶段四 store 独立成
+/// crate 后它是第三个消费方，按 folio-model 的规矩进来。不是 serde：它是**内存里**
+/// 的收集结果，上不网。
+#[derive(Debug, Clone, PartialEq)]
+pub struct LocalSnapshot {
+    pub snapshot: Snapshot,
+    pub skipped_books: usize,
+}
+
+/// 合并之后要写回本机的动作。按书哈希定位本地那一行；远端书不在本机时不会进这里。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Plan {
+    pub positions: Vec<(String, PositionRecord)>,
+    pub annotation_upserts: Vec<(String, AnnotationRecord)>,
+    pub annotation_deletes: Vec<DeleteRecord>,
+    pub bookmark_upserts: Vec<(String, BookmarkRecord)>,
+    pub bookmark_deletes: Vec<DeleteRecord>,
+    /// 该写回本机的差量（整本一份，按 `content_hash` 定位那一行）。
+    pub settings: Vec<(String, SettingsRecord)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRecord {
+    pub book_hash: String,
+    pub uid: String,
+    pub deleted_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub positions: usize,
+    pub annotations: usize,
+    pub bookmarks: usize,
+    pub annotations_deleted: usize,
+    pub bookmarks_deleted: usize,
+    /// 写回本机的那一本书的差量（整本算一次，不逐格数）。
+    pub settings: usize,
+}
+
+impl Stats {
+    pub fn applied(&self) -> usize {
+        self.positions + self.annotations + self.bookmarks + self.settings
+    }
+}
+
+/// 一次合并的结果：该上传的自己那份、该写回本机的动作、给界面看的计数。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Merged {
+    pub snapshot: Snapshot,
+    pub plan: Plan,
+    pub stats: Stats,
+}

@@ -122,7 +122,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::Store;
-    use crate::content::format::{DocMeta, Format};
+    use folio_format::{DocMeta, Format};
     use folio_model::Tag;
 
     fn meta(title: &str) -> DocMeta {
@@ -218,7 +218,7 @@ mod tests {
 
         // 灌满痕迹：进度一行、已读章、两次会话、最近打开、一条批注、一个标签。
         store
-            .set_position_at(a, "paged", &crate::Locator::start(), 12345)
+            .set_position_at(a, "paged", &folio_model::Locator::start(), 12345)
             .unwrap();
         store.mark_chapter_read(a, 3).unwrap();
         store.record_session(a, 100, 200, 500).unwrap();
@@ -227,7 +227,7 @@ mod tests {
         store
             .add_annotation(
                 a,
-                &crate::TextAnchor::default(),
+                &folio_model::TextAnchor::default(),
                 "一条笔记",
                 "amber",
                 crate::AnnotationStyle::Highlight,

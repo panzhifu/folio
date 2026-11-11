@@ -13,6 +13,7 @@ members = [
     "crates/folio-ai",
     "crates/folio-render",
     "crates/folio-speech",
+    "crates/folio-store",
     "crates/folio-core",
     "crates/folio-app",
 ]
@@ -37,6 +38,7 @@ folio-search = { path = "crates/folio-search" }
 folio-ai = { path = "crates/folio-ai" }
 folio-render = { path = "crates/folio-render" }
 folio-speech = { path = "crates/folio-speech" }
+folio-store = { path = "crates/folio-store" }
 folio-core = { path = "crates/folio-core" }
 
 # 走 git main 而不是 crates.io：上游每周发版，发布版落后一到两周，且主题目录

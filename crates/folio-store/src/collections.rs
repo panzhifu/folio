@@ -188,7 +188,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::Store;
-    use crate::content::format::{DocMeta, Format};
+    use folio_format::{DocMeta, Format};
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {

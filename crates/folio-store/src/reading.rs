@@ -2,7 +2,7 @@
 //!
 //! 存的是**原始会话**而不是按天汇总 —— 「今天读了多久」依赖读者所在时区，而时区只有
 //! 界面侧知道。core 只留事实（何时开始、多久、前进多少字），汇总时把偏移当参数收进来
-//! （见 `crate::infra::time`），不把某个时区的日界线写死进表。
+//! （见 `folio_base::time`），不把某个时区的日界线写死进表。
 //!
 //! 窗口内的每一个派生数（连续天数、活跃天数、时段分布、书目排行）都是从**同一批**
 //! `reading_sessions` 行上算出来的，所以它们与图表之间不存在「两条查询之间被新写入
@@ -18,7 +18,7 @@ use super::types::{
 };
 use super::{Store, now};
 use crate::Result;
-use crate::infra::time::{HOURS_PER_DAY, civil_date, day_start, local_day, local_hour};
+use folio_base::time::{HOURS_PER_DAY, civil_date, day_start, local_day, local_hour};
 
 impl Store {
     /// 记一次阅读会话。`seconds` 由起止时间算，负数夹到 0 —— 调用方给起止就够了，
@@ -319,10 +319,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::DailyReading;
     use crate::Store;
-    use crate::content::format::{DocMeta, Format};
-    use crate::infra::time::{civil_date, day_start, local_day};
-    use crate::store::DailyReading;
+    use folio_base::time::{civil_date, day_start, local_day};
+    use folio_format::{DocMeta, Format};
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -595,7 +595,7 @@ mod tests {
         let hours = store.hour_distribution(3, tz).unwrap();
         assert_eq!(
             hours.len(),
-            crate::infra::time::HOURS_PER_DAY,
+            folio_base::time::HOURS_PER_DAY,
             "表宽永远是 24"
         );
         assert_eq!(hours[8], 900);

@@ -22,9 +22,9 @@ use super::cover::CoverRef;
 use crate::Result;
 
 /// 卡片档：书架上那一格的大图。与 `paths::THUMB_CARD_PX` 是同一个数。
-const CARD: u32 = crate::infra::paths::THUMB_CARD_PX;
+const CARD: u32 = folio_base::paths::THUMB_CARD_PX;
 /// 列表档：一行一本那种小图。与 `paths::THUMB_LIST_PX` 是同一个数。
-const LIST: u32 = crate::infra::paths::THUMB_LIST_PX;
+const LIST: u32 = folio_base::paths::THUMB_LIST_PX;
 
 /// 两档尺寸，按「先大后小」排：一次解码要**从小到大**做，缩过的图再缩会累积误差。
 pub const SIZES: [u32; 2] = [LIST, CARD];
@@ -36,7 +36,7 @@ const EXT: &str = "jpg";
 
 /// 一份缩略图在磁盘上的位置。
 pub fn thumb_path(root: &Path, size: u32, cover: &CoverRef) -> std::path::PathBuf {
-    crate::infra::paths::thumb_dir(root, size).join(format!("{}.{EXT}", stem(&cover.hash)))
+    folio_base::paths::thumb_dir(root, size).join(format!("{}.{EXT}", stem(&cover.hash)))
 }
 
 /// 确保某一档缩略图在磁盘上；已经在了就直接交回路径。
@@ -123,7 +123,7 @@ fn write_thumb(
     encoded: &[u8],
 ) -> Option<std::path::PathBuf> {
     let dest = thumb_path(root, size, cover);
-    let dir = crate::infra::paths::thumb_dir(root, size);
+    let dir = folio_base::paths::thumb_dir(root, size);
     std::fs::create_dir_all(&dir).ok()?;
     // 半写完的缩略图会被当成一张完好的图画出来，而内容是截断的 ——
     // 那种「图是花的」比「没有缩略图」难查得多。
@@ -191,9 +191,9 @@ fn stem(hash: &str) -> String {
 /// 返回删掉的文件数。删失败只记日志：这是可丢弃的缓存，
 /// **删不掉不是错误**（最坏是多占一点空间，下次 `ensure` 会发现文件已存在）。
 pub fn purge(root: &Path) -> Result<usize> {
-    use crate::error::IoResultExt as _;
+    use crate::IoResultExt as _;
 
-    let dir = crate::infra::paths::thumbs_dir(root);
+    let dir = folio_base::paths::thumbs_dir(root);
     if !dir.is_dir() {
         return Ok(0);
     }
@@ -220,7 +220,7 @@ pub fn purge(root: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::{DECODES, SIZES, ensure, ensure_all, purge, thumb_path};
-    use crate::content::assets::cover::CoverRef;
+    use crate::assets::cover::CoverRef;
 
     /// 读并清零解码计数。每条测试开头先清一次：cargo 让同一条线程跑过多条测试，
     /// 不清就会读到上一条的账。
@@ -417,7 +417,7 @@ mod tests {
         let removed = purge(root).unwrap();
         assert_eq!(removed, SIZES.len(), "两档都该被清掉，实际 {removed}");
         assert!(
-            !crate::infra::paths::thumb_dir(root, SIZES[0])
+            !folio_base::paths::thumb_dir(root, SIZES[0])
                 .join("x.jpg")
                 .exists()
         );
@@ -425,7 +425,7 @@ mod tests {
         assert!(ensure(root, SIZES[0], &cover, &bytes).is_some());
         // 没有缓存目录时 purge 不报错（幂等）。
         purge(root).unwrap();
-        std::fs::remove_dir_all(crate::infra::paths::thumbs_dir(root)).unwrap();
+        std::fs::remove_dir_all(folio_base::paths::thumbs_dir(root)).unwrap();
         assert_eq!(purge(root).unwrap(), 0, "目录不在时回 0");
     }
 }

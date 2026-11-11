@@ -24,10 +24,12 @@
 
 pub mod anchor;
 pub mod annotation;
-pub mod assets;
+// 书库资产的落盘约定已随 store 搬去 folio-store（2026-11-12 阶段四）——它本来就是
+// 「封面写到哪儿、缩略图挂在哪」的书库规则；这里 re-export 沿旧路径（ingest 与 app）。
 pub use folio_format as format;
 pub use folio_format::document;
 pub use folio_format::dom;
 pub use folio_format::scan;
+pub use folio_store::assets;
 pub mod hit;
 pub use folio_format::validate;

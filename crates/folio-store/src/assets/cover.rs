@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::Result;
-use crate::infra::identity::ContentHash;
+use folio_base::identity::ContentHash;
 
 pub use folio_format::CoverRef;
 
@@ -42,10 +42,10 @@ fn stem(hex: &str) -> String {
 /// `root` 是书库根（`paths::covers_dir` 要的那一个），调用方从**这本书自己的副本
 /// 路径**推出来 —— 库层不持有书库位置，那是读者确认过的目录，只有界面/管线知道。
 pub fn cover_path(root: &Path, hash_hex: &str, mime: &str) -> PathBuf {
-    crate::infra::paths::covers_dir(root).join(format!(
+    folio_base::paths::covers_dir(root).join(format!(
         "{}.{}",
         stem(hash_hex),
-        crate::content::format::media_extension(mime)
+        folio_format::media_extension(mime)
     ))
 }
 
@@ -57,14 +57,14 @@ pub fn cover_path(root: &Path, hash_hex: &str, mime: &str) -> PathBuf {
 ///
 /// 失败一律回 `Err`，由调用方决定降级（`save_flow_in` 那边只记一句日志）。
 pub fn write(root: &Path, bytes: &[u8], mime: &str) -> Result<ContentHash> {
-    let hash = crate::infra::identity::sha256_of_bytes(bytes);
+    let hash = folio_base::identity::sha256_of_bytes(bytes);
     let dest = cover_path(root, &hash.to_hex(), mime);
     if dest.exists() {
         // 哈希相同 = 字节相同，重写一遍只是白付一次 IO（还可能把 mtime 搅动，
         // 让「封面有没有变」这类判断失灵）。
         return Ok(hash);
     }
-    let dir = crate::infra::paths::covers_dir(root);
+    let dir = folio_base::paths::covers_dir(root);
     std::fs::create_dir_all(&dir).map_err(|e| crate::Error::Io {
         path: dir.clone(),
         source: Box::new(e),
@@ -84,10 +84,10 @@ pub fn write(root: &Path, bytes: &[u8], mime: &str) -> Result<ContentHash> {
 /// 一份封面文件还在不在。读那一侧的第一步：在就交回路径，不在就退回 BLOB。
 pub fn resolve(root: &Path, hash: &str, mime: &str) -> Option<PathBuf> {
     // 与写入侧同一个 `stem`：截断口径必须一致，否则「文件明明在却读不出来」。
-    let path = crate::infra::paths::covers_dir(root).join(format!(
+    let path = folio_base::paths::covers_dir(root).join(format!(
         "{}.{}",
         stem(hash),
-        crate::content::format::media_extension(mime)
+        folio_format::media_extension(mime)
     ));
     path.is_file().then_some(path)
 }
@@ -95,7 +95,7 @@ pub fn resolve(root: &Path, hash: &str, mime: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{cover_path, resolve, write};
-    use crate::infra::metrics::Metric;
+    use folio_format::metrics::Metric;
 
     /// **已存在就不写**：同一份封面第二次导入不该重写文件（系列书共用封面、
     /// 重扫整库都会走到这条）。数的是写入次数而不是时间，所以在哪台机器上都一样。
@@ -153,7 +153,7 @@ mod tests {
         // 第二本走的是完全同一条调用（它不知道前一本存在）。
         let b = write(root, bytes, "image/jpeg").unwrap();
         assert_eq!(a, b);
-        let covers = crate::infra::paths::covers_dir(root);
+        let covers = folio_base::paths::covers_dir(root);
         let count = std::fs::read_dir(&covers).unwrap().count();
         assert_eq!(count, 1, "同一个哈希只该有一个文件，实际 {count} 个");
         // 顺带确认没有留下 `.part` 半成品。
@@ -164,6 +164,6 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "不该留 .part");
         // 量具：写这一步不该开容器（它是纯文件系统的事）。
-        assert_eq!(crate::infra::metrics::take_local(Metric::ContainerOpens), 0);
+        assert_eq!(folio_format::metrics::take_local(Metric::ContainerOpens), 0);
     }
 }

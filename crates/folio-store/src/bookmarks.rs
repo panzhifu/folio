@@ -12,10 +12,10 @@ use rusqlite::{OptionalExtension, params};
 use super::types::{Bookmark, BookmarkCard};
 use super::{Store, now};
 use crate::Result;
-use crate::content::anchor::TextAnchor;
+use folio_model::TextAnchor;
 
 impl Store {
-    /// 钉一枚书签。`anchor` 是调用方从可见文本坐标建好的（见 `crate::content::anchor`），
+    /// 钉一枚书签。`anchor` 是调用方从可见文本坐标建好的（见 `folio_model::anchor`），
     /// 存储层不参与坐标换算 —— 与 [`Store::add_annotation`] 同一条分工。
     pub fn add_bookmark(&self, book_id: i64, anchor: &TextAnchor) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -126,7 +126,7 @@ impl Store {
         if let (Some(uid), Some(hash)) = (uid, hash) {
             super::sync::record_tombstone(
                 &tx,
-                crate::sync::TombstoneKind::Bookmark,
+                folio_model::sync::TombstoneKind::Bookmark,
                 &uid,
                 &hash,
                 now(),
@@ -201,8 +201,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::Store;
-    use crate::content::anchor::TextAnchor;
-    use crate::content::format::{DocMeta, Format};
+    use folio_format::{DocMeta, Format};
+    use folio_model::TextAnchor;
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {

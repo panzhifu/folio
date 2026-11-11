@@ -22,9 +22,6 @@ pub type Source = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("sqlite: {0}")]
-    Sql(#[from] rusqlite::Error),
-
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -82,11 +79,11 @@ pub enum Error {
         at: String,
     },
 
-    /// 集合名是用户直接敲进来的东西。空名不只是「难看」：空串在 `UNIQUE` 上只容得下
-    /// 一条，第二个人再建一个空名集合会收到「名字已存在」这种看不懂的报错。
-    /// 所以在入口挡掉，而不是让它变成一条数据库错误。
-    #[error("集合名不能为空")]
-    EmptyCollectionName,
+    /// 书库那一层的错（folio-store 的 `Error` 自持：SQL、载荷 JSON、带标签的本地
+    /// I/O、集合名校验）。伞枚举经 `From` 收编整条链——调用方 `?` 照旧，界面把
+    /// `{:#}` 铺开时书库那一段原样可见。
+    #[error(transparent)]
+    Store(#[from] folio_store::Error),
 
     /// 网络传输那一层的错（`remote`）。整条链保留：URL 下载、将来的 WebDAV
     /// 同步失败时，界面拿到的是「连不上 / 认证被拒 / 已取消」的原文。

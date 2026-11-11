@@ -1,14 +1,16 @@
 //! 书架分组：把已经取好的一排书按某个键分成若干组。
 //!
-//! 纯函数，不碰数据库 —— SQL 只负责「取哪几本」，「怎么摆成组」是数据形状的事。
-//! 放在这里才能在两端共用一份，也才能用普通测试钉死组名与组内顺序。
+//! 纯函数，不碰数据库 —— SQL 只负责「取哪几本」，「怎么摆成组」是数据形状的事
+//! （原 folio-core::group，2026-11-12 阶段四随 store 拆分并入 folio-model：「换 crate
+//! 不换形状」，core 经 lib.rs 的 re-export 沿旧路径）。放在数据这一层才能在两端
+//! 共用一份，也才能用普通测试钉死组名与组内顺序。
 //!
 //! 集合（collections）不走这里：它的「组」是读者自己建的、存在库里的一种数据，
-//! 而不是从书本身算出来的键，见 [`crate::Store::collection_groups`]。
+//! 而不是从书本身算出来的键，见 folio-store 的 `Store::collection_groups`。
 
 use std::collections::BTreeMap;
 
-use folio_model::types::ShelfItem;
+use super::types::ShelfItem;
 
 /// 没有作者的书落进的组名。
 ///
@@ -77,7 +79,7 @@ mod tests {
     //! 分组：三种依据、缺作者的回落、组名顺序与组内顺序。
 
     use crate::group::{GroupBy, UNKNOWN_AUTHOR, group_shelf};
-    use folio_model::types::ShelfItem;
+    use crate::types::ShelfItem;
 
     fn item(id: i64, authors: &[&str], format: &str) -> ShelfItem {
         ShelfItem {

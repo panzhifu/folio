@@ -4,7 +4,7 @@
 //! 回滚成上一版，而不是留下一本半个章节的书。
 //!
 //! **正文根本不在这里**：这一层存的是它在容器里的位置（`chapters.locator`），
-//! 打开时按位置回容器取，见 `crate::content::document::Document::chapter_source`。
+//! 打开时按位置回容器取，见 `folio_format::document::Document::chapter_source`。
 
 use std::path::Path;
 
@@ -12,11 +12,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::Store;
 use crate::Result;
-use crate::content::format::{
+use folio_format::ext::ChapterExt;
+use folio_format::{
     Chapter, ChapterLocator, ChapterText, Content, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
     locator_for,
 };
-use folio_format::ext::ChapterExt;
 
 /// `books.css` 列的载荷。正文出库之后样式表同样「库里只存位置」：
 /// 导入索引只记容器里的 href 清单（[`CssStored::At`]），打开时回容器现取；
@@ -109,14 +109,14 @@ impl Store {
                 book_id,
                 serde_json::to_string(&css)?,
                 serde_json::to_string(&doc.toc)?,
-                crate::content::format::INDEX_VERSION,
+                folio_format::INDEX_VERSION,
                 doc.cover_ref.as_ref().map(|c| c.hash.clone()),
                 doc.cover_ref.as_ref().map(|c| c.mime.clone()),
                 doc.progression_rtl as i64,
                 // 「这份索引按哪一套规则切的」。除 `.txt` 以外一律 NULL —— 那些格式的
                 // 切法写死在代码里，由 `index_version` 那一格管。判据只有一处定义
-                // （[`crate::content::format::rules_hash`]），这一趟不自己猜哪些格式看规则表。
-                crate::content::format::rules_hash(format),
+                // （[`folio_format::rules_hash`]），这一趟不自己猜哪些格式看规则表。
+                folio_format::rules_hash(format),
                 serde_json::to_string(&doc.font_charset)?,
             ],
         )?;
@@ -164,7 +164,7 @@ impl Store {
         for (title, locator, char_len, images_json) in rows {
             let char_len = char_len.and_then(|n| usize::try_from(n).ok());
             let images =
-                match serde_json::from_str::<Vec<crate::content::scan::ImageUse>>(&images_json) {
+                match serde_json::from_str::<Vec<folio_format::scan::ImageUse>>(&images_json) {
                     Ok(images) => images,
                     Err(err) => {
                         // 解不开只是这一章没有图片清单，正文照读 —— 与 `toc_json` 同一条立场，
@@ -228,7 +228,7 @@ impl Store {
         // 拼不出路径 —— 当没有处理，退回 BLOB，别拿半个描述去猜路径。
         let cover_ref = match (cover_hash, cover_mime) {
             (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-                Some(crate::content::assets::cover::CoverRef { hash, mime })
+                Some(crate::assets::cover::CoverRef { hash, mime })
             }
             _ => None,
         };
@@ -320,14 +320,14 @@ impl Store {
     pub fn save_document(
         &self,
         book_id: i64,
-        doc: &dyn crate::content::document::Document,
+        doc: &dyn folio_format::document::Document,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         match doc.content() {
-            crate::content::document::ContentRef::Reflow(flow) => {
+            folio_format::document::ContentRef::Reflow(flow) => {
                 Self::save_flow_in(&conn, book_id, flow, doc.format())
             }
-            crate::content::document::ContentRef::Fixed(fixed) => {
+            folio_format::document::ContentRef::Fixed(fixed) => {
                 Self::save_fixed_in(&conn, book_id, fixed)
             }
         }
@@ -387,7 +387,7 @@ impl Store {
                 book_id,
                 pages,
                 serde_json::to_string(&doc.toc)?,
-                crate::content::format::INDEX_VERSION,
+                folio_format::INDEX_VERSION,
                 doc.cover_ref.as_ref().map(|cover| cover.hash.clone()),
                 doc.cover_ref.as_ref().map(|cover| cover.mime.clone()),
             ],
@@ -428,7 +428,7 @@ impl Store {
         // —— 两格要么都有，只剩一格就当没有（拿半个描述去猜路径是更糟的那个错）。
         let cover_ref = match (cover_hash, cover_mime) {
             (Some(hash), Some(mime)) if !hash.is_empty() && !mime.is_empty() => {
-                Some(crate::content::assets::cover::CoverRef { hash, mime })
+                Some(crate::assets::cover::CoverRef { hash, mime })
             }
             _ => None,
         };
@@ -469,7 +469,7 @@ fn image_res(href: Option<&str>, width: u32, height: u32) -> Option<ImageRes> {
         href: href.clone(),
         // 定版式的页没有「声明了但解不动」这一档：条目名就是字节所在。
         source: href,
-        media_type: crate::content::format::media_type_of(&ext).to_string(),
+        media_type: folio_format::media_type_of(&ext).to_string(),
         width,
         height,
     })
@@ -483,10 +483,10 @@ mod tests {
 
     use crate::ChapterExt;
     use crate::Store;
-    use crate::content::format::{
+    use crate::schema::MIGRATIONS;
+    use folio_format::{
         Chapter, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, PageImage, PageSource,
     };
-    use crate::store::schema::MIGRATIONS;
 
     fn meta(title: &str) -> DocMeta {
         DocMeta {
@@ -521,7 +521,7 @@ mod tests {
             // 存的时候会由页表重建，这里故意留空。
             images: Vec::new(),
             // 封面落盘之后的那两格描述（`covers/<hash>.<ext>` 的拼名材料）。
-            cover_ref: Some(crate::content::assets::cover::CoverRef {
+            cover_ref: Some(crate::assets::cover::CoverRef {
                 hash: "0123456789abcdef".into(),
                 mime: "image/png".into(),
             }),

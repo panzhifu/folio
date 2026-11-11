@@ -16,7 +16,7 @@
 use rusqlite::{OptionalExtension, params};
 
 use crate::Result;
-use crate::content::format::Passphrase;
+use folio_format::Passphrase;
 
 use super::Store;
 
@@ -96,8 +96,8 @@ fn now() -> i64 {
 mod tests {
     use std::path::Path;
 
-    use crate::content::format::{DocMeta, Format};
-    use crate::store::Store;
+    use crate::Store;
+    use folio_format::{DocMeta, Format};
 
     /// 一本带 `content_hash` 的书 —— 口令那一格认的就是这个哈希，没有它哪儿都对不上。
     fn store_with_book(hash: &str) -> (Store, i64) {
@@ -177,7 +177,7 @@ mod tests {
     /// 的唯一线索，而那个数看不出内容。
     #[test]
     fn a_passphrase_never_prints_itself() {
-        let passphrase = crate::content::format::Passphrase::new("samplefiles");
+        let passphrase = folio_format::Passphrase::new("samplefiles");
         let printed = format!("{passphrase:?}");
         assert!(
             !printed.contains("samplefiles"),

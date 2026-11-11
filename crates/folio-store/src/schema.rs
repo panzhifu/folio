@@ -132,7 +132,7 @@ ALTER TABLE images DROP COLUMN bytes;
 "#,
     // v6：阅读统计。存**原始会话**而不是按天汇总 —— 「今天读了多久」依赖读者所在
     // 时区，而时区只有界面侧知道。core 只留事实（何时开始、多久、前进多少字），
-    // 汇总时把偏移当参数收进来（见 [`crate::infra::time`]），不把某个时区的日界线写死进表。
+    // 汇总时把偏移当参数收进来（见 [`folio_base::time`]），不把某个时区的日界线写死进表。
     r#"
 CREATE TABLE reading_sessions (
     id         INTEGER PRIMARY KEY,
@@ -357,7 +357,7 @@ ALTER TABLE books ADD COLUMN progression_rtl INTEGER NOT NULL DEFAULT 0;
     // - **日期与系列序号原样存字符串**：书里给的精度不一（「1962」与
     //   「2023-05-01T00:00:00Z」都是合法值），折成日期类型就是替作者决定了他没说的位数。
     // - **空串就是「这本书没说」**，与「这一版还没读过」分开：后者由
-    //   [`crate::content::format::INDEX_VERSION`] 的 bump 触发重扫来消除，
+    //   [`folio_format::INDEX_VERSION`] 的 bump 触发重扫来消除，
     //   所以那一版号这一轮跟着动了。
     //
     // 老库里的旧行全部取默认值（空），不回填 —— 回填要开容器，而这条库的规矩是
@@ -419,7 +419,7 @@ ALTER TABLE annotations ADD COLUMN style TEXT NOT NULL DEFAULT 'line';
     // 那一章，而这是这一层最坏的一种错：屏上看着是对的。
     //
     // 有了这一格，调一个阈值不再需要 bump `INDEX_VERSION` 再发一版：数据自己会说话
-    // （判据见 [`crate::content::format::rules_hash`]，`stale_reason` 认成
+    // （判据见 [`folio_format::rules_hash`]，`stale_reason` 认成
     // `RulesChanged` 那一条路）。
     //
     // **可空而不是 `NOT NULL DEFAULT ''`**：空串会变成「有一本书的哈希恰好是空串」，
@@ -466,7 +466,7 @@ CREATE INDEX idx_bookmarks_book ON bookmarks(book_id);
     // 同一句摘录在两本书里出现，第二次就该命中。
     //
     // **只加不删的 INSERT OR REPLACE + 超额修剪**（`save_translation` 里那句）：
-    // 缓存是有上限的资源，超过 [`crate::store::TRANSLATIONS_MAX`] 条时把最旧的挤出去，
+    // 缓存是有上限的资源，超过 [`crate::TRANSLATIONS_MAX`] 条时把最旧的挤出去，
     // 语义与 LRU 的「最旧先用」同一条，只是用 `created_at` 近似。
     r#"
 CREATE TABLE translations (
@@ -521,7 +521,7 @@ CREATE INDEX idx_sync_tombstones_book ON sync_tombstones(book_hash);
     // 阅读弹层里调的格子从前一律写进全局 `config.json`，于是「这一本字太小」会变成
     // 「往后每本都小」；照片插页的书与纯文字书要的版心、翻页方式、夜里读不读，
     // 本来就不该是同一档。存的**不是整份设置**而是「与全局默认不同的那几格」，
-    // 为什么是差量、怎么换算回生效值见 [`crate::infra::book_settings`]。
+    // 为什么是差量、怎么换算回生效值见 [`folio_model::reading`]。
     //
     // 默认空串 = 这一本完全跟随默认，与 `css` / `toc_json` 那几列「没有内容就留空」
     // 同一口径，所以老行一行都不用回填。选库里而不是 `config.json` 的理由只有一条：

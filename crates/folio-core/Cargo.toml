@@ -33,14 +33,13 @@ folio-fonts.workspace = true
 folio-search.workspace = true
 # 账号（原 account.rs）。旧路径经 lib.rs 的模块别名沿用；ring 随它离开本 crate。
 folio-account.workspace = true
+# 书库（原 store/ 与 content/assets）。旧路径经 lib.rs 的模块别名沿用；rusqlite 随行。
+folio-store.workspace = true
 # 排版引擎（原 layout/）。旧路径经 lib.rs 的模块别名沿用。
 folio-render.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# 封面缩略图（`content::assets::thumb`）要解码与缩放位图。
-image.workspace = true
 # 备份包（`backup`）与导入时的容器读取。
 zip.workspace = true
 # Basic 认证头（WebDAV 的 dav 客户端已随传输层搬去 folio-net；OPDS 还在用）。
@@ -78,6 +77,10 @@ ttf-parser.workspace = true
 # 与「rs/tts/Bridge 同进同退」的注释都跟着走了，core 这边不再直接认识 tts。
 
 [dev-dependencies]
+# 导入测试的夹具库连接（生产边的 rusqlite 已随 store 搬去 folio-store）。
+rusqlite.workspace = true
+# 同一批评测里合成的夹具封面图（生产边的 image 已随 thumb 搬去 folio-store）。
+image.workspace = true
 tempfile = "3"
 # 网盘 / 传书的测试共用 folio-net 的假传输（dav::Mock）。
 folio-net = { workspace = true, features = ["test-support"] }

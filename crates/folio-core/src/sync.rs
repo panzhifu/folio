@@ -48,56 +48,10 @@ pub fn retimed(snapshot: &Snapshot, peer_clock: i64, now: i64) -> Snapshot {
     copy
 }
 
-/// 本机快照 + 因为还没有 `content_hash` 而没进来的书数。
-#[derive(Debug, Clone, PartialEq)]
-pub struct LocalSnapshot {
-    pub snapshot: Snapshot,
-    pub skipped_books: usize,
-}
-
-/// 合并之后要写回本机的动作。按书哈希定位本地那一行；远端书不在本机时不会进这里。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Plan {
-    pub positions: Vec<(String, PositionRecord)>,
-    pub annotation_upserts: Vec<(String, AnnotationRecord)>,
-    pub annotation_deletes: Vec<DeleteRecord>,
-    pub bookmark_upserts: Vec<(String, BookmarkRecord)>,
-    pub bookmark_deletes: Vec<DeleteRecord>,
-    /// 该写回本机的差量（整本一份，按 `content_hash` 定位那一行）。
-    pub settings: Vec<(String, SettingsRecord)>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeleteRecord {
-    pub book_hash: String,
-    pub uid: String,
-    pub deleted_at: i64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Stats {
-    pub positions: usize,
-    pub annotations: usize,
-    pub bookmarks: usize,
-    pub annotations_deleted: usize,
-    pub bookmarks_deleted: usize,
-    /// 写回本机的那一本书的差量（整本算一次，不逐格数）。
-    pub settings: usize,
-}
-
-impl Stats {
-    pub fn applied(&self) -> usize {
-        self.positions + self.annotations + self.bookmarks + self.settings
-    }
-}
-
-/// 一次合并的结果：该上传的自己那份、该写回本机的动作、给界面看的计数。
-#[derive(Debug, Clone, PartialEq)]
-pub struct Merged {
-    pub snapshot: Snapshot,
-    pub plan: Plan,
-    pub stats: Stats,
-}
+// 合并的**产出**形状（Plan / Merged / Stats / DeleteRecord / LocalSnapshot）已随
+// 阶段四下沉 folio-model：store 独立成 crate 后它们有了第三个消费方，按 model 的
+// 第二条规矩进来。这里 re-export 沿旧路径。
+pub use folio_model::sync::{DeleteRecord, LocalSnapshot, Merged, Plan, Stats};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
@@ -571,9 +525,13 @@ pub fn sync_once(
         }
     }
 
-    let local = store.collect_sync(device_id, now)?;
+    let local = store
+        .collect_sync(device_id, now)
+        .map_err(|e| Error::Store(e.into()))?;
     let merged = merge(&local.snapshot, &remotes, now);
-    store.apply_sync(&merged.plan)?;
+    store
+        .apply_sync(&merged.plan)
+        .map_err(|e| Error::Store(e.into()))?;
 
     let body = serde_json::to_vec(&merged.snapshot)?;
     let path = if dir.is_empty() {

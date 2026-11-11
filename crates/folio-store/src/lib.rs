@@ -1,5 +1,6 @@
-//! SQLite 书库存储。[`Store`] 是 `Send + Sync` 的：连接锁在内部的一把 [`Mutex`] 上，
-//! 界面线程与后台线程（导入管线）共用同一份句柄。
+//! SQLite 书库存储。原 folio-core::store（2026-11-12 阶段四拆分，「换 crate 不换形状」：
+//! core 经模块别名沿用旧路径，消费方一行不改）。[`Store`] 是 `Send + Sync` 的：连接锁
+//! 在内部的一把 [`Mutex`] 上，界面线程与后台线程（导入管线）共用同一份句柄。
 //!
 //! 锁纪律：**一次调用只上锁一次**。公开方法只负责「拿守卫 + 调对应的 `*_in(&conn, ..)`
 //! 私有助手」，助手内部绝不再碰 `conn` —— `Mutex` 不可重入，方法套方法就是自锁。
@@ -27,10 +28,54 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, params};
 
-use crate::Result;
 use folio_format::ext::ChapterExt;
 
+/// 书库这一层的错误：SQL、载荷 JSON、带标签的本地 I/O、集合名校验。
+///
+/// 原 core 伞枚举的 `Sql` / `EmptyCollectionName` 两格随搬迁移除，core 的伞枚举经
+/// `From<Error>` 收编整条链 —— 与 `DictError` / `FontsError` 同一条口径。
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("sqlite: {0}")]
+    Sql(#[from] rusqlite::Error),
+
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// 书库目录里那一格文件读不了 / 删不掉（残留副本清理、封面落盘）。
+    /// `path` 是出事的那个文件，「删不掉」与「读不到」对读者是两句话。
+    #[error("读 {path} 失败：{source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+
+    /// 集合名是用户直接敲进来的东西。空名不只是「难看」：空串在 `UNIQUE` 上只容得下
+    /// 一条，第二个人再建一个空名集合会收到「名字已存在」这种看不懂的报错。
+    /// 所以在入口挡掉，而不是让它变成一条数据库错误。
+    #[error("集合名不能为空")]
+    EmptyCollectionName,
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// 把底层错误套上「哪个文件」再往外传，原始错误留在链上。
+pub trait IoResultExt<T> {
+    fn io_path(self, path: impl Into<std::path::PathBuf>) -> Result<T>;
+}
+
+impl<T, E: std::error::Error + Send + Sync + 'static> IoResultExt<T> for std::result::Result<T, E> {
+    fn io_path(self, path: impl Into<std::path::PathBuf>) -> Result<T> {
+        self.map_err(|e| Error::Io {
+            path: path.into(),
+            source: Box::new(e),
+        })
+    }
+}
+
 mod annotations;
+pub mod assets;
 mod bookmarks;
 mod books;
 mod collections;
@@ -63,7 +108,7 @@ use schema::MIGRATIONS;
 
 pub struct Store {
     conn: Mutex<Connection>,
-    /// 这一本的重扫作业**已在飞**的 `book_id`（[`crate::ingest::import::schedule_reindex`] 的记账）。
+    /// 这一本的重扫作业**已在飞**的 `book_id`（[`folio_core::ingest::import::schedule_reindex`] 的记账）。
     ///
     /// 挂在 `Store` 上而不是进程级的 `static`：判据说的是「这个库里的那一本」，而测试各开
     /// 各的内存库、`book_id` 都从 1 起 —— 放进进程级集合里，两条并发用例的同名 id 会互相
@@ -86,12 +131,12 @@ const _: () = {
 
 /// 当前 Unix 秒。全库只走这一个时钟,测试要改也只改一处。
 ///
-/// 实现搬到 [`crate::infra::time::now`]：界面侧记阅读会话的起止要读**同一个**钟,否则
+/// 实现搬到 [`folio_base::time::now`]：界面侧记阅读会话的起止要读**同一个**钟,否则
 /// 「库里那一段的时长」和「屏幕上算出来的」会差出几十秒,而那没有任何报错。
-pub(super) use crate::infra::time::now;
+pub(crate) use folio_base::time::now;
 
 pub fn default_db_path() -> PathBuf {
-    crate::infra::paths::db_path()
+    folio_base::paths::db_path()
 }
 
 impl Store {
@@ -200,11 +245,10 @@ impl Store {
             };
             tracing::info!("store: 给 {} 章补上容器里的位置", rows.len());
             for (chapter_id, format, spine_href, idx) in &rows {
-                let at = crate::content::format::Format::parse(format).map(|format| {
-                    let chapter =
-                        crate::content::format::Chapter::inline(String::new(), String::new())
-                            .with_spine_href(spine_href.clone());
-                    crate::content::format::locator_for(format, &chapter, *idx as usize)
+                let at = folio_format::Format::parse(format).map(|format| {
+                    let chapter = folio_format::Chapter::inline(String::new(), String::new())
+                        .with_spine_href(spine_href.clone());
+                    folio_format::locator_for(format, &chapter, *idx as usize)
                 });
                 // 认不出格式就留空：打开时走「回容器重读」那条降级路。
                 let Some(at) = at else { continue };

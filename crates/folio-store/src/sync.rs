@@ -10,10 +10,10 @@ use rusqlite::{OptionalExtension, params};
 use super::annotations::color_of;
 use super::{AnnotationStyle, Store, UploadBook};
 use crate::Result;
-use crate::content::anchor::TextAnchor;
-use crate::infra::book_settings::BookSettings;
-use crate::position::Locator;
-use crate::sync::{
+use folio_model::TextAnchor;
+use folio_model::position::Locator;
+use folio_model::reading::BookSettings;
+use folio_model::sync::{
     AnnotationRecord, BookEntry, BookSnapshot, BookmarkRecord, LocalSnapshot, Plan, PositionRecord,
     SNAPSHOT_VERSION, SettingsRecord, Snapshot, Tombstone, TombstoneKind,
 };
@@ -417,7 +417,7 @@ fn book_id(conn: &rusqlite::Connection, hash: &str) -> Result<Option<i64>> {
 fn write_tombstone(
     conn: &rusqlite::Connection,
     kind: TombstoneKind,
-    delete: &crate::sync::DeleteRecord,
+    delete: &folio_model::sync::DeleteRecord,
 ) -> Result<()> {
     record_tombstone(
         conn,
@@ -460,24 +460,26 @@ pub(crate) fn record_tombstone(
 mod tests {
     use std::path::Path;
 
-    use crate::content::anchor::TextAnchor;
-    use crate::content::format::{DocMeta, Format};
-    use crate::position::Locator;
-    use crate::store::{AnnotationStyle, Store};
-    use crate::sync::{
+    use crate::{AnnotationStyle, Store};
+    use folio_format::{DocMeta, Format};
+    use folio_model::TextAnchor;
+    use folio_model::position::Locator;
+    use folio_model::reading::BookSettings;
+    use folio_model::sync::{
         AnnotationRecord, BookmarkRecord, DeleteRecord, Plan, PositionRecord, SettingsRecord,
         TombstoneKind,
     };
-    use crate::{BookSettings, BookSettingsExt, Reader};
 
-    /// 一份只盖了字号的差量。用生产的 `record_reader` 造，不在测试里手抄 JSON。
+    /// 一份只盖了字号的差量。直接造那一格（`record_reader` 怎么算差量的门在
+    /// folio-core 的 book_settings 测试里；这里要的是「同步带过来一份差量」这个形状）。
     fn font_patch(font_size: f32) -> BookSettings {
-        let base = Reader::default();
-        let mut wanted = base.clone();
-        wanted.font_size = font_size;
-        let mut settings = BookSettings::default();
-        settings.record_reader(&base, &wanted);
-        settings
+        BookSettings {
+            reader: std::collections::BTreeMap::from([(
+                "font_size".to_string(),
+                serde_json::json!(font_size),
+            )]),
+            appearance: Default::default(),
+        }
     }
 
     fn meta(title: &str) -> DocMeta {
@@ -582,7 +584,7 @@ mod tests {
         let local = store.collect_sync("dev", 100).unwrap();
         let local_uid = local.snapshot.books["hash-a"].annotations[0].uid.clone();
 
-        let future = crate::infra::time::now() + 100;
+        let future = folio_base::time::now() + 100;
         let plan = Plan {
             positions: vec![(
                 "hash-a".into(),
