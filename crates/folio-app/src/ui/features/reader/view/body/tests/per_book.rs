@@ -10,7 +10,7 @@
 use super::harness::{flow, meta, open_with_store};
 use crate::ui::services::config::ConfigHolder;
 use folio_core::store::Store;
-use folio_core::{BookSettings, Locator, Mode, Reader};
+use folio_core::{BookSettings, BookSettingsExt, Locator, Mode, Reader};
 #[allow(unused_imports)] // `#[gpui_kit::test]` 展开要它，unused 分析看不见宏里的使用
 use gpui_kit::test::TestWindowExt;
 #[allow(unused_imports)] // 同上：`AppContext` 给 `cx.update` 用

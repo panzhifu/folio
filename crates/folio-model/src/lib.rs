@@ -51,10 +51,12 @@ pub mod format;
 pub mod novel;
 pub mod position;
 pub mod reading;
+pub mod sync;
 pub mod types;
 
 pub use anchor::TextAnchor;
 pub use position::Locator;
+pub use reading::BookSettings;
 pub use types::Tag;
 
 #[cfg(test)]

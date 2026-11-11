@@ -1,4 +1,5 @@
-//! 跨设备同步：远端快照的形状、合并规则与一次往返。
+//! 跨设备同步：合并规则与一次往返。快照与各记录的 **serde 形状**住 folio-model
+//! （`folio_model::sync`，2026-11-12 阶段二下沉），这里 re-export 沿旧路径。
 //!
 //! **每台设备写自己的一份**：远端的 `<dir>/<device_id>.json`。同步时读全部设备的文件 +
 //! 本机快照，按每条记录的时间戳合并，把结果写回本机，再覆盖自己那一份。没有用
@@ -14,104 +15,27 @@
 //! 只同步**本机已有的书**：远端那本如果这台设备还没导入，记录留在远端，等书到了
 //! 下一次同步再落。书本身不在这里传（那是导入管线的事，见 `doc/readers-vs-folio.md`）。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
-
-use crate::content::anchor::TextAnchor;
-use crate::infra::book_settings::BookSettings;
 use crate::net::remote::{self, RemoteStore};
-use crate::position::Locator;
 use crate::store::Store;
 
-/// 远端 JSON 的格式版本。读到更高版本的文件跳过，不猜它的字段。
-pub const SNAPSHOT_VERSION: u32 = 1;
-
-/// 局域网清单里**一条可拉的书**：`GET /manifest` 响应里 `books` 的元素。
-///
-/// 只带 `content_hash`、大小与书名。`hash` 就是请求 `/file` 用的键，路径由对端按自己的
-/// 数据库解 —— 书库目录在哪儿、副本叫什么名，都是各台自己的事，不该跨机说。
-///
-/// 数据形状归这里而不是 `net::lansync`：读侧要它的是 `store` 的「本机有哪些可同步的书」
-/// （`Store::collect_sync` 那一族），而 store 不许认识网络模块 —— DTO 住在两边都依赖的
-/// sync，协议侧 re-export 沿旧路径。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BookEntry {
-    /// `books.content_hash` 那一格：64 个小写十六进制字符。
-    pub hash: String,
-    pub size: u64,
-    /// 只用于日志与报表，让「这次拉了 3 本」说得出具体的书。
-    pub title: String,
-}
-
-/// 一台设备的全量快照。书以 `content_hash` 为键 —— 本地 id 跨设备没有意义。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub version: u32,
-    pub device_id: String,
-    pub exported_at: i64,
-    #[serde(default)]
-    pub books: BTreeMap<String, BookSnapshot>,
-}
-
-impl Snapshot {
-    pub fn new(device_id: impl Into<String>, exported_at: i64) -> Self {
-        Self {
-            version: SNAPSHOT_VERSION,
-            device_id: device_id.into(),
-            exported_at,
-            books: BTreeMap::new(),
-        }
-    }
-
-    /// 把这份快照里的**每一个时间**整体平移到另一个钟面上。
-    ///
-    /// 合并按「每条记录的时间谁新」取胜者，而那些时间是**各自那台设备的钟**写下的：
-    /// 一台飞行模式几小时的手机、一台从没对过表的桌面，都能让「谁改得新」变成「谁的钟快」。
-    /// 局域网是唯一能当场对表的场合 —— 握手的响应里带着对端的 UTC 秒，所以读回对面那份快照
-    /// 时先按 `本机钟 - 对端钟` 平移，再去合并。WebDAV 那条路没有这个条件，只能照旧。
-    ///
-    /// `delta` 的符号由这一条定盘：`exported_at` 就是**对端钟**在导出那一刻的读数，搬完它必须
-    /// 等于本机那一刻的读数。于是 `本机钟 - 对端钟` 是唯一说得通的方向，反着搬会把对端的
-    /// 一小时快钟放大成两小时。
-    ///
-    /// 只平移**读回来**的那一份；本机这一份永远写自己的钟。平移过的记录落库后就是本机的时间，
-    /// 下次传出去时由对面按它自己算出的偏移再搬一次。
-    ///
-    /// 每一步都是饱和加：`delta` 来自对面报文里的一个 `i64`，一个坏值不该把时间绕回 1970 之前。
-    pub fn shift_clock(&mut self, delta: i64) {
-        fn shift(value: &mut i64, delta: i64) {
-            *value = value.saturating_add(delta);
-        }
-
-        shift(&mut self.exported_at, delta);
-        for book in self.books.values_mut() {
-            if let Some(position) = &mut book.position {
-                shift(&mut position.updated_at, delta);
-            }
-            for annotation in &mut book.annotations {
-                shift(&mut annotation.created_at, delta);
-                shift(&mut annotation.updated_at, delta);
-            }
-            for bookmark in &mut book.bookmarks {
-                shift(&mut bookmark.created_at, delta);
-                shift(&mut bookmark.updated_at, delta);
-            }
-            for tombstone in &mut book.tombstones {
-                shift(&mut tombstone.deleted_at, delta);
-            }
-            if let Some(settings) = &mut book.settings {
-                shift(&mut settings.updated_at, delta);
-            }
-        }
-    }
-}
+// 快照与各记录的 **serde 形状**已下沉 folio-model（2026-11-12 阶段二，「换 crate 不换
+// 形状」）：它们是多消费方的纯数据（store 收快照、lansync 传清单、app 读 Report 都认
+// 这几份类型），而 folio-model 不认识网络与书库，正好当两边的会合点。旧路径沿用，
+// `crate::sync::Snapshot` 这类写法（store/sync、net/lansync、本文件）一行不改。
+// 这里留下的是**行为**：合并（`merge`）、快照 JSON 的编解码与一次往返的编排。
+pub use folio_model::sync::{
+    AnnotationRecord, BookEntry, BookSnapshot, BookmarkRecord, PositionRecord, SNAPSHOT_VERSION,
+    SettingsRecord, Snapshot, Tombstone, TombstoneKind,
+};
 
 /// 把**别人写的那一份**搬到本机钟面上，另给一份新的。
 ///
 /// 合并的判据是「谁的记录时间更晚」，而两台设备的钟本来就对不上，所以读回来的那一份
 /// 必须先搬一次再进 [`merge`] —— 搬晚了或忘了搬，「谁改得新」就成了「谁的钟快」。
+/// 搬的是 [`Snapshot::shift_clock`]（数据随类型住 folio-model），这一句只定**方向**。
 ///
 /// `peer_clock` 是**对面**写下这些时间那一刻它自己的 UTC 秒，来源按那一条路能给的东西而定：
 /// 局域网的 `/hello` 回包里有当场量的 `now`；`PUT /snapshot` 那一侧只拿得出快照自己带的
@@ -122,75 +46,6 @@ pub fn retimed(snapshot: &Snapshot, peer_clock: i64, now: i64) -> Snapshot {
     let mut copy = snapshot.clone();
     copy.shift_clock(now.saturating_sub(peer_clock));
     copy
-}
-
-/// 一本书在快照里的全部内容。空字段不写进 JSON（`skip_serializing_if`），
-/// 于是绝大多数「只读过几页」的书只有一条 position。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct BookSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position: Option<PositionRecord>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub annotations: Vec<AnnotationRecord>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub bookmarks: Vec<BookmarkRecord>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tombstones: Vec<Tombstone>,
-    /// 这一本的阅读设置差量。`None` = 这台设备从来没为它写过差量（没话说），
-    /// `Some(空差量)` = 写过并且清干净了（说的就是「跟默认」）—— 两件事必须分得开，
-    /// 否则「恢复本书默认」同步过去会变成「另一台设备上那份旧差量又回来了」。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settings: Option<SettingsRecord>,
-}
-
-/// 差量连同「这台设备什么时候写的」。合并按整本差量比这一个时间取新的那一份 ——
-/// 差量本身没有逐格时间，逐格合并要先给每一格配一个钟，那一层这次不做。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SettingsRecord {
-    pub updated_at: i64,
-    pub settings: BookSettings,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PositionRecord {
-    pub mode: String,
-    pub locator: Locator,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AnnotationRecord {
-    pub uid: String,
-    pub anchor: TextAnchor,
-    pub note: String,
-    pub color: String,
-    /// `AnnotationStyle::as_str()` 那一套键名。不在这里存枚举，远端写坏一格时
-    /// 合并仍能把它交给应用层按默认档兜住。
-    pub style: String,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BookmarkRecord {
-    pub uid: String,
-    pub anchor: TextAnchor,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TombstoneKind {
-    Annotation,
-    Bookmark,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Tombstone {
-    pub kind: TombstoneKind,
-    pub uid: String,
-    pub deleted_at: i64,
 }
 
 /// 本机快照 + 因为还没有 `content_hash` 而没进来的书数。
@@ -766,7 +621,7 @@ mod tests {
         AnnotationRecord, BookSnapshot, BookmarkRecord, SettingsRecord, Snapshot, Tombstone,
         TombstoneKind, merge, new_device_id, normalize_remote_dir, retimed, valid_device_id,
     };
-    use crate::{BookSettings, Reader};
+    use crate::{BookSettings, BookSettingsExt, Reader};
 
     fn annotation(uid: &str, at: i64) -> AnnotationRecord {
         AnnotationRecord {

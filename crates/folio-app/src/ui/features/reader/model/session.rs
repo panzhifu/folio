@@ -18,6 +18,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use folio_core::BookSettingsExt;
 use folio_core::content::annotation::ResolvedAnnotation;
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::format::PageText;

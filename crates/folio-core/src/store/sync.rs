@@ -468,7 +468,7 @@ mod tests {
         AnnotationRecord, BookmarkRecord, DeleteRecord, Plan, PositionRecord, SettingsRecord,
         TombstoneKind,
     };
-    use crate::{BookSettings, Reader};
+    use crate::{BookSettings, BookSettingsExt, Reader};
 
     /// 一份只盖了字号的差量。用生产的 `record_reader` 造，不在测试里手抄 JSON。
     fn font_patch(font_size: f32) -> BookSettings {

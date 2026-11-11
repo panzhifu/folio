@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::AnnotationStyle;
-use crate::BookSettings;
 use crate::ChapterExt;
 use crate::FlowDocExt;
 use crate::Reader;
@@ -17,6 +16,7 @@ use crate::content::format::{
 };
 use crate::position::Locator;
 use crate::store::{MIGRATIONS, StaleReason};
+use crate::{BookSettings, BookSettingsExt};
 
 fn meta(title: &str) -> DocMeta {
     DocMeta {

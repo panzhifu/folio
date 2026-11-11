@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use folio_core::BookSettingsExt;
 use folio_core::infra::config::ThemeBackground;
 use folio_core::{
     Account, Appearance, BookSettings, Cloud, Config, Env, Language, Layer, Library, Membership,
@@ -569,7 +570,7 @@ mod tests {
 
     use super::ConfigHolder;
     use crate::ui::shell::AppShell;
-    use folio_core::{BookSettings, Config, Layer, Mode};
+    use folio_core::{BookSettings, BookSettingsExt, Config, Layer, Mode};
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt;
     use gpui_kit::{AnyWindowHandle, AppContext as _, TestAppContext, px, size};

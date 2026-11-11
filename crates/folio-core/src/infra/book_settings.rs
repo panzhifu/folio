@@ -1,26 +1,31 @@
-//! 每本书一份的阅读设置**差量**。
+//! 每本书一份的阅读设置**差量**：与全局默认不同的那几格，以及怎么盖回去。
 //!
-//! 存的是「这一本与全局默认不同的那几格」，不是整份设置：没动过的格子永远读默认，
-//! 于是设置屏里改一次默认，能传导到所有没单独设过的书；读者真调过的那几格才留在
-//! 那一本上。抹掉差量就是「恢复本书默认」，不需要知道这本书曾经设过哪些格。
+//! 数据半边（[`BookSettings`] 结构与库列编解码）已下沉 folio-model（2026-11-12
+//! 阶段二，快照的 `SettingsRecord` 要带着它走）；这里留的是**咬着配置的行为**——
+//! 它逐格比对走 serde，字段的名字、类型和区间住在 [`crate::infra::config::Reader`]
+//! 里，而 settings 层按文档口径留在 core —— 经 `BookSettingsExt` 扩展 trait 挂回
+//! 那个类型，与 folio-format::ext 同一条画法。调用方把 trait 引进作用域，方法
+//! 语法不变。
 //!
-//! **逐格比对走 serde，不在这里手写 `Reader` 的字段清单**：那一族格子的名字、类型和
-//! 区间已经住在 [`crate::infra::config::Reader`] 里，这里再抄一份就是第二个真相源 ——
-//! 新增一格时抄的那份必然漏，症状是「这一格在全局有用、在这本书里没反应」。
+//! **逐格比对走 serde，不在这里手写 `Reader` 的字段清单**：这里再抄一份就是第二个
+//! 真相源 —— 新增一格时抄的那份必然漏，症状是「这一格在全局有用、在这本书里没反应」。
 //! 现在的写法是：默认值序列化成对象 → 差量盖上去 → 解回来，新增字段天然可覆盖。
 //!
 //! 唯一的例外是 [`APPEARANCE_GLOBAL_ONLY`] 那五格。它们不是「还没抄进来」，而是**语义上
 //! 不该给单本书覆盖**（见那条常量的文档），所以用一张排除表挡住；有测试盯着这张表里的
 //! 名字都还在，以及「除它们以外全部可覆盖」。
 //!
-//! 库里那一列怎么读、怎么写见 [`crate::store::Store::book_settings`]；这一节只管值，
-//! 不碰 SQLite。
+//! 库里那一列怎么读、怎么写见 [`crate::store::Store::book_settings`]；编解码本身在
+//! folio-model（`to_column` / `from_column`），这一节只管值与配置的换算，不碰 SQLite。
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 use crate::infra::config::{Appearance, Reader};
+
+// 数据半边：结构与库列编解码住 folio-model（旧路径沿用）。
+pub use folio_model::reading::BookSettings;
 
 /// `Appearance` 里**只归全局**、单本书不许覆盖的那几格。
 ///
@@ -41,88 +46,46 @@ use crate::infra::config::{Appearance, Reader};
 pub const APPEARANCE_GLOBAL_ONLY: &[&str] =
     &["mode", "light", "dark", "reading_mode", "reading_theme"];
 
-/// 一本书的差量。两张表都只装**与当前全局默认不同**的格子。
+/// 咬着 `Reader` / `Appearance` 的那半行为：差量怎么盖回默认、生效值怎么记回差量。
 ///
-/// 用 `BTreeMap` 而不是 `serde_json::Map`：同一份设置要能稳定序列化成同样的字节
-/// （同步比对、测试断言都靠这个），而 `serde_json::Map` 默认保留插入顺序 ——
-/// 读者先拖字号再推行距，与反过来拖，落库的字符串本该是同一个。
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BookSettings {
-    /// 与默认不同的 `Reader` 格子。
-    pub reader: BTreeMap<String, Value>,
-    /// 与默认不同的 `Appearance` 格子，不含 [`APPEARANCE_GLOBAL_ONLY`]。
-    pub appearance: BTreeMap<String, Value>,
-}
-
-impl BookSettings {
-    /// 这本书完全跟随默认。
-    pub fn is_empty(&self) -> bool {
-        self.reader.is_empty() && self.appearance.is_empty()
-    }
-
+/// 数据与行为分住两个 crate 后，这四个方法经 trait 回到 [`BookSettings`] 上 ——
+/// 调用方（store、同步测试、app 的书内设置）引一次 trait，方法语法照旧。
+pub trait BookSettingsExt {
     /// 这一本的排版输入：`base` 被差量盖一层，再按 [`Reader::clamped`] 夹住。
     ///
     /// 夹这一刀不能省：差量可能来自手改的库、旧版本或别的设备，越界值会让排版算出
     /// 零高一行或无限宽版心 —— 与磁盘上读回来的全局值走的是同一个入口。
-    pub fn effective_reader(&self, base: &Reader) -> Reader {
-        overlay(base, &self.reader, &[]).map_or_else(|| base.clone(), Reader::clamped)
-    }
+    fn effective_reader(&self, base: &Reader) -> Reader;
 
     /// 这一本的外观输入：同上，按 [`Appearance::normalized`] 归一遍。
-    pub fn effective_appearance(&self, base: &Appearance) -> Appearance {
-        overlay(base, &self.appearance, APPEARANCE_GLOBAL_ONLY)
-            .map_or_else(|| base.clone(), Appearance::normalized)
-    }
+    fn effective_appearance(&self, base: &Appearance) -> Appearance;
 
     /// 记下「这一本现在的排版输入是 `effective`」。
     ///
     /// 与 `base` 逐格比，只留不同的：调回与默认同值的那一格会**自动从差量里消失**，
     /// 所以「恢复默认」不需要一格格推回去，抹掉整份就够了。
-    pub fn record_reader(&mut self, base: &Reader, effective: &Reader) {
+    fn record_reader(&mut self, base: &Reader, effective: &Reader);
+
+    /// 记下这一本的外观输入；只归软件的那几格即使被改了也**不进差量**。
+    fn record_appearance(&mut self, base: &Appearance, effective: &Appearance);
+}
+
+impl BookSettingsExt for BookSettings {
+    fn effective_reader(&self, base: &Reader) -> Reader {
+        overlay(base, &self.reader, &[]).map_or_else(|| base.clone(), Reader::clamped)
+    }
+
+    fn effective_appearance(&self, base: &Appearance) -> Appearance {
+        overlay(base, &self.appearance, APPEARANCE_GLOBAL_ONLY)
+            .map_or_else(|| base.clone(), Appearance::normalized)
+    }
+
+    fn record_reader(&mut self, base: &Reader, effective: &Reader) {
         self.reader = diff(base, effective, &[]);
     }
 
-    /// 记下这一本的外观输入；只归软件的那几格即使被改了也**不进差量**。
-    pub fn record_appearance(&mut self, base: &Appearance, effective: &Appearance) {
+    fn record_appearance(&mut self, base: &Appearance, effective: &Appearance) {
         self.appearance = diff(base, effective, APPEARANCE_GLOBAL_ONLY);
-    }
-
-    /// 整份抹掉 —— 阅读弹层里「恢复本书默认」那一格走的就是这个。
-    pub fn clear(&mut self) {
-        self.reader.clear();
-        self.appearance.clear();
-    }
-
-    /// 落库那一列的写法。空差量存**空串**，与 `books.css` / `books.toc_json` 那几列
-    /// 「没有内容就留空」同一口径，也让「这本书没单独设过」在 SQL 里一眼可见
-    /// （`settings_json = ''` 就能数出来有几本被单独调过）。
-    pub fn to_column(&self) -> String {
-        if self.is_empty() {
-            String::new()
-        } else {
-            // 序列化自家这个结构不会失败（只有 map 与 Value）；真失败就当没设过，
-            // 但不能安静 —— 那会把「读者调过的版心」变成「从来没调过」。
-            serde_json::to_string(self).unwrap_or_else(|err| {
-                tracing::warn!("book_settings: 差量写不成 JSON，按没设过存：{err}");
-                String::new()
-            })
-        }
-    }
-
-    /// 读回库里那一列。空串与解不开的垃圾都是「这一本没单独设过」，正文照读
-    /// —— 与 `toc_json` 解不开只当没有目录同一口径，但日志必须留一句。
-    pub fn from_column(raw: &str) -> Self {
-        if raw.is_empty() {
-            return Self::default();
-        }
-        match serde_json::from_str(raw) {
-            Ok(settings) => settings,
-            Err(err) => {
-                tracing::warn!("book_settings: 那一列不是差量 JSON，按没设过读：{err}");
-                Self::default()
-            }
-        }
     }
 }
 
@@ -203,7 +166,7 @@ fn into_object<T: Serialize>(value: &T) -> Option<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings, into_object};
+    use super::{APPEARANCE_GLOBAL_ONLY, BookSettings, BookSettingsExt, diff, into_object};
     use crate::infra::config::{
         Appearance, ImageScale, Mode, PageTurn, Reader, TextDirection, TocDensity,
     };
@@ -271,7 +234,7 @@ mod tests {
 
     /// 把值序列化成对象，只为**比对**用。
     ///
-    /// 生效值一律由生产函数（`BookSettings` 那两个 `effective_*`）算出来 —— 测试里不
+    /// 生效值一律由生产函数（[`BookSettingsExt`] 那两个 `effective_*`）算出来 —— 测试里不
     /// 再实现第二套「盖格子」的逻辑，否则量具与生产路径分叉，测过的就不是要交出去的那份。
     fn object<T: serde::Serialize>(value: &T) -> Value {
         serde_json::to_value(value).unwrap()
@@ -536,28 +499,8 @@ mod tests {
         );
     }
 
-    /// 库里那一列：空串 = 没设过，垃圾 = 没设过，非空差量原样回来。
-    #[test]
-    fn the_column_round_trips_and_reads_garbage_as_unset() {
-        let base = Reader::default();
-        let mut wanted = base.clone();
-        wanted.font_size = 19.0;
-        let mut settings = BookSettings::default();
-        settings.record_reader(&base, &wanted);
-
-        let raw = settings.to_column();
-        assert!(!raw.is_empty());
-        assert_eq!(BookSettings::from_column(&raw), settings);
-
-        assert!(BookSettings::from_column("").is_empty());
-        assert!(BookSettings::from_column("{ not json").is_empty());
-        assert!(
-            BookSettings::default().to_column().is_empty(),
-            "空差量该存空串"
-        );
-    }
-
     /// `clear` 是「恢复本书默认」那一刀：抹完之后生效值 = 默认值。
+    /// （列的编解码本身在 folio-model 那侧测；这里钉的是 clear 与生效值的联动。）
     #[test]
     fn clearing_the_book_settings_returns_it_to_the_defaults() {
         let base = Reader::default();
@@ -570,24 +513,6 @@ mod tests {
         settings.clear();
         assert!(settings.is_empty());
         assert_eq!(settings.effective_reader(&base), base);
-    }
-
-    /// 同一份设置不分先后：先拖字号还是先推行距，落库的字节是同一个。
-    #[test]
-    fn the_column_is_order_independent() {
-        let base = Reader::default();
-        let mut a = base.clone();
-        let mut b = base.clone();
-        a.font_size = 20.0;
-        a.line_height = 2.0;
-        b.line_height = 2.0;
-        b.font_size = 20.0;
-
-        let mut sa = BookSettings::default();
-        sa.record_reader(&base, &a);
-        let mut sb = BookSettings::default();
-        sb.record_reader(&base, &b);
-        assert_eq!(sa.to_column(), sb.to_column());
     }
 
     /// 盯住样件本身：`Reader` 每一格都得在样件里被填成非默认值，否则上面那逐格的门
@@ -607,5 +532,16 @@ mod tests {
                 "样件里 {name} 与默认同值，逐格覆盖那条门测不到它"
             );
         }
+    }
+
+    /// `diff` 只认 `base` 里已有的名字：差量不许凭空造格子。
+    #[test]
+    fn diff_ignores_names_the_base_does_not_have() {
+        let base = Reader::default();
+        let mut written = base.clone();
+        written.font_size = 22.0;
+
+        let patch = diff(&base, &written, &[]);
+        assert_eq!(patch.len(), 1, "只该有一格不同");
     }
 }

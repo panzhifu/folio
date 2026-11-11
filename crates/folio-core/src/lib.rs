@@ -91,7 +91,9 @@ pub use error::{Error, ImportReject, Result};
 pub use folio_format::ext::{ChapterExt, FlowDocExt, FormatExt, PageTextExt};
 pub use folio_model::Tag;
 pub use group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
-pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings};
+// BookSettings 的数据半边在 folio-model（阶段二下沉）；咬配置的行为经这个扩展 trait
+// 挂回去 —— 调用方引一次 trait，方法语法不变（与 folio-format::ext 同一条画法）。
+pub use infra::book_settings::{APPEARANCE_GLOBAL_ONLY, BookSettings, BookSettingsExt};
 pub use infra::budget::{EvictStep, MemoryBudget, Pressure};
 pub use infra::config::{
     Account, Ai, AliyunDrive, Appearance, Backup, BaiduDrive, CONFIG_VERSION, Cloud, Config,
