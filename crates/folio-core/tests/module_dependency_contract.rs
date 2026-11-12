@@ -1,4 +1,4 @@
-//! 架构契约：模块依赖的三条禁令。
+//! 架构契约：模块依赖的两条禁令。
 //!
 //! `lib.rs` 头注释写的依赖方向靠人记必然漂移（《后端架构评审与优化》§2.8），
 //! 这里把它钉成可执行的：每个分区的源码里不许出现指向被禁模块的 `crate::…` 路径。
@@ -20,8 +20,8 @@ type Ban = (
 const BANS: &[Ban] = &[
     // 内容区只往「下」依赖（folio-format / folio-model / infra），不认识存储与导入。
     ("content", &["crate::store", "crate::ingest"], &[]),
-    // 存储层不认识网络协议：同步 DTO 归 sync，SQL 只吃数据形状。
-    ("store", &["crate::net"], &[]),
+    // 「存储层不认识网络协议」那条禁令随阶段四搬出去了：store 独立成 folio-store，
+    // 它的 Cargo.toml 里没有 folio-net，边界由依赖图强制，不再靠这里扫源码。
     // infra 是叶子，被所有人依赖而不依赖任何功能分区。组合根与错误聚合搬到
     // crate 根（刀 5）、novel / ImageScale 归位 folio-model（刀 6）之后，
     // 这一格已无欠账，白名单为空。
