@@ -12,6 +12,8 @@
 //! 正文与答案都不进日志。
 //!
 //! - [`ai`] —— 选区问 AI 与切章规则草案：一层 provider（OpenAI 兼容的
-//!   `chat/completions`）与三档预设问法的提示词。
+//!   `chat/completions`）与三档预设问法的提示词，加「拉模型清单」与流式问答
+//!   （SSE 骑在 `Transport::download` 上，解析在 [`stream`]）。
 
 pub mod ai;
+mod stream;

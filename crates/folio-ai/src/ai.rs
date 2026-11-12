@@ -6,19 +6,26 @@
 //! 一段文字」，机制搬去两个 crate 之后各长一套错误词表与解析——对应关系由下面的
 //! `From<TranslateError> for AiError` 记着，那一处修了另一处别忘了。
 //!
-//! ## 地址与密钥共用翻译那一档
+//! ## 地址与密钥住在供应商档案里
 //!
-//! 服务地址与密钥住在 folio-core 配置的 `OpenAi`（翻译那档），AI 这一节只回答两件事 ——
-//! **要不要用**（enabled，默认关）与**用哪只模型**（可留空，留空就是与翻译同一只模型）。
+//! 服务地址与密钥住在 folio-core 配置的供应商注册表（`Vendor`）里，翻译与 AI 各自
+//! 引用其中一条；AI 这一节只回答三件事 —— **要不要用**（enabled，默认关）、**用哪条**
+//! （可留空，留空就是跟随翻译那条）与**用哪只模型**（可留空，留空就是与翻译同一只）。
 //! 密钥不复制第二份：多一处落盘面就多一处泄漏面，而读者刚填过一遍的东西不该问第二遍。
 //! 配置到参数的映射在 folio-core 的入口层（`net::ai::configured`），本 crate 只收纯字段。
 //!
-//! ## 四种「回 None」与它们的画法
+//! ## 「回 None」与它们的画法
 //!
-//! 入口层回 `None` 的四种情况：没开、地址空、模型两处都空、只有出厂那份地址
-//! 且 key 没填（读者从没打开过这一格，见入口层 `configured` 的文档）。界面对 `None`
-//! 的画法一律是**这一格不出现**（与听书在没有后端的那些平台上同一条判据），而不是摆
-//! 一颗按下去报错的按钮。
+//! 入口层回 `None` 的几种情况：没开、注册表一条档案都没有、地址空、模型两处都空。
+//! 界面对 `None` 的画法一律是**这一格不出现**（与听书在没有后端的那些平台上同一条
+//! 判据），而不是摆一颗按下去报错的按钮。
+//!
+//! ## 流式与清单
+//!
+//! [`Assistant::ask_stream`] 把答案**边到边交**（SSE，解析在 [`crate::stream`]，
+//! 骑在 `Transport::download` 的分块读与取消检查点上）；[`list_models`] 拉
+//! `GET /models` 的清单 —— 设置页的「测试连接」与「推荐模型」共用它。不认
+//! `stream: true` 的网关走嗅探回退，调用方不用知道对面是哪一种。
 //!
 //! ## 日志纪律
 //!
@@ -28,8 +35,10 @@
 use serde_json::{Value, json};
 
 use folio_base::identity::sha256_of_bytes;
-use folio_net::{Error, Method, Request, Response, Transport};
+use folio_net::{Cancel, Error, Method, Request, Response, Transport};
 use folio_translate::{TranslateError, language_name};
+
+use crate::stream::SseSink;
 
 /// 一次请求送出去的文本上限（字符）。选区那一档实际用的是 [`CONTEXT_BUDGET`] 那一圈，
 /// 这个数是最后一道闸：草案那一刀要送几十行样本，比选区长，但也不该长过这个量 ——
@@ -111,7 +120,7 @@ pub struct Answer {
 
 /// 一次 AI 请求失败的档位。**与 [`TranslateError`] 共用一份词表的意思**：分档的判据是
 /// 「读者能不能自己处理」，混成一句「AI 失败了」就只剩重试一条路。
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AiError {
     #[error("还没有填 API Key")]
     MissingKey,
@@ -212,6 +221,27 @@ pub trait Assistant: Send + Sync {
 
     /// 问一句。`system` 是 [`Ask::system`] 那一档的提示词，`user` 是拼好的上下文与原文。
     fn ask(&self, http: &dyn Transport, system: &str, user: &str) -> Result<Answer, AiError>;
+
+    /// 问一句，答案**边到边交**：`on` 每收到一段增量就被调一次（打字机的那一笔）。
+    /// 取消在传输层的块边界生效（`Transport::download` 的契约）；取消后已交出去的
+    /// 增量留在调用方手里 —— 这里返回 `Err(Cancelled)`，但打字机不回滚。
+    ///
+    /// 默认实现退化为 [`Assistant::ask`]：整段到手后一次性交付。这份宽容是给
+    /// 「不想自己解流式的实现」留的，不是给调用方的 —— 调用方不许假设 `on`
+    /// 只被调一次。
+    fn ask_stream(
+        &self,
+        http: &dyn Transport,
+        system: &str,
+        user: &str,
+        on: &mut (dyn FnMut(&str) + Send),
+        cancel: &Cancel,
+    ) -> Result<Answer, AiError> {
+        let _ = cancel;
+        let answer = self.ask(http, system, user)?;
+        on(&answer.text);
+        Ok(answer)
+    }
 }
 
 // 按两份配置现建 provider 的**判据**住在 folio-core 的入口层（`net::ai::configured`）：
@@ -251,12 +281,6 @@ impl ChatCompletion {
     /// 拼请求。必填项为空时在**出网前**就报出来：让读者去设置页补地址，比让服务端
     /// 回一句 `404 page not found` 有用。
     fn request(&self, system: &str, user: &str) -> Result<Request, AiError> {
-        if self.base_url.trim().is_empty() {
-            return Err(AiError::NotConfigured("服务地址"));
-        }
-        if self.model.trim().is_empty() {
-            return Err(AiError::NotConfigured("模型"));
-        }
         let body = json!({
             "model": self.model,
             "messages": [
@@ -264,12 +288,37 @@ impl ChatCompletion {
                 {"role": "user", "content": user},
             ],
         });
+        self.post(body)
+    }
+
+    /// 流式那一版请求：只多一个 `stream: true`。要不要流式由调用方（`ask_stream`）
+    /// 定，请求形状的其余部分与 [`Self::request`] 同一份。
+    fn stream_request(&self, system: &str, user: &str) -> Result<Request, AiError> {
+        let body = json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "stream": true,
+        });
+        self.post(body)
+    }
+
+    /// 两版请求共用的那一段：必填项闸、地址补全、头。空 key 不带 `Authorization` ——
+    /// 本地 Ollama / LM Studio 不认这个头，由服务自己决定要不要拒；这一层不猜
+    /// 「这个地址要不要 key」。
+    fn post(&self, body: Value) -> Result<Request, AiError> {
+        if self.base_url.trim().is_empty() {
+            return Err(AiError::NotConfigured("服务地址"));
+        }
+        if self.model.trim().is_empty() {
+            return Err(AiError::NotConfigured("模型"));
+        }
         let mut req = Request::new(Method::Post, self.endpoint())
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
             .body(body.to_string().into_bytes());
-        // 本地 Ollama / LM Studio 不认 Authorization：空 key 就不带头，由服务自己决定
-        // 要不要拒。这一层不猜「这个地址要不要 key」。
         if !self.api_key.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", self.api_key));
         }
@@ -297,14 +346,77 @@ impl Assistant for ChatCompletion {
         let response = http.request(self.request(system, &user)?)?;
         parse_response(&response)
     }
+
+    fn ask_stream(
+        &self,
+        http: &dyn Transport,
+        system: &str,
+        user: &str,
+        on: &mut (dyn FnMut(&str) + Send),
+        cancel: &Cancel,
+    ) -> Result<Answer, AiError> {
+        let user = clip(user, MAX_INPUT_CHARS);
+        let req = self.stream_request(system, &user)?;
+        let mut sink = SseSink::new(on);
+        // download 的契约接住了三件事：非 2xx 一块不写就报错（401/429 那些档位
+        // 由 From<Error> 折过来）、取消在块边界生效、体量不限。流式不重试
+        // （Retrying 不包 download）—— 打字机没有「回到开头」这一口。
+        http.download(req, &mut sink, cancel)?;
+        sink.answer()
+    }
+}
+
+/// 拉模型清单：`GET {base}/models`，回模型 id 排序列表。设置页的「测试连接」
+/// （清单到了 = 端点与密钥都对）与「推荐模型」下拉共用这一趟。
+///
+/// 地址写到方法那一层的也认（先剥掉 `/chat/completions` 再补 `/models`）。
+/// 空 key 不带 `Authorization`，与问答那条同一口径。
+pub fn list_models(
+    http: &dyn Transport,
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, AiError> {
+    if base_url.trim().is_empty() {
+        return Err(AiError::NotConfigured("服务地址"));
+    }
+    let base = base_url.trim().trim_end_matches('/');
+    let base = base.strip_suffix("/chat/completions").unwrap_or(base);
+    let mut req =
+        Request::new(Method::Get, format!("{base}/models")).header("Accept", "application/json");
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+    let response = http.request(req)?;
+    let json: Value = serde_json::from_slice(&response.body)
+        .map_err(|err| AiError::Malformed(format!("openai: {err}")))?;
+    // 规范是 {"data":[{"id":..}]}；有的网关把清单直接摆在顶层数组上，两种都吃。
+    let items = json
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| json.as_array())
+        .ok_or_else(|| AiError::Malformed("openai: 模型清单里没有 data".to_string()))?;
+    let mut ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }
 
 /// 解析应答。`content` 既可能是字符串，也可能是 `[{type:"text", text:"…"}]` 的段表
 /// （新一代模型与网关会这么回），两种都拼 —— 与翻译那档同一条，因为说这套协议的服务
 /// 两种都有人在用。
 fn parse_response(response: &Response) -> Result<Answer, AiError> {
-    let json: Value = serde_json::from_slice(&response.body)
-        .map_err(|err| AiError::Malformed(format!("openai: {err}")))?;
+    answer_from_body(&response.body)
+}
+
+/// 从一份完整的 chat/completions JSON body 里取答案。非流式那一趟与流式的
+/// 「网关不理 stream:true」回退共用它。
+pub(crate) fn answer_from_body(body: &[u8]) -> Result<Answer, AiError> {
+    let json: Value =
+        serde_json::from_slice(body).map_err(|err| AiError::Malformed(format!("openai: {err}")))?;
     let content = json
         .pointer("/choices/0/message/content")
         .ok_or_else(|| AiError::Malformed("openai: 没有 choices[0].message.content".to_string()))?;
@@ -413,9 +525,9 @@ impl From<TranslateError> for AiError {
 mod tests {
     use super::{
         AiError, Ask, Asked, Assistant, CONTEXT_BUDGET, ChatCompletion, MAX_ANSWER_CHARS,
-        draft_prompt, draft_system, parse_response, selection_prompt,
+        draft_prompt, draft_system, list_models, parse_response, selection_prompt,
     };
-    use folio_net::{Error, Response, Transport};
+    use folio_net::{Cancel, Error, Response, Transport};
     use std::sync::Mutex;
 
     /// 假传输：记下最后一个请求，回一段固定 body。与 `net::translate` 那一族同一个形状，
@@ -450,7 +562,7 @@ mod tests {
             _sink: &mut dyn folio_net::Sink,
             _cancel: &folio_net::Cancel,
         ) -> Result<u64, Error> {
-            unreachable!("AI 问答不发流式请求")
+            unreachable!("这份假传输只测非流式；流式的测试用下面的 Chunks")
         }
     }
 
@@ -627,5 +739,155 @@ mod tests {
             assert!(!ask.key().is_empty());
         }
         assert!(Ask::Explain.system("zh-CN").contains("Simplified Chinese"));
+    }
+
+    /// 流式假传输：`download` 按剧本分块喂给 sink，记下收到的请求。
+    struct Chunks {
+        last: Mutex<Option<folio_net::Request>>,
+        chunks: Vec<&'static [u8]>,
+        /// 走到第几块时**自己置位取消旗**（模拟读者在这一刻按下停止）；
+        /// `None` = 一直喂到底。
+        cancel_at: Option<usize>,
+    }
+
+    impl Chunks {
+        fn new(chunks: Vec<&'static [u8]>) -> Self {
+            Self {
+                last: Mutex::new(None),
+                chunks,
+                cancel_at: None,
+            }
+        }
+
+        fn cancelled_at(mut self, at: usize) -> Self {
+            self.cancel_at = Some(at);
+            self
+        }
+
+        fn last(&self) -> folio_net::Request {
+            self.last.lock().unwrap().clone().expect("该发过一次请求")
+        }
+    }
+
+    impl Transport for Chunks {
+        fn request(&self, _req: folio_net::Request) -> Result<Response, Error> {
+            unreachable!("流式的测试不该走 request")
+        }
+
+        fn download(
+            &self,
+            req: folio_net::Request,
+            sink: &mut dyn folio_net::Sink,
+            cancel: &Cancel,
+        ) -> Result<u64, Error> {
+            *self.last.lock().unwrap() = Some(req);
+            for (at, chunk) in self.chunks.iter().enumerate() {
+                if self.cancel_at == Some(at) {
+                    cancel.trigger();
+                }
+                if cancel.triggered() {
+                    sink.abort();
+                    return Err(Error::Cancelled);
+                }
+                sink.write(chunk)?;
+            }
+            sink.finish()?;
+            Ok(self.chunks.iter().map(|chunk| chunk.len() as u64).sum())
+        }
+    }
+
+    /// 流式问答：增量边到边交、答案攒全，请求体里带 `stream: true`。
+    #[test]
+    fn ask_stream_emits_deltas_and_carries_stream_true() {
+        let http = Chunks::new(vec![
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"人\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"间\"}}]}\n\ndata: [DONE]\n"
+            )
+            .as_bytes(),
+        ]);
+        let provider = ChatCompletion::new("https://api.example/v1", "m", "secret");
+        let mut seen = Vec::new();
+        let cancel = Cancel::new();
+        let answer = provider
+            .ask_stream(
+                &http,
+                "SYS",
+                "USER",
+                &mut |piece| seen.push(piece.to_string()),
+                &cancel,
+            )
+            .expect("这一趟该成");
+        assert_eq!(seen, vec!["人".to_string(), "间".to_string()]);
+        assert_eq!(answer.text, "人间");
+
+        let body: serde_json::Value = serde_json::from_slice(&http.last().body).unwrap();
+        assert_eq!(body["stream"], true, "流式请求没带 stream 开关");
+        assert_eq!(body["messages"][1]["content"], "USER");
+    }
+
+    /// 取消：传输层在块边界把旗递进来，这一趟以 `Cancelled` 收场 ——
+    /// 已经交出去的增量是调用方的，机制层不回滚也不补发。
+    #[test]
+    fn a_cancelled_stream_ends_with_cancelled() {
+        let http = Chunks::new(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"到一半\"}}]}\n\n".as_bytes(),
+            b"data: [DONE]\n",
+        ])
+        .cancelled_at(1);
+        let provider = ChatCompletion::new("https://api.example/v1", "m", "");
+        let mut seen = Vec::new();
+        let cancel = Cancel::new();
+        let got = provider.ask_stream(
+            &http,
+            "SYS",
+            "USER",
+            &mut |piece| seen.push(piece.to_string()),
+            &cancel,
+        );
+        assert!(matches!(got, Err(AiError::Cancelled)));
+        assert_eq!(
+            seen,
+            vec!["到一半".to_string()],
+            "取消前到的增量已经交了出去"
+        );
+    }
+
+    /// 模型清单：`GET /models`，data[].id 排序去重；地址写到方法层的也认。
+    #[test]
+    fn list_models_fetches_sorted_ids() {
+        let http = Capture::new(r#"{"data":[{"id":"b-model"},{"id":"a-model"},{"id":"a-model"}]}"#);
+        let ids = list_models(&http, "https://api.example/v1/chat/completions", "sk-1")
+            .expect("该拉得到");
+        assert_eq!(ids, vec!["a-model".to_string(), "b-model".to_string()]);
+
+        let req = http.last();
+        assert_eq!(
+            req.url, "https://api.example/v1/models",
+            "方法层后缀要剥掉再补 /models"
+        );
+        assert_eq!(
+            req.headers
+                .iter()
+                .find(|(name, _)| name == "Authorization")
+                .map(|(_, value)| value.as_str()),
+            Some("Bearer sk-1")
+        );
+    }
+
+    /// 地址空在**出网前**就报：清单那一趟与问答同一道闸。顶层数组的形状也吃
+    /// （有的网关不包 data）。
+    #[test]
+    fn list_models_reports_a_missing_address_before_going_out() {
+        let http = Capture::new("{}");
+        assert!(matches!(
+            list_models(&http, "  ", ""),
+            Err(AiError::NotConfigured("服务地址"))
+        ));
+        let bare = Capture::new(r#"[{"id":"m1"},{"id":"m2"}]"#);
+        assert_eq!(
+            list_models(&bare, "https://api.example/v1", "").expect("该拉得到"),
+            vec!["m1".to_string(), "m2".to_string()]
+        );
     }
 }

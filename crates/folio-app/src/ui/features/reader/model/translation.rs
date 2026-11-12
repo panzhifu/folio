@@ -124,7 +124,7 @@ impl ReaderSession {
         // 引擎按当前配置现建，整只搬进后台作业：请求发出之后配置再改，这一趟用的
         // 仍是出发时那份。缓存键也由它给（OpenAI 兼容那档带模型与地址指纹）。
         let config = ConfigHolder::translation(cx);
-        let translator = configured(&config);
+        let translator = configured(&config, &ConfigHolder::vendors(cx));
         let provider = translator.cache_key();
         let engine = engine_label(&config);
         let to = target_lang(cx);

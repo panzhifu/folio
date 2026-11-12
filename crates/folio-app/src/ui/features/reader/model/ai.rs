@@ -1,13 +1,16 @@
 //! 选区问 AI：把选中的字连同前后一截上下文交给模型，答案弹在原地。
 //!
 //! 形状照 [`model::translation`](super::translation)：provider 按当时的配置现建、整只搬进
-//! 后台作业、`seq` 顶号丢旧结果、事件桥回界面。两处不同，都是这件事自己的性质：
+//! 后台作业、`seq` 顶号丢旧结果、事件桥回界面。几处不同，都是这件事自己的性质：
 //!
 //! - **不落缓存**。翻译有唯一正确答案（同一段字、同一对语言、同一只模型），所以缓存先行
 //!   是对配额与限流的第一道对冲；「这段说什么」本来就不是一个有唯一答案的问题，
 //!   把第一次的答案钉给第二次读，是在替读者省钱的同時骗他。
 //! - **问法有三档**（[`Ask`]）。弹层头部那个下拉换的就是它，换一次重新问一遍 ——
 //!   缓存既然没有，重问的代价就是一次真请求，这是诚实的形状而不是省的形状。
+//! - **流式**（[`Assistant::ask_stream`]）。答案边到边交，增量骑作业池的进度事件桥
+//!   （`Progress` 事件的 message 带的是**攒到现在的全文**，不是这一笔 —— 弹层只认
+//!   整份，晚到一笔不缺字）。取消走作业自己的旗标：停下的那一刻已到的字留着。
 //!
 //! 上下文取的是**这一章的归一化文本**（`TextMap::slice`），与锚点同一把尺：偏移不换算
 //! 第二遍，就不会出现「选中的是这句、问出去的是那句」。排版没跟上那一帧（`is_current()`
@@ -15,7 +18,8 @@
 
 use folio_core::PageTextExt;
 use folio_core::infra::task::{Priority, TaskEvent, TaskHandle};
-use folio_core::net::ai::{Ask, Asked, configured, selection_prompt};
+use folio_core::net::ai::{AiError, Ask, Asked, configured, selection_prompt};
+use folio_core::net::remote::Cancel;
 use gpui_kit::{App, AppContext as _, Context, Pixels, Point};
 
 use crate::ui::features::reader::model::session::ReaderSession;
@@ -23,7 +27,7 @@ use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::resident;
 
 /// 弹层里那一格的状态。`source` 与 `prompt` 是弹层自己的权威 —— 选区在升起那一刻
-/// 就收掉了，换问法时手里只有这两份。
+/// 就收掉了，换问法与「重试」时手里只有这两份。
 ///
 /// 存的是**拼好的载荷**而不是前后两段：书名与章名在开弹那一刻就折进去了（出处只在
 /// 那一刻是确定的 —— 换问法期间读者可能已经翻到下一章），而换问法只该换系统提示词，
@@ -39,28 +43,40 @@ pub(in crate::ui::features::reader) struct AiState {
     pub(in crate::ui::features::reader) label: String,
     pub(in crate::ui::features::reader) anchor: Option<Point<Pixels>>,
     pub(in crate::ui::features::reader) status: AiStatus,
+    /// 这一趟的取消旗（来自作业句柄）。「停止」置位它，传输在下一个块边界看见。
+    pub(in crate::ui::features::reader) cancel: Cancel,
 }
 
 #[derive(Clone, Debug)]
 pub(in crate::ui::features::reader) enum AiStatus {
+    /// 请求已发出，一个字还没到。
     Pending,
+    /// 流式途中：攒到现在的全文（每笔事件带整份，见模块文档）。
+    Streaming {
+        text: String,
+    },
     /// 答案 + 模型报的 token 数（很多网关不给，给了就照实说）。
     Done {
         text: String,
         tokens: Option<u64>,
     },
-    Failed(String),
+    Failed(AiError),
 }
 
 /// 这一趟的载荷：起名字是因为它出现在事件通道的类型里，裸元组读不出含义。
 type AiOutcome = (String, Option<u64>);
 
 impl ReaderSession {
-    /// AI 那一格能出现吗：开了、地址与模型都填全了才行。判据与 provider 的建法共用
+    /// AI 那一格能出现吗：开了、供应商与模型都解析得出来才行。判据与 provider 的建法共用
     /// 同一份（[`configured`]）—— 「界面上有这一格」与「按下去问得出去」不许有两套答案。
     /// 回 `false` 时卡片里那一格**直接缺席**，不是摆一颗按下去报错的按钮。
     pub fn ai_available(cx: &App) -> bool {
-        configured(&ConfigHolder::translation(cx), &ConfigHolder::ai(cx)).is_some()
+        configured(
+            &ConfigHolder::translation(cx),
+            &ConfigHolder::ai(cx),
+            &ConfigHolder::vendors(cx),
+        )
+        .is_some()
     }
 
     /// 弹层开着吗。阅读页拿它报「身上压着东西」（正文手势让位）与「返回键先收谁」。
@@ -124,7 +140,30 @@ impl ReaderSession {
         self.ask_ai(ask, source, prompt, anchor, cx);
     }
 
-    /// 两个入口（开弹、换问法）都汇到这里：现建 provider、顶号、挂后台一趟。
+    /// 「重试」：失败卡上那一颗。载荷与锚点都是弹层存的那份，问法照旧。
+    pub(in crate::ui::features::reader) fn retry_ai(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.ai.as_ref() else {
+            return;
+        };
+        let (ask, source, prompt, anchor) = (
+            state.ask,
+            state.source.clone(),
+            state.prompt.clone(),
+            state.anchor,
+        );
+        self.ask_ai(ask, source, prompt, anchor, cx);
+    }
+
+    /// 「停止」：置位取消旗。传输在下一个块边界看见它，已到的字留着（打字机不回滚）。
+    pub(in crate::ui::features::reader) fn stop_ai(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.ai.as_ref() else {
+            return;
+        };
+        state.cancel.trigger();
+        cx.notify();
+    }
+
+    /// 各个入口（开弹、换问法、重试）都汇到这里：现建 provider、顶号、挂后台一趟。
     fn ask_ai(
         &mut self,
         ask: Ask,
@@ -133,8 +172,11 @@ impl ReaderSession {
         anchor: Option<Point<Pixels>>,
         cx: &mut Context<Self>,
     ) {
-        let Some(provider) = configured(&ConfigHolder::translation(cx), &ConfigHolder::ai(cx))
-        else {
+        let Some(provider) = configured(
+            &ConfigHolder::translation(cx),
+            &ConfigHolder::ai(cx),
+            &ConfigHolder::vendors(cx),
+        ) else {
             return;
         };
         let label = provider.label();
@@ -149,14 +191,27 @@ impl ReaderSession {
             status: AiStatus::Pending,
             source: source.clone(),
             prompt: prompt.clone(),
+            cancel: Cancel::new(),
         });
         let http = folio_core::net::remote::ureq::shared();
         let handle: TaskHandle<AiOutcome> = resident::pool().submit_with(Priority::Interactive, {
-            move |_| {
-                let got = provider.ask(&*http, &system, &prompt)?;
+            move |stage| {
+                // 增量骑进度事件桥：message 带攒到现在的全文（弹层只认整份，见模块文档）。
+                let mut full = String::new();
+                let got = provider.ask_stream(
+                    &*http,
+                    &system,
+                    &prompt,
+                    &mut |piece| {
+                        full.push_str(piece);
+                        stage.message(full.as_str());
+                    },
+                    stage.cancel(),
+                )?;
                 Ok((got.text, got.completion_tokens))
             }
         });
+        self.ai.as_mut().expect("刚存进去").cancel = handle.cancel.clone();
         let (forward, events) = async_channel::unbounded();
         cx.background_spawn(async move {
             for event in handle.events.iter() {
@@ -189,6 +244,12 @@ impl ReaderSession {
             return;
         }
         match event {
+            // 流式的增量。message 是攒到现在的全文 —— 直接顶上去，不自己攒。
+            TaskEvent::Progress(progress) if !progress.message.is_empty() => {
+                state.status = AiStatus::Streaming {
+                    text: progress.message,
+                };
+            }
             TaskEvent::Finished(Ok((text, tokens))) => {
                 // 日志只记长度，不记正文与答案：那可能就是读者正在读的那一页。
                 tracing::info!(chars = text.chars().count(), "问 AI: 到手");
@@ -196,7 +257,19 @@ impl ReaderSession {
             }
             TaskEvent::Finished(Err(err)) => {
                 tracing::warn!(error = %err, "问 AI: 那一趟失败");
-                state.status = AiStatus::Failed(err.to_string());
+                // 作业的错误是装箱的；失败卡要按档位摆「去设置」，拆回 AiError 再收。
+                let tier = err
+                    .downcast::<AiError>()
+                    .map(|error| *error)
+                    .unwrap_or_else(|err| folio_core::net::ai::AiError::Transport(err.to_string()));
+                state.status = AiStatus::Failed(tier);
+            }
+            // 读者按了停止：已到的字留下，按「有了部分答案」收场。
+            TaskEvent::Cancelled => {
+                if let AiStatus::Streaming { text } = &state.status {
+                    let text = text.clone();
+                    state.status = AiStatus::Done { text, tokens: None };
+                }
             }
             _ => {}
         }
@@ -238,7 +311,7 @@ fn answer_locale(cx: &App) -> String {
 mod tests {
     use super::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
-    use folio_core::{Config, TranslationEngine};
+    use folio_core::{Config, Vendor};
     use gpui_kit::{App, TestAppContext};
 
     /// 「这一格出不出现」与「按下去问得出去」必须是**同一份判据**（`net::ai::configured`）。
@@ -258,39 +331,32 @@ mod tests {
             ConfigHolder::edit_ai(cx, |ai| ai.enabled = true);
             assert!(
                 !ReaderSession::ai_available(cx),
-                "只拨了开关：地址还是出厂那份、key 没填 ⇒ 不许把正文发去一个读者没配过的服务"
+                "只拨了开关：一条供应商档案都没有 ⇒ 不许把正文发去一个读者没配过的服务"
             );
 
-            fill_endpoint(cx, "https://api.example/v1", "translate-model", "");
+            add_vendor(cx, "https://api.example/v1", "");
+            ConfigHolder::edit_ai(cx, |ai| ai.model = "translate-model".to_string());
             assert!(
                 ReaderSession::ai_available(cx),
-                "开了 + 读者自己填的地址 ⇒ 这一格出现"
+                "开了 + 读者自己加的档案 + 模型 ⇒ 这一格出现"
             );
 
-            // 模型覆盖：翻译那一档的模型清空，AI 自己填了一只 —— 仍然问得出。
-            fill_endpoint(cx, "https://api.example/v1", "", "big-model");
-            assert!(
-                ReaderSession::ai_available(cx),
-                "AI 那一格填了模型就够，不该逼读者替翻译也填一遍"
-            );
-
-            // 两处模型都空：不知道该问哪只，退回「没有这一格」。
-            fill_endpoint(cx, "https://api.example/v1", "", "");
+            // 档案删掉（注册表空了）：这一格跟着消失。
+            ConfigHolder::edit_vendors(cx, |vendors| vendors.clear());
             assert!(!ReaderSession::ai_available(cx));
         });
     }
 
-    /// 把端点那一档填成给定的三个值（地址 / 翻译用的模型 / AI 覆盖的模型）。
-    /// 地址与密钥住在翻译那一档，AI 只带模型覆盖 —— 这条测试顺带钉住那个形状。
-    fn fill_endpoint(cx: &mut App, base: &str, translation_model: &str, ai_model: &str) {
-        ConfigHolder::edit_translation(cx, |translation| {
-            translation.engine = TranslationEngine::OpenAi;
-            translation.openai.base_url = base.to_string();
-            translation.openai.model = translation_model.to_string();
-        });
-        ConfigHolder::edit_ai(cx, |ai| {
-            ai.enabled = true;
-            ai.model = ai_model.to_string();
+    /// 把测试用的供应商档案加进注册表。旧版「地址与密钥住在翻译那一档」的形状已经
+    /// 换成注册表 —— 这里只走公开写入口，与设置页改的是同一条路。
+    fn add_vendor(cx: &mut App, base: &str, key: &str) {
+        ConfigHolder::edit_vendors(cx, |vendors| {
+            vendors.push(Vendor {
+                id: folio_core::new_vendor_id(),
+                name: "测试".to_string(),
+                base_url: base.to_string(),
+                api_key: key.to_string(),
+            });
         });
     }
 }

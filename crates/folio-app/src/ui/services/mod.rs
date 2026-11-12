@@ -7,6 +7,7 @@
 //! 这里**不出现元素树**（没有 `AnyElement`、没有 `impl Render`）：服务不知道谁在看它。
 
 pub mod activation;
+pub mod ai;
 pub mod app_store;
 pub mod backup;
 pub mod cloud_auth;

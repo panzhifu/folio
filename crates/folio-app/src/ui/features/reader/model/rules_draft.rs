@@ -76,7 +76,12 @@ impl ReaderSession {
         if !is_text_book(store, id) {
             return false;
         }
-        configured(&ConfigHolder::translation(cx), &ConfigHolder::ai(cx)).is_some()
+        configured(
+            &ConfigHolder::translation(cx),
+            &ConfigHolder::ai(cx),
+            &ConfigHolder::vendors(cx),
+        )
+        .is_some()
     }
 
     /// 弹层开着吗。阅读页拿它报「身上压着东西」（正文手势让位）与「返回键先收谁」。
@@ -93,8 +98,11 @@ impl ReaderSession {
 
     /// 目录面板那颗「建议怎么切章」：现取那本书的路径，把整趟搬进后台。
     pub fn suggest_chapter_rules(&mut self, cx: &mut Context<Self>) {
-        let Some(provider) = configured(&ConfigHolder::translation(cx), &ConfigHolder::ai(cx))
-        else {
+        let Some(provider) = configured(
+            &ConfigHolder::translation(cx),
+            &ConfigHolder::ai(cx),
+            &ConfigHolder::vendors(cx),
+        ) else {
             return;
         };
         let (Some(store), Some(id)) = (self.store.clone(), self.book_id) else {

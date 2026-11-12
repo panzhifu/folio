@@ -91,6 +91,13 @@ const ROW_HIT: f32 = 44.0;
 /// 点在按钮、下拉、另一颗输入框上的那一击也当成「空白」，与控件抢同一事件。
 fn dismissible_input(input: &Entity<InputState>, cx: &App) -> AnyElement {
     let handle = input.read(cx).focus_handle(cx).clone();
+    // 密钥行（初始已 masked）带一颗眼睛，普通行不带 —— 遮罩只影响显示，见 `spec`。
+    let mask_toggle = input.read(cx).presentation().is_masked();
+    let field = if mask_toggle {
+        Input::new(input).w_full().mask_toggle().into_any_element()
+    } else {
+        Input::new(input).w_full().into_any_element()
+    };
     div()
         .w_full()
         .on_mouse_down_out(move |_, window, cx| {
@@ -98,7 +105,7 @@ fn dismissible_input(input: &Entity<InputState>, cx: &App) -> AnyElement {
                 window.blur(cx);
             }
         })
-        .child(Input::new(input).w_full())
+        .child(field)
         .into_any_element()
 }
 
@@ -1133,9 +1140,12 @@ impl CompactSettings {
                         ),
                 )
             }
-            RowKind::Text { get, set } => {
+            RowKind::Text {
+                get, set, secret, ..
+            } => {
                 let (get, set) = (get.clone(), set.clone());
                 let value = get(cx);
+                let secret = *secret;
                 let focus_group = self.focus_group.clone();
                 let state = window.use_keyed_state(id("text"), cx, {
                     let value = value.clone();
@@ -1143,13 +1153,16 @@ impl CompactSettings {
                     let focus_group = focus_group.clone();
                     move |window, cx| {
                         let input = cx.new(|cx| {
-                            let state = InputState::new(window, cx).default_value(value);
+                            let mut state = InputState::new(window, cx).default_value(value);
                             // 占位虚字：带它的行标题不摆出来（见下面那一分叉）。
                             if let Some(placeholder) = placeholder {
-                                state.placeholder(placeholder)
-                            } else {
-                                state
+                                state = state.placeholder(placeholder);
                             }
+                            // 密钥行遮住显示，与桌面同一个口径（遮罩只在显示层）。
+                            if secret {
+                                state = state.masked(true);
+                            }
+                            state
                         });
                         // 输入即写配置：外壳那份订阅会落盘并重排。订阅句柄必须跟着
                         // 状态一起活，掉了事件就断 —— 与框架的 string 字段同一形状。

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use folio_core::content::format::novel::rules::MatchKind;
 use folio_core::infra::config::Mode;
-use folio_core::net::ai::Ask;
+use folio_core::net::ai::{AiError, Ask};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::motion::{Spring, spring};
 use gpui_kit::base::{NavMotion, NavStackState};
@@ -1677,6 +1677,9 @@ impl ReadingPage {
     /// [`translation_card`] 一一对应，差别只在头部换的是**问法**而不是目标语言。
     fn ai_popover(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let reader = self.reader.clone();
+        // 「去设置」那颗钮要够到这一屏的 `open_settings`：弹层的内容闭包是 'static 的，
+        // 拿不住 `self`，拿一份自己的句柄递进卡里。
+        let page = cx.entity();
         let anchor = self.reader.read(cx).ai.as_ref()?.anchor;
         let width = px(f32::from(window.viewport_size().width).max(1.0));
         let (left, top) = match anchor {
@@ -1710,7 +1713,7 @@ impl ReadingPage {
                                 .min_w(px(0.))
                                 .min_h(px(0.)),
                         )
-                        .content(move |_, _, cx| ai_card(&reader, cx)),
+                        .content(move |_, _, cx| ai_card(&reader, &page, cx)),
                 )
                 .into_any_element(),
         )
@@ -2398,7 +2401,11 @@ impl Render for ReadingPage {
 /// 引擎名照实摆着：gtx 是非合同接口，读者该知道这份译文出自谁。
 /// 问 AI 那张卡。头部那颗下拉换的是**问法**（三档，见 `folio_core::net::ai::Ask`），
 /// 换一次重新问一遍 —— 这一族不落缓存，所以「换一档」就是一次真请求，界面上不装作免费。
-fn ai_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> AnyElement {
+fn ai_card(
+    reader: &Entity<ReaderSession>,
+    page: &Entity<ReadingPage>,
+    cx: &mut Context<PopoverState>,
+) -> AnyElement {
     let ai_reader = reader.clone();
     // 当前那一档在**建卡这一刻**读一次就够：菜单每次打开重建的是勾选项，而这张卡本身
     // 每帧重建（见 `translation_card` 上那条同样的话），闭包里再借 `reader` 就会让
@@ -2435,6 +2442,30 @@ fn ai_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> An
             .text_sm()
             .text_color(cx.theme().muted_foreground)
             .child(tr(cx, "reader.ai.pending")),
+        // 流式途中：已到的字边到边画，底下挂一颗「停止」—— 取消在传输的块边界生效，
+        // 已到的字不回滚（见 `model::ai`）。
+        AiStatus::Streaming { text } => {
+            let stop_reader = reader.clone();
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().foreground)
+                        .child(text.clone()),
+                )
+                .child(
+                    h_flex().gap_2().child(
+                        Button::new("ai-stop")
+                            .ghost()
+                            .small()
+                            .label(tr(cx, "reader.ai.stop").to_string())
+                            .on_click(move |_, _, cx| {
+                                stop_reader.update(cx, |reader, cx| reader.stop_ai(cx))
+                            }),
+                    ),
+                )
+        }
         AiStatus::Done { text, tokens } => v_flex()
             .gap_1()
             .child(
@@ -2460,11 +2491,57 @@ fn ai_card(reader: &Entity<ReaderSession>, cx: &mut Context<PopoverState>) -> An
                             .child(tf(cx, "reader.ai.tokens", &[("n", &count)]))
                     })),
             ),
-        AiStatus::Failed(reason) => div()
-            .py_3()
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
-            .child(tf(cx, "reader.ai.failed", &[("reason", reason)])),
+        AiStatus::Failed(error) => {
+            // 配置档的错误（没配好 / 密钥被拒 / 配额）光重试没有用，加一颗「去设置」。
+            let config_tier = matches!(
+                error,
+                AiError::NotConfigured(_)
+                    | AiError::MissingKey
+                    | AiError::Unauthorized
+                    | AiError::Quota
+            );
+            let retry_reader = reader.clone();
+            let settings_reader = reader.clone();
+            let settings_page = page.clone();
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .py_1()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tf(
+                            cx,
+                            "reader.ai.failed",
+                            &[("reason", &error.to_string())],
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("ai-retry")
+                                .ghost()
+                                .small()
+                                .label(tr(cx, "reader.ai.retry").to_string())
+                                .on_click(move |_, _, cx| {
+                                    retry_reader.update(cx, |reader, cx| reader.retry_ai(cx))
+                                }),
+                        )
+                        .children(config_tier.then(|| {
+                            let settings_reader = settings_reader.clone();
+                            let settings_page = settings_page.clone();
+                            Button::new("ai-settings")
+                                .ghost()
+                                .small()
+                                .label(tr(cx, "reader.ai.go_settings").to_string())
+                                .on_click(move |_, _, cx| {
+                                    settings_reader.update(cx, |reader, cx| reader.close_ai(cx));
+                                    settings_page.update(cx, |page, cx| page.open_settings(cx));
+                                })
+                        })),
+                )
+        }
     };
     let close_reader = reader.clone();
     let close_label = tr(cx, "reader.ai.dismiss");

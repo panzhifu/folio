@@ -52,7 +52,7 @@ fn a_cached_translation_lands_without_a_network_round_trip(cx: &mut TestAppConte
     let store = Arc::new(Store::in_memory().expect("内存库"));
     let (view, source) = open_and_select(cx, &store);
     // 缓存键由引擎自己给：默认配置是 Google 那一档。
-    let provider = configured(&Translation::default()).cache_key();
+    let provider = configured(&Translation::default(), &[]).cache_key();
     store
         .save_translation(
             &provider,

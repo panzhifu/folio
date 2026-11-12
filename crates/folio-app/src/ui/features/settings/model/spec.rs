@@ -90,10 +90,13 @@ pub(crate) enum RowKind {
         get: Rc<dyn Fn(&App) -> f32>,
         set: Setter<f32>,
     },
-    /// 自由文本（书库位置）。
+    /// 自由文本（书库位置）。`secret` 的那行按**密码框**画：值照常进配置、
+    /// 照常可编辑，只是显示遮住、可点眼睛临时翻开 —— 肩窥挡得住，别的不挡
+    /// （config.json 本来就 0600）。
     Text {
         get: Rc<dyn Fn(&App) -> SharedString>,
         set: Setter<SharedString>,
+        secret: bool,
     },
     /// 自由文本 + 右侧动作钮（手机端的「订单编号 + 兑换」）。
     ///
@@ -207,8 +210,17 @@ impl Row {
             kind: RowKind::Text {
                 get: Rc::new(get),
                 set: Rc::new(set),
+                secret: false,
             },
         }
+    }
+
+    /// 这一行按密码框画（见 [`RowKind::Text`] 的 `secret`）。只改显示层，读写闭包照旧。
+    pub(in crate::ui::features::settings) fn secret(mut self) -> Self {
+        if let RowKind::Text { secret, .. } = &mut self.kind {
+            *secret = true;
+        }
+        self
     }
 
     /// 自由文本 + 右侧动作钮。手机端把两颗摆成一行；桌面端按纯文本渲染。

@@ -448,15 +448,25 @@ impl ConfigHolder {
         Self::edit(cx, |config| f(&mut config.account));
     }
 
-    /// 「选区问 AI」那一节：只有「要不要用」与「用哪只模型」两格。服务地址与密钥
-    /// **共用翻译那一档**（`ConfigHolder::translation`），所以这里不设第二份密钥 ——
-    /// 同一个端点填两遍就是两处真相，而密钥每多存一处就多一处泄漏面。
+    /// 「选区问 AI」那一节：要不要用、用哪条供应商、用哪只模型。地址与密钥住在
+    /// 被引用的供应商档案里（[`Self::vendors`]）—— 端点填一遍存一份，翻译与 AI
+    /// 各自引用，换供应商只动档案那一处。
     pub fn ai(cx: &App) -> folio_core::Ai {
         Self::entity(cx).read(cx).config.ai.clone()
     }
 
     pub fn edit_ai(cx: &mut App, f: impl FnOnce(&mut folio_core::Ai)) {
         Self::edit(cx, |config| f(&mut config.ai));
+    }
+
+    /// 供应商注册表：OpenAI 兼容端点档案的清单。翻译屏与 AI 屏读的是**同一份** ——
+    /// 「两屏读出两份」就是当初合并成一张表的动机，测试里钉着。
+    pub fn vendors(cx: &App) -> Vec<folio_core::Vendor> {
+        Self::entity(cx).read(cx).config.vendors.clone()
+    }
+
+    pub fn edit_vendors(cx: &mut App, f: impl FnOnce(&mut Vec<folio_core::Vendor>)) {
+        Self::edit(cx, |config| f(&mut config.vendors));
     }
 
     pub fn edit_opds(cx: &mut App, f: impl FnOnce(&mut Opds)) {

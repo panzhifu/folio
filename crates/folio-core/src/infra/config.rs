@@ -765,23 +765,22 @@ impl Translation {
     /// 归一：首尾空白去掉。语言码本身信不过的写法（大小写错位）在引擎那头都能
     /// 容忍，这里不做第二处「纠正」。
     ///
-    /// 地址 / 模型清空时**不**在这里补默认值：设置页的文本行边打边存，补默认值会把
+    /// 模型清空时**不**在这里补默认值：设置页的文本行边打边存，补默认值会把
     /// 读者刚删空的那一格当场填回去。空值该不该有默认由引擎在发请求前判。
     pub fn normalized(mut self) -> Self {
         self.target_lang = self.target_lang.trim().to_string();
-        self.openai.base_url = self.openai.base_url.trim().to_string();
+        self.openai.vendor = self.openai.vendor.trim().to_string();
         self.openai.model = self.openai.model.trim().to_string();
-        self.openai.api_key = self.openai.api_key.trim().to_string();
         self.deepl.api_key = self.deepl.api_key.trim().to_string();
         self
     }
 }
 
-/// 选区问 AI 与切章规则草案那一节。只有两格：**要不要用**与**用哪只模型**。
+/// 选区问 AI 与切章规则草案那一节。三格：**要不要用**、**用哪条供应商**与**用哪只模型**。
 ///
-/// 服务地址与密钥**不在这里** —— 共用 [`Translation::openai`] 那一档。理由有两条：
-/// 同一个端点填两遍就是两处真相（改了翻译忘改 AI，症状是「翻译能用、问 AI 连不上」），
-/// 而密钥每多存一处就多一处泄漏面。要换端点的人改的是翻译那一屏。
+/// 地址与密钥住在被引用的 [`Vendor`] 档案里 —— 这一节只说「用不用、用哪条、用哪只模型」。
+/// [`Ai::vendor`] 留空 = 跟随翻译那档的供应商（多数读者只配一家，不用再选一遍）；
+/// 填了就只换 AI 这一路 —— 允许覆盖是因为「翻译用便宜的那家、解释用强的那家」是真需求。
 ///
 /// [`Ai::enabled`] 默认 **false**：新装的机器不出现任何 AI 入口，读者填好端点也不算
 /// 「他要」。这一格不是「还没开」的占位，是一个明确的选择。
@@ -793,13 +792,16 @@ impl Translation {
 pub struct Ai {
     /// 允许不允许用 AI。见上。
     pub enabled: bool,
-    /// 空 = 用翻译那一档填的模型；填了就只覆盖模型（地址与密钥仍共用）。
+    /// 空 = 跟随翻译那档的供应商；填了就是这一节自己的选择（档案 id）。
+    pub vendor: String,
+    /// 空 = 用翻译那一档填的模型；填了就只覆盖模型。
     /// 允许覆盖是因为「翻译用小模型、解释用大模型」是真需求，而重写一遍地址不是。
     pub model: String,
 }
 
 impl Ai {
     pub fn normalized(mut self) -> Self {
+        self.vendor = self.vendor.trim().to_string();
         self.model = self.model.trim().to_string();
         self
     }
@@ -1065,27 +1067,117 @@ impl<'de> Deserialize<'de> for TranslationEngine {
     }
 }
 
-/// OpenAI 兼容服务的参数。
+/// 出厂预填的官方地址（旧版 `OpenAi::default().base_url`）。现在它只活在迁移里：
+/// 旧配置带着这个地址**且没填 key** 时，唯一的解释是读者从没打开过这一格，
+/// 迁移不替他造档案（见 [`Config::migrate_vendors`]）。
+pub const FACTORY_BASE_URL: &str = "https://api.openai.com/v1";
+
+/// 一条 OpenAI 兼容端点档案：地址与密钥**填一次存一份**，翻译与 AI 各自引用
+/// （`translation.openai.vendor` / `ai.vendor`），各配各的模型。
 ///
-/// key 允许为空：本地 Ollama / LM Studio 不认 `Authorization`，而官方与各家云服务
-/// 非填不可。空 key 时请求不带头，由引擎自己回 401 —— 比在界面层猜「这只引擎要不要
-/// key」诚实。
+/// 为什么要一张注册表而不是各功能自带地址：同一个端点填两遍就是两处真相
+/// （改了翻译忘改 AI，症状是「翻译能用、问 AI 连不上」），而密钥每多存一处就
+/// 多一处泄漏面。换来的是换供应商（官方 ↔ DeepSeek ↔ 自建网关）只动一处，
+/// 也不用把翻译屏整屏重填。
+///
+/// key 允许为空：不认 `Authorization` 的自建服务照样能填（空 key 时请求不带头，
+/// 由服务自己回 401 —— 比在界面层猜「这家要不要 key」诚实）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[derive(Default)]
+pub struct Vendor {
+    /// 引用键（`new_vendor_id` 生成）。界面不摆它；丢了引用就回退第一条。
+    pub id: String,
+    /// 给人看的名（「DeepSeek」「自建网关」）。空串时界面回落显示 host。
+    pub name: String,
+    /// API 根地址。请求时补 `/chat/completions`；写到方法那一层的也认。
+    pub base_url: String,
+    pub api_key: String,
+}
+
+impl Vendor {
+    /// 界面那一行显示的名字：档案名优先，空了回落 host，再空回落一个统称。
+    /// 回落两级的 `String`（host 是现抠的），调用方拿去当显示标签。
+    pub fn display_name(&self) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        let host = host_of(&self.base_url);
+        if host.is_empty() {
+            "供应商".to_string()
+        } else {
+            host
+        }
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.id = self.id.trim().to_string();
+        self.name = self.name.trim().to_string();
+        self.base_url = self.base_url.trim().to_string();
+        self.api_key = self.api_key.trim().to_string();
+        self
+    }
+}
+
+/// 按引用找一条档案。**悬空引用回退第一条**而不是报错：档案被删后引用它的功能
+/// 自动落到列表头上的那一条，界面上说得清（「已回退」），比「整格消失」温和。
+/// 空表回 `None` —— 那是「还没添加过供应商」，归「这一格不存在」的判据管。
+pub fn resolve_vendor<'a>(vendors: &'a [Vendor], id: &str) -> Option<&'a Vendor> {
+    if vendors.is_empty() {
+        return None;
+    }
+    vendors
+        .iter()
+        .find(|vendor| vendor.id == id)
+        .or_else(|| vendors.first())
+}
+
+/// 从地址里抠 host（`https://api.deepseek.com/v1` → `api.deepseek.com`）。
+/// 档案默认名与「地址是读者给的还是出厂的」这类判断都用它。不引 url crate ——
+/// 这里的输入是设置页手抄的地址，容错比解析完整。
+pub fn host_of(base_url: &str) -> String {
+    let rest = base_url
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    rest.split('/').next().unwrap_or_default().to_string()
+}
+
+static VENDOR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 新档案的引用键：时间戳 + 进程内序号。**只要求同机不撞**，不要求不可猜 ——
+/// 它住在 0600 的 config.json 里，与密钥同一份落盘面。
+pub fn new_vendor_id() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let seq = VENDOR_SEQ.fetch_add(1, Relaxed);
+    format!("v{}-{}", folio_base::time::now(), seq)
+}
+
+/// OpenAI 兼容那一档的**引用与模型**。地址与密钥住在被引用的 [`Vendor`] 里 ——
+/// 这一节只说「用哪条档案、翻译用哪只模型」。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenAi {
-    /// API 根地址（如 `https://api.openai.com/v1`）。请求时补 `/chat/completions`；
-    /// 已经写到 `/chat/completions` 的也认。
-    pub base_url: String,
-    /// 模型名（如 `gpt-4o-mini`、`qwen2.5:7b`）。
+    /// 引用 [`Config::vendors`] 里哪一条。空 = 回退第一条（[`resolve_vendor`]）。
+    pub vendor: String,
+    /// 模型名（如 `gpt-4o-mini`、`deepseek-chat`）。
     pub model: String,
+    /// （迁移期暂留）旧版的内联地址。读进来后由 [`Config::migrate_vendors`]
+    /// 折成档案并清空；新写的配置里恒为空串。
+    pub base_url: String,
+    /// （迁移期暂留）旧版的内联密钥。同上。
     pub api_key: String,
 }
 
 impl Default for OpenAi {
     fn default() -> Self {
         Self {
-            base_url: "https://api.openai.com/v1".into(),
+            vendor: String::new(),
+            // 出厂模型保留：读者添加好档案、贴上 key、拨开开关就能用，
+            // 不必再知道「模型名」是什么（要换随时换）。
             model: "gpt-4o-mini".into(),
+            base_url: String::new(),
             api_key: String::new(),
         }
     }
@@ -1854,6 +1946,9 @@ pub struct Config {
     pub speech: Speech,
     pub translation: Translation,
     pub ai: Ai,
+    /// OpenAI 兼容端点档案的注册表。翻译与 AI 各自按 id 引用其中一条
+    /// （地址与密钥只存这一份），见 [`Vendor`]。
+    pub vendors: Vec<Vendor>,
     pub dictionary: Dictionary,
     /// 读者自己装进来的字体（下载或导入），见 [`Fonts`]。
     pub fonts: Fonts,
@@ -1886,6 +1981,7 @@ impl Default for Config {
             speech: Speech::default(),
             translation: Translation::default(),
             ai: Ai::default(),
+            vendors: Vec::new(),
             dictionary: Dictionary::default(),
             fonts: Fonts::default(),
             backup: Backup::default(),
@@ -1913,6 +2009,7 @@ impl Config {
         self.speech = self.speech.normalized();
         self.translation = self.translation.normalized();
         self.ai = self.ai.normalized();
+        self.vendors = self.vendors.into_iter().map(Vendor::normalized).collect();
         self.dictionary = self.dictionary.normalized();
         self.fonts = self.fonts.normalized();
         self.sync = self.sync.normalized();
@@ -1975,10 +2072,10 @@ impl Config {
                 // 手改过 / 旧版本 / 别的机器同步来的值都不可信，读进来先规整一遍。
                 if let Ok(config) = serde_json::from_value::<Config>(value.clone()) {
                     warn_missing_sections(value);
-                    config.migrated().normalized()
+                    config.migrate_vendors().migrated().normalized()
                 } else {
                     tracing::warn!("config: {} 整份解不开，按节抢救", path.display());
-                    salvage(value).migrated().normalized()
+                    salvage(value).migrate_vendors().migrated().normalized()
                 }
             }
             None => Config::default(),
@@ -2046,6 +2143,38 @@ impl Config {
             tracing::info!("config: 版本 v{} → v{CONFIG_VERSION}", self.version);
         }
         self.version = CONFIG_VERSION;
+        self
+    }
+
+    /// 把旧版的**内联端点**折进供应商注册表：`translation.openai` 自带的地址与密钥
+    /// 变成第一条档案，引用指过去，`ai.vendor` 留空（跟随翻译 = 还是原来那个端点）。
+    ///
+    /// **幂等**：折完就把 deprecated 的两格清空，重跑一次什么也找不到。两条不加档案的
+    /// 出路 —— 旧地址本来就是空的（没配置过）；或者地址还是出厂那份**且 key 空着**
+    /// （读者只被出厂值摆过一道，从没打开过这一格 —— 替他造档案，等于替他决定
+    /// 「我的正文可以发去官方 API」，那正是「只有出厂地址不算配置」要拦的事）。
+    fn migrate_vendors(mut self) -> Self {
+        let openai = &mut self.translation.openai;
+        let base = openai.base_url.trim().to_string();
+        let key = openai.api_key.trim().to_string();
+        if !base.is_empty() && openai.vendor.is_empty() {
+            let making = !(base == FACTORY_BASE_URL && key.is_empty());
+            if making {
+                let id = new_vendor_id();
+                let name = host_of(&base);
+                self.vendors.push(Vendor {
+                    id: id.clone(),
+                    name,
+                    base_url: base,
+                    api_key: key,
+                });
+                openai.vendor = id;
+            } else {
+                tracing::debug!("config: 出厂地址且没填 key，迁移不造供应商档案");
+            }
+        }
+        self.translation.openai.base_url.clear();
+        self.translation.openai.api_key.clear();
         self
     }
 
@@ -2204,10 +2333,10 @@ mod tests {
         );
     }
 
-    /// 引擎与它的私有参数要读得回来，且各格的首尾空白在归一里去掉 ——
+    /// 旧版的内联端点要**折成供应商档案**，且各格首尾空白在归一里去掉 ——
     /// 手抄地址时多带一个空格，拼出来的 URL 就是另一种东西。
     #[test]
-    fn translation_engine_and_its_private_fields_round_trip() {
+    fn an_inline_endpoint_folds_into_a_vendor() {
         let got = load(
             r#"{"translation":{
                 "target_lang":" ja ",
@@ -2218,10 +2347,62 @@ mod tests {
         );
         assert_eq!(got.translation.target_lang, "ja");
         assert_eq!(got.translation.engine, TranslationEngine::OpenAi);
-        assert_eq!(got.translation.openai.base_url, "https://example.test/v1");
-        assert_eq!(got.translation.openai.model, "qwen2.5:7b");
-        assert_eq!(got.translation.openai.api_key, "sk-1");
         assert_eq!(got.translation.deepl.api_key, "fx-1");
+        assert_eq!(got.translation.openai.model, "qwen2.5:7b");
+
+        assert_eq!(got.vendors.len(), 1, "旧地址折成一条档案");
+        let vendor = &got.vendors[0];
+        assert_eq!(vendor.base_url, "https://example.test/v1");
+        assert_eq!(vendor.api_key, "sk-1");
+        assert_eq!(vendor.name, "example.test", "档案名默认取 host");
+        assert_eq!(
+            got.translation.openai.vendor, vendor.id,
+            "翻译的引用指向折出来的那条"
+        );
+        assert!(
+            got.translation.openai.base_url.is_empty() && got.translation.openai.api_key.is_empty(),
+            "内联的两格折完就清空，重跑迁移才找不到东西"
+        );
+    }
+
+    /// 迁移要**幂等**：折过的配置存出去再读回来，档案不翻倍。
+    #[test]
+    fn vendor_migration_is_idempotent() {
+        let first = load(
+            r#"{"translation":{"openai":{"base_url":"https://example.test/v1","model":"m","api_key":"k"}}}"#,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        first.save_to(&path).unwrap();
+        let second = Config::load_from(&path);
+        assert_eq!(second.vendors.len(), 1, "重读不再造第二条");
+        assert_eq!(
+            second.translation.openai.vendor, first.translation.openai.vendor,
+            "引用原样保住"
+        );
+    }
+
+    /// 出厂地址 + 没填 key =「读者从没打开过这一格」⇒ 迁移**不造档案**，
+    /// 也不把出厂地址烤成一条真配置 —— 那等于替读者决定正文可以发去官方 API。
+    #[test]
+    fn the_shipped_endpoint_without_a_key_does_not_become_a_vendor() {
+        let got = load(
+            r#"{"translation":{"openai":{"base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_key":""}}}"#,
+        );
+        assert!(got.vendors.is_empty());
+        assert!(got.translation.openai.vendor.is_empty());
+        assert!(got.translation.openai.base_url.is_empty(), "内联格照旧清空");
+    }
+
+    /// 同一份出厂地址，**贴了 key** 就是一条真配置 —— 折成档案，密钥跟着走。
+    #[test]
+    fn the_shipped_endpoint_with_a_key_becomes_a_vendor() {
+        let got = load(
+            r#"{"translation":{"openai":{"base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_key":"sk-1"}}}"#,
+        );
+        assert_eq!(got.vendors.len(), 1);
+        assert_eq!(got.vendors[0].api_key, "sk-1");
+        assert_eq!(got.translation.openai.vendor, got.vendors[0].id);
     }
 
     /// 老配置里只有 `target_lang`：缺的两节各自取自己的默认值，引擎落到免 key 档。
@@ -2229,11 +2410,12 @@ mod tests {
     fn a_first_phase_config_gains_the_engine_defaults() {
         let got = load(r#"{"translation":{"target_lang":"en"}}"#);
         assert_eq!(got.translation.engine, TranslationEngine::Google);
+        assert!(got.translation.openai.vendor.is_empty());
         assert_eq!(
-            got.translation.openai.base_url,
-            crate::infra::config::OpenAi::default().base_url
+            got.translation.openai.model,
+            crate::infra::config::OpenAi::default().model
         );
-        assert!(got.translation.openai.api_key.is_empty());
+        assert!(got.vendors.is_empty());
         assert!(got.translation.deepl.api_key.is_empty());
     }
 
@@ -2256,13 +2438,72 @@ mod tests {
         assert_eq!(got.translation.deepl.api_key, "k");
     }
 
-    /// 清空地址 / 模型**不能**在归一里被默认值填回去：设置页边打边存，
+    /// 清空模型**不能**在归一里被默认值填回去：设置页边打边存，
     /// 填回去等于读者删不空这一格。空值该不该有默认由引擎发请求前判。
     #[test]
     fn clearing_openai_fields_keeps_them_empty() {
-        let got = load(r#"{"translation":{"openai":{"base_url":"","model":""}}}"#);
-        assert!(got.translation.openai.base_url.is_empty());
+        let got = load(r#"{"translation":{"openai":{"vendor":"","model":""}}}"#);
+        assert!(got.translation.openai.vendor.is_empty());
         assert!(got.translation.openai.model.is_empty());
+    }
+
+    /// 供应商档案的 JSON 往返：新格式的三节（vendors / openai.vendor / ai.vendor）
+    /// 各自读得回来，空白在归一里去掉。
+    #[test]
+    fn vendors_and_their_references_round_trip() {
+        let got = load(
+            r#"{
+                "vendors":[
+                    {"id":" v1 ","name":" DeepSeek ","base_url":" https://api.deepseek.com/v1 ","api_key":" sk-1 "},
+                    {"id":"v2","name":"自建网关","base_url":"https://gw.local/v1","api_key":""}
+                ],
+                "translation":{"engine":"openai","openai":{"vendor":" v1 ","model":" deepseek-chat "}},
+                "ai":{"enabled":true,"vendor":" v2 ","model":" big-model "}
+            }"#,
+        );
+        assert_eq!(got.vendors.len(), 2);
+        assert_eq!(got.vendors[0].id, "v1");
+        assert_eq!(got.vendors[0].name, "DeepSeek");
+        assert_eq!(got.vendors[0].base_url, "https://api.deepseek.com/v1");
+        assert_eq!(got.translation.openai.vendor, "v1");
+        assert_eq!(got.ai.vendor, "v2", "AI 可以指向与翻译不同的一条");
+        assert!(got.vendors[1].api_key.is_empty(), "空 key 合法（自建服务）");
+    }
+
+    /// 引用悬空**回退第一条**而不是报错：档案被删后引用它的功能自动落到列表头上。
+    /// 空表回 `None` —— 那是「还没添加过」，归「这一格不存在」的判据管。
+    #[test]
+    fn a_dangling_vendor_reference_falls_back_to_the_first() {
+        use crate::infra::config::{Vendor, resolve_vendor};
+        let vendors = vec![
+            Vendor {
+                id: "v1".into(),
+                name: "第一".into(),
+                base_url: "https://a.test/v1".into(),
+                api_key: String::new(),
+            },
+            Vendor {
+                id: "v2".into(),
+                name: "第二".into(),
+                base_url: "https://b.test/v1".into(),
+                api_key: String::new(),
+            },
+        ];
+        assert_eq!(resolve_vendor(&vendors, "v2").unwrap().id, "v2", "命中照常");
+        assert_eq!(
+            resolve_vendor(&vendors, "gone").unwrap().id,
+            "v1",
+            "悬空回退第一条"
+        );
+        assert_eq!(
+            resolve_vendor(&vendors, "").unwrap().id,
+            "v1",
+            "空串也走回退"
+        );
+        assert!(
+            resolve_vendor(&[], "v1").is_none(),
+            "空表是「还没配置」，没有可回退的东西"
+        );
     }
 
     /// 配置文件里住着 API Key：默认 umask 下新建文件是 0644，落盘必须收到 0600。

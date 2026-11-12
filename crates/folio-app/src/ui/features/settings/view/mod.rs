@@ -46,7 +46,9 @@ pub(in crate::ui::features::settings) use crate::ui::services::l10n::{tf, tr};
 
 // 那颗「打开所在文件夹」的按钮要用的几样（页面文件通过 `super::` 拿到它本身）。
 use gpui_kit::component::button::Button;
-use gpui_kit::{ElementId, IntoElement};
+use gpui_kit::component::input::{Input, InputContentType, InputEvent, InputState};
+use gpui_kit::component::setting::RenderOptions;
+use gpui_kit::{AnyElement, AppContext as _, ElementId, IntoElement, Window};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -88,6 +90,59 @@ pub(in crate::ui::features::settings) fn open_folder_button(
                 tracing::warn!("设置：没有应用接手打开 {path:?}");
             }
         })
+}
+
+/// 密钥行的输入框：遮住显示、带一颗眼睛。组件的 `SettingField` 没有密码档
+/// （`translation.rs` 的旧注释为证），所以手建一份 —— 形状与组件自己的
+/// `StringField` 同一条（keyed state、输入即写、外部改动拉回显示），只多遮罩。
+/// 遮罩只在显示层：值照常进配置、照常可编辑、照常落 0600 的 config.json。
+fn secret_input(
+    get: Rc<dyn Fn(&App) -> SharedString>,
+    set: spec::Setter<SharedString>,
+    options: &RenderOptions,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let value = get(cx);
+    let key = SharedString::from(format!(
+        "settings-secret-{}-{}-{}",
+        options.page_ix(),
+        options.group_ix(),
+        options.item_ix()
+    ));
+    let state = window.use_keyed_state(key, cx, {
+        let value = value.clone();
+        let set = set.clone();
+        move |window, cx| {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(value)
+                    .masked(true)
+            });
+            let set = set.clone();
+            let watch = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value();
+                    set(value, cx);
+                }
+            });
+            (input, watch)
+        }
+    });
+    // 配置在他处被改（未来的同步）时把显示拉回来 —— 与组件 StringField 同一条。
+    state.update(cx, |(input, _), cx| {
+        if input.read(cx).value() != value {
+            input.update(cx, |input, cx| {
+                input.set_value(value.clone(), window, cx);
+            });
+        }
+    });
+    let (input, _) = state.read(cx);
+    Input::new(input)
+        .mask_toggle()
+        .content_type(InputContentType::Password)
+        .w_64()
+        .into_any_element()
 }
 
 /// 各设置页。变体顺序就是 `Settings` 侧栏里从上到下的顺序，
@@ -300,12 +355,26 @@ fn setting_item(row: &spec::Row) -> SettingItem {
                 }),
             )
         }
-        RowKind::Text { get, set } => {
+        RowKind::Text {
+            get, set, secret, ..
+        } => {
             let (get, set) = (get.clone(), set.clone());
-            SettingItem::new(
-                row.title.clone(),
-                SettingField::input(move |cx| get(cx), move |val, cx| set(val, cx)),
-            )
+            if !*secret {
+                SettingItem::new(
+                    row.title.clone(),
+                    SettingField::input(move |cx| get(cx), move |val, cx| set(val, cx)),
+                )
+            } else {
+                // 密钥行：桌面那套 `SettingField` 没有密码档，手建一份 —— 形状与组件自己的
+                // `StringField` 同一条（keyed state + 订阅写回），只多遮罩与眼睛钮。
+                // 遮罩只在显示层：值照常进配置、照常可编辑。
+                SettingItem::new(
+                    row.title.clone(),
+                    SettingField::render(move |options, window, cx| {
+                        secret_input(get.clone(), set.clone(), options, window, cx)
+                    }),
+                )
+            }
         }
         RowKind::TextAction { get, set, .. } => {
             // 桌面端没有把动作钮塞进输入框那一行；会员页在桌面走的是原来的
@@ -365,7 +434,7 @@ mod tests {
 
     use super::*;
     use folio_core::Config;
-    use gpui_kit::{AppContext as _, TestAppContext};
+    use gpui_kit::TestAppContext;
 
     /// 「关于」那一页要一张「更新日志」卡片的句柄：测试里不挂窗，只组规格，所以就地建一份
     /// 拿着当参数（每屏自己那一份由各视图在构造时建）。
@@ -563,12 +632,13 @@ mod tests {
         });
     }
 
-    /// 「AI」那一屏固定两组：AI 自己的两格（要不要 / 问哪只模型）＋ 与翻译共用的端点三格。
+    /// 「AI」那一屏固定三组：问答（要不要 / 问哪条 / 用哪只模型）、连接（探针）、
+    /// 供应商（档案管理）。
     ///
-    /// 组数与标题都钉住：端点那一组少了，读者就没有地方填地址与密钥，而划词卡片上那一格
-    /// 是按「端点填全了」才出现的 —— 缺落点的症状是「开关拨了却没入口」。
+    /// 组数与标题都钉住：供应商那一组少了，读者就没有地方填地址与密钥，而划词卡片上
+    /// 那一格是按「供应商与模型解析得出来」才出现的 —— 缺落点的症状是「开关拨了却没入口」。
     #[gpui_kit::test]
-    fn the_ai_page_carries_the_switch_and_the_shared_endpoint(cx: &mut TestAppContext) {
+    fn the_ai_page_carries_the_switch_and_the_vendor_registry(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(|cx| {
             ConfigHolder::install(Config::default(), cx);
@@ -583,15 +653,17 @@ mod tests {
                     .iter()
                     .map(|group| group.title.clone())
                     .collect::<Vec<_>>(),
-                vec![tr(cx, "group.ai"), tr(cx, "group.ai_endpoint")],
-                "两组：AI 自己的一组与那份共用端点"
+                vec![
+                    tr(cx, "group.ai"),
+                    tr(cx, "group.ai_connect"),
+                    tr(cx, "group.ai_vendors"),
+                ],
+                "三组：问答 / 连接 / 供应商注册表"
             );
-            assert_eq!(page.groups[0].rows.len(), 2, "开关 + AI 用的模型");
-            assert_eq!(page.groups[1].rows.len(), 3, "地址 / 模型 / Key");
-
-            // 端点那一组与翻译引擎无关：翻译用 Google（免 key）时 AI 也要能填自己的端点。
-            let again = spec_pages(cx, &notes);
-            assert_eq!(again[index].groups.len(), 2);
+            assert_eq!(page.groups[0].rows.len(), 3, "开关 / 供应商 / 模型");
+            // 注册表空着：推荐模型那行不摆（没有可挑的东西），编辑器只有
+            // 「编辑哪一条」与动作行 —— 三格写不进任何地方，先新建。
+            assert_eq!(page.groups[2].rows.len(), 2, "编辑哪一条 / ＋新建与删除");
 
             // 页数与导航对得上：这一屏插在翻译之后，深链靠 index 现算。
             assert!(SettingsPage::Ai.index() > SettingsPage::Translation.index());
