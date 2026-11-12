@@ -28,16 +28,11 @@
 //!
 //! ## 一格三个把手：`−` 滑条 `+`
 //!
-//! 数值那几格是「标题 + 读数」一行，下面一行 `−` 一颗钮、缩短居中的滑条、`+` 一颗钮。
-//! 通栏滑条从前是唯一的入口，于是两个端点都顶在屏幕边上，拇指要够到边框才调得到最小档；
-//! 而滑块本身只有那么大，精确停在一档全靠运气。两颗钮借完整设置屏那族 `−`/`+` 同一形态
-//! （`ghost` + `large` + 图标，见 `settings::view::compact` 的 `RowKind::Number`），
-//! 滑条留着负责粗跳。
-//!
-//! 按钮走的是**粗档**（`chrome::SliderSteps::nudge`），比滑条自己的落档粗一个量级：
-//! 按细档走满程要划 56–200 下，那不该是按钮的活。两条路都只改同一份 `SliderState`
-//! 与同一条写入口 [`Knob::apply`] —— 拖动与按钮各留一份落点迟早会飘成「按 + 改的是行距」
-//! 那种形状。
+//! 数值那几格是**胶囊滑条**（`ui::components::pill_slider`）：语义刻度画在胶囊两端
+//! （两颗太阳、大 A 与小 A、大 / 小的边距），当前值写在圆钮里 —— 交互（点击跳值、
+//! 鼠标拖、触摸拖）复用 gpui-base 的无样式滑条原语，落点仍是同一份 `SliderState`
+//! 与同一条写入口 [`Knob::apply`]，不存在第二份会飘的落点。落档粗细取
+//! [`Knob::steps`] 的细档（`slide`）：一次拖一格，端点由配置的上下限夹住。
 //!
 //! ## 量程与步长不在这里抄第二份
 //!
@@ -50,11 +45,12 @@
 
 use std::rc::Rc;
 
+use crate::ui::components::{PillMark, PillSlider};
 use gpui_kit::Anchor;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
@@ -184,6 +180,51 @@ impl Knob {
             Self::MarginY => "margin-y",
             Self::TurnDuration => "turn-duration",
             Self::AutoAdvance => "auto-advance",
+        }
+    }
+
+    /// 胶囊两端的语义标注（见 `ui::components::pill_slider`）。方向一律是
+    /// 「左端 = 小的那头」：亮度从暗太阳到大太阳、字号从 A 到 A、边距从大到小
+    /// （那一格数值大 = 页边留白多，所以左「大」右「小」，与设计稿同形）。
+    fn marks(self, cx: &App) -> (PillMark, PillMark) {
+        let text = |min: &'static str, max: &'static str| {
+            (
+                PillMark::Text {
+                    text: tr(cx, min),
+                    size: 14.0,
+                },
+                PillMark::Text {
+                    text: tr(cx, max),
+                    size: 14.0,
+                },
+            )
+        };
+        match self {
+            Self::Brightness => (
+                PillMark::Icon(IconName::SunDim),
+                PillMark::Icon(IconName::SunMedium),
+            ),
+            // 字号两端是同一个 A，靠字号说话；这句不进文案表。
+            Self::FontSize => (
+                PillMark::Text {
+                    text: "A".into(),
+                    size: 11.0,
+                },
+                PillMark::Text {
+                    text: "A".into(),
+                    size: 16.0,
+                },
+            ),
+            Self::LineHeight => text("reader.pill.line_min", "reader.pill.line_max"),
+            Self::LetterSpacing => text("reader.pill.spacing_min", "reader.pill.spacing_max"),
+            Self::ParagraphGap => text("reader.pill.gap_min", "reader.pill.gap_max"),
+            Self::Indent => text("reader.pill.indent_min", "reader.pill.indent_max"),
+            Self::MaxMeasure => text("reader.pill.measure_min", "reader.pill.measure_max"),
+            Self::MarginX | Self::MarginY => {
+                text("reader.pill.margin_min", "reader.pill.margin_max")
+            }
+            Self::TurnDuration => text("reader.pill.turn_min", "reader.pill.turn_max"),
+            Self::AutoAdvance => text("reader.pill.auto_min", "reader.pill.auto_max"),
         }
     }
 
@@ -392,27 +433,6 @@ impl ReadingSheet {
         &self.knobs[knob.index()]
     }
 
-    /// 一颗 `−` / `+` 按下去走的那一档（粗档，见 [`Knob::steps`]）。
-    ///
-    /// 先加粗档、再落回滑条自己的细格、最后夹进区间：顺序反了会在端点上留下一个格外的数
-    /// —— 亮度推到顶再加半档是 1.05，落盘时被配置夹回 1.0，而屏幕上还念着 1.05。
-    ///
-    /// **两条都要写**。`SliderState::set_value` 只 `notify`、**不发** `SliderEvent::Change`
-    /// （gpui-base 的 `slider.rs` 里只有拖动那一条路 `cx.emit`）。少写配置那一笔就是
-    /// 「钮按下去滑块动了、书里的字没变」；只写配置不写滑块是反过来的坏法：值最终对，
-    /// 但按钮那一下看着没反应，下一帧 `sync` 还会把滑块拽回旧值。
-    fn nudge(&mut self, knob: Knob, sign: f32, window: &mut Window, cx: &mut Context<Self>) {
-        let steps = knob.steps();
-        let (min, max) = knob.range();
-        let at = self.knob(knob).read(cx).value().end();
-        let next = ((at + sign * steps.nudge) / steps.slide).round() * steps.slide;
-        let next = next.clamp(min, max);
-        let state = self.knob(knob).clone();
-        state.update(cx, |state, cx| state.set_value(next, window, cx));
-        knob.apply(next, cx);
-        cx.notify();
-    }
-
     /// 卡片开着吗。阅读页拿它决定「身上压着东西」要不要报给会话（那一击的语义是收这一层，
     /// 不是选字），也拿它决定底栏那一格的选中态。
     pub(in crate::ui::features::reader) fn is_open(&self, cx: &App) -> bool {
@@ -472,8 +492,8 @@ impl ReadingSheet {
     /// `RowKind::Number`：`ghost` + `large` + 图标），钮走的是**粗档**，满程按十几下到
     /// 几十下算，细跳仍然交给滑条。
     ///
-    /// 标签这一份文本三处要用（行首、两颗钮的可读名、滑条自己的可读名），所以先把三份
-    /// 名字取好再搭元素。
+    /// 标签这一份文本三处要用（行首、两端的可读名、胶囊自己的可读名），所以先把三份
+    /// 名字取好再搭元素。当前值写在圆钮里（见 [`PillSlider`]），不再单独占一格。
     fn stepper_row(
         &self,
         knob: Knob,
@@ -481,71 +501,22 @@ impl ReadingSheet {
         value: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (min, max) = knob.range();
-        let at = self.knob(knob).read(cx).value().end();
         let state = self.knob(knob).clone();
-        // 两颗钮各要一个拥有者：点击闭包是 `'static` 的，同一份句柄不能移动两次
-        //（与 `settings::view::compact` 那族 `−` / `+` 同一写法）。
-        let down_sheet = cx.entity();
-        let up_sheet = cx.entity();
-        let down = tf(cx, "reader.nudge_down", &[("field", &label)]);
-        let up = tf(cx, "reader.nudge_up", &[("field", &label)]);
+        let (start, end) = knob.marks(cx);
         let track_label = label.clone();
         v_flex()
             .w_full()
             .gap_1()
+            .child(div().text_base().child(label))
             .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .child(div().text_base().child(label.clone()))
-                    .child(
-                        div()
-                            .text_base()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(value),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new(format!("{}-minus", knob.key()))
-                            .ghost()
-                            .large()
-                            // 推到端点就是禁用，而不是按下无反应：这一格到底到边了没有，
-                            // 读者要从控件本身读出来。
-                            .disabled(at <= min + 0.001)
-                            .icon(IconName::Minus)
-                            .accessibility_label(down)
-                            .on_click(move |_, window, app| {
-                                down_sheet.update(app, |this, cx| {
-                                    this.nudge(knob, -1.0, window, cx);
-                                });
-                            }),
-                    )
-                    .child(
-                        Slider::new(&state)
-                            .flex_1()
-                            .min_w_0()
-                            .accessibility_label(track_label),
-                    )
-                    .child(
-                        Button::new(format!("{}-plus", knob.key()))
-                            .ghost()
-                            .large()
-                            .disabled(at >= max - 0.001)
-                            .icon(IconName::Plus)
-                            .accessibility_label(up)
-                            .on_click(move |_, window, app| {
-                                up_sheet.update(app, |this, cx| {
-                                    this.nudge(knob, 1.0, window, cx);
-                                });
-                            }),
-                    ),
+                PillSlider::new(
+                    format!("pill-slider-{}", knob.key()),
+                    state,
+                    value,
+                    start,
+                    end,
+                )
+                .accessibility_label(track_label),
             )
             .into_any_element()
     }
@@ -685,17 +656,20 @@ impl ReadingSheet {
                             .child(tr(cx, "reading_theme.opacity")),
                     )
                     .child(
-                        Slider::new(&self.bg_opacity)
-                            .flex_1()
-                            .min_w_0()
-                            .accessibility_label(tr(cx, "reading_theme.opacity")),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{}%", (opacity * 100.0).round() as i64)),
+                        PillSlider::new(
+                            "reading-theme-opacity",
+                            self.bg_opacity.clone(),
+                            format!("{}%", (opacity * 100.0).round() as i64),
+                            PillMark::Text {
+                                text: tr(cx, "reader.pill.opacity_min"),
+                                size: 14.0,
+                            },
+                            PillMark::Text {
+                                text: tr(cx, "reader.pill.opacity_max"),
+                                size: 14.0,
+                            },
+                        )
+                        .accessibility_label(tr(cx, "reading_theme.opacity")),
                     ),
             )
             .children(
@@ -1601,7 +1575,7 @@ mod tests {
                         .try_find(id)
                         .map(|snap| f32::from(snap.bounds().origin.y))
                 };
-                (y("brightness-minus"), y("reader-reading-mode"))
+                (y("pill-slider-brightness"), y("reader-reading-mode"))
             })
             .expect("窗口应能渲染");
         let brightness_y = brightness_y.expect("亮度那一格该在外观组里");
@@ -1679,80 +1653,6 @@ mod tests {
                 "挪行距那一条不该把段距也带过去"
             );
         });
-    }
-
-    /// `−` / `+` 那两颗钮：滑条、配置、以及滑条自己的细档格，三样必须同时对。
-    ///
-    /// 三条红路各是一条：`SliderState::set_value` **不发** `SliderEvent::Change`（只有拖动
-    /// 发），少了 [`Knob::apply`] 那一笔就是「滑块动了而书里的字没变」；反过来只写配置不写
-    /// 滑块，`sync` 下一帧把滑块拽回旧值，钮按下去看着没反应。第三件是格子对齐 ——
-    /// `nudge` 是粗档，按完必须是 `slide` 的整数倍，不然随后一次拖动会先「跳」一下才回格。
-    ///
-    /// 先挂一本书：这一屏写的是**这一本的差量**（`edit_book_reader`），没挂着时那一格只留
-    /// 一句 warn 就返回，于是滑块被 `sync` 拽回原值，看上去像按钮没使（与浅深那一格同一条门径）。
-    /// 顺序也有关：`open_sheet` 里那次 `ConfigHolder::install` 会换掉整份配置，书要在那之后挂。
-    #[gpui_kit::test]
-    fn a_nudge_moves_the_thumb_and_the_config_together(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let (sheet, handle) = open_sheet(cx);
-        cx.update(|cx| ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default())));
-        let steps = Knob::FontSize.steps();
-        let before = cx.update(|cx| ConfigHolder::reader(cx));
-        for _ in 0..10 {
-            cx.update_window(handle, |_, window, cx| {
-                sheet.update(cx, |sheet, cx| {
-                    sheet.nudge(Knob::FontSize, 1.0, window, cx);
-                });
-            })
-            .expect("这一屏该画得出来");
-        }
-        let wanted = before.font_size + 10.0 * steps.nudge;
-        let shown = sheet.read_with(cx, |sheet, cx| thumb(sheet.knob(Knob::FontSize), cx));
-        let stored = cx.update(|cx| ConfigHolder::reader(cx));
-        assert_eq!(shown, wanted, "连点十次该走十个粗档（滑块上的读数）");
-        assert_eq!(
-            stored.font_size, wanted,
-            "按出来的数必须落进配置，否则字不会变"
-        );
-        assert_eq!(
-            stored.line_height, before.line_height,
-            "按字号的 + 不该把行距一起带走"
-        );
-        let grid = shown / steps.slide;
-        assert!(
-            (grid - grid.round()).abs() < 1e-3,
-            "粗档按完必须落在滑条自己的细档格上，实测量到 {shown}"
-        );
-    }
-
-    /// 往一个方向按到底：夹在端点就停住，不许写出量程外的数。
-    ///
-    /// 禁用态在元素上（`at <= min` / `at >= max` 那两把闸），这里钉的是它依据的那两个数：
-    /// 端点之外没有值，`sync` 于是也不会反过来把滑块拽一下。
-    #[gpui_kit::test]
-    fn nudging_past_the_end_stops_at_the_end(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let (sheet, handle) = open_sheet(cx);
-        cx.update(|cx| ConfigHolder::set_book(cx, Some(folio_core::BookSettings::default())));
-        let max = Knob::MarginX.range().1;
-        for _ in 0..60 {
-            cx.update_window(handle, |_, window, cx| {
-                sheet.update(cx, |sheet, cx| {
-                    sheet.nudge(Knob::MarginX, 1.0, window, cx);
-                });
-            })
-            .expect("这一屏该画得出来");
-        }
-        let shown = sheet.read_with(cx, |sheet, cx| thumb(sheet.knob(Knob::MarginX), cx));
-        assert_eq!(
-            shown, max,
-            "按过头要停在端点，而不是滑条上一个存不进配置的位置"
-        );
-        assert_eq!(
-            cx.update(|cx| ConfigHolder::reader(cx)).margin_x,
-            max,
-            "端点那一格写进配置的也要是同一个数"
-        );
     }
 
     /// 阅读设置里那一格浅深写**全局默认**：软件外观 `mode` 不许动，本书差量也不许收它。

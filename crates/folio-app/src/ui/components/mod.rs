@@ -10,6 +10,7 @@ mod access_question;
 mod bottom_sheet;
 mod font_picker;
 mod gate_banner;
+mod pill_slider;
 mod primitives;
 mod reading_theme_picker;
 mod scroll_guard;
@@ -22,6 +23,7 @@ pub use bottom_sheet::{
 };
 pub use font_picker::{FontFamilySetter, FontPicker};
 pub use gate_banner::gate_banner;
+pub use pill_slider::{PillMark, PillSlider};
 pub use primitives::{empty_state, muted_label};
 pub use reading_theme_picker::ReadingThemePicker;
 pub use scroll_guard::{ScrollShields, scroll_guard};
