@@ -1322,19 +1322,35 @@ impl CompactSettings {
                             .child(value.clone()),
                     ),
             ),
-            RowKind::Custom { title, render, .. } => {
+            RowKind::Custom {
+                title,
+                vertical,
+                render,
+            } => {
                 let content = render(window, cx);
                 let title = title.clone();
                 control_cell(
                     id("custom-row"),
-                    match title {
-                        Some(title) => v_flex()
+                    match (title, *vertical) {
+                        // 标题在上、内容整条铺开：主题网格这类内容自己有版式的格子。
+                        (Some(title), true) => v_flex()
                             .w_full()
                             .gap_1()
                             .child(div().text_base().child(title))
                             .child(content)
                             .into_any_element(),
-                        None => content,
+                        // 默认档与桌面同一条：标题在左、控件在右，同一行里对齐。
+                        // 以前这里不看 `vertical`，一律把标题摞在内容上面 —— 于是「更新」
+                        // 卡里的三行成了标题一行、按钮一行，右侧那颗还居中，读起来像
+                        // 三块各自为政的碎片。
+                        (Some(title), false) => h_flex()
+                            .w_full()
+                            .items_center()
+                            .gap_3()
+                            .child(div().text_base().flex_shrink_0().child(title))
+                            .child(div().flex_1().min_w_0().child(content))
+                            .into_any_element(),
+                        (None, _) => content,
                     },
                 )
             }
@@ -1737,10 +1753,68 @@ mod tests {
         .expect("关一条 + 加一条之后，这一屏该画得出一帧");
     }
 
-    /// 手机那一档的外观页也要把主题画成卡，而且走的是**两列**那条分支。
-    /// 找的是卡片自己的元素 id：桌面与手机共用同一份规格，分叉只发生在渲染时。
+    /// 「关于」那张更新卡：三颗按钮都贴右，而每一行只有一行高 —— 标题与控件同一条横线。
+    ///
+    /// 这条钉的是版式而不是「画得出来」：`RowKind::Custom` 以前不看 `vertical`，
+    /// 一律把标题摞在内容上面，于是屏幕上是「更新」一行、「检查更新」一行，
+    /// 而「查看」还居中 —— 三行各说各的。默认档该与桌面一致：标题在左、控件在右。
+    ///
+    /// 行容器本身不登记无障碍（`try_find` 查不到），所以这里从按钮那一侧量两件事：
+    /// 右缘离窗口右缘只剩卡片与单元格的两道 16 内缩，以及相邻两行的间距不超过一行
+    /// 44 的高 —— 一旦又摞成两行，间距会立刻涨到六十多。
     #[gpui_kit::test]
-    fn the_appearance_screen_draws_theme_cards(cx: &mut TestAppContext) {
+    fn the_about_actions_sit_on_the_right_of_their_titles(cx: &mut TestAppContext) {
+        const VIEWPORT: f32 = 390.0;
+        // 卡片 px_4（16）+ 1 边框 + 单元格 px_4（16），按钮右缘离窗口右缘就是这三样。
+        const RIGHT_INSET: f32 = 33.0;
+
+        cx.update(gpui_kit::init);
+        let mut built = None;
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(VIEWPORT), px(844.)), |window, cx| {
+                ConfigHolder::install(Config::default(), cx);
+                let view = cx.new(CompactSettings::new);
+                built = Some(view.clone());
+                Root::new(view, window, cx)
+            })
+            .into();
+        let view = built.expect("这一屏该建起来");
+        cx.update(|app| {
+            view.update(app, |this, cx| this.open(SettingsPage::About.index(), cx));
+        });
+
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let buttons: Vec<_> = ["about-check-update", "about-show-notes", "about-send-logs"]
+                .into_iter()
+                .map(|id| {
+                    let bounds = window.try_find(id).expect("这一行的按钮该在").bounds();
+                    assert!(
+                        (f32::from(bounds.right()) - (VIEWPORT - RIGHT_INSET)).abs() < 1.0,
+                        "{id} 没贴右：按钮右缘 {:?}，窗口 {VIEWPORT} 宽",
+                        bounds.right()
+                    );
+                    assert!(
+                        f32::from(bounds.center().x) > VIEWPORT / 2.0,
+                        "{id} 不在右半边：中线 {:?}",
+                        bounds.center().x
+                    );
+                    bounds
+                })
+                .collect();
+            for pair in buttons.windows(2) {
+                let gap = f32::from(pair[1].top()) - f32::from(pair[0].top());
+                assert!(gap < 50.0, "相邻两行的按钮相隔 {gap}，标题又摞回内容上面了");
+            }
+        })
+        .expect("关于页该画得出一帧");
+    }
+
+    /// 手机那一档的外观页：主题网格**默认收起**——树里是两条折叠头
+    /// （`theme-fold-0` 浅 / `theme-fold-1` 深），卡片本身在折叠里不进元素树；
+    /// 点折叠头的交互走真机。桌面与手机共用同一份规格，分叉只发生在渲染时。
+    #[gpui_kit::test]
+    fn the_appearance_screen_folds_theme_grids_by_default(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(crate::ui::foundation::theme::register_builtin_themes);
         let mut built = None;
@@ -1761,13 +1835,19 @@ mod tests {
 
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
+            for side in 0..2 {
+                assert!(
+                    window.try_find(format!("theme-fold-{side}")).is_some(),
+                    "手机外观页找不到主题折叠头 {side}"
+                );
+            }
             for name in [
                 crate::ui::foundation::theme::DEFAULT_LIGHT,
                 crate::ui::foundation::theme::DEFAULT_DARK,
             ] {
                 assert!(
-                    window.try_find(format!("theme-card-{name}")).is_some(),
-                    "手机外观页找不到主题卡 {name}"
+                    window.try_find(format!("theme-card-{name}")).is_none(),
+                    "主题卡 {name} 不该在树里：网格默认收起"
                 );
             }
         })

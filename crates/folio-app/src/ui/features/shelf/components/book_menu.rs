@@ -51,7 +51,7 @@ pub(in crate::ui::features::shelf) struct Labels {
     /// 「分享这本书」那一条。摆不摆由 [`crate::ui::platform::HAS_SHARE_SHEET`] 决定，
     /// 但文案两端都取一次：取与摆分在两处，判据就只有一条。
     share: SharedString,
-    /// 「标记」：开那一张居中的标记浮层（固定四档，多选）。
+    /// 「标记」：开那一张居中的标记浮层（固定三档，单选手动覆盖）。
     tag: SharedString,
     /// 「清除阅读记录」：清进度、已读章与时长，批注不动。破坏性动作，垫在删除上面。
     clear_history: SharedString,

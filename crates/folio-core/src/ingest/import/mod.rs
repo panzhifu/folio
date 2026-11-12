@@ -82,7 +82,11 @@ mod pipeline;
 mod sources;
 
 pub use maintenance::BackfillReport;
-pub use maintenance::backfill_copies;
+pub use maintenance::CoverBackfillReport;
+pub use maintenance::{COVER_BACKFILL_VERSION, backfill_copies, backfill_covers};
+// 测试要能抹掉记号来验「下一版升级再跑一趟」；生产编译里这一行不存在。
+#[cfg(test)]
+use maintenance::COVER_BACKFILL_KEY;
 pub use maintenance::sweep_orphan_copies;
 pub use maintenance::sweep_partials;
 pub use pipeline::import_from;

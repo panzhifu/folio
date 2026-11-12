@@ -11,8 +11,9 @@
 //! 占掉一半），窄档样张更小且无头条，桌面与平板同档样张带头条 —— 平板不该被
 //! 当成手机。
 //!
-//! 主题网格两侧各有一条**可折叠**的头：浅深钉在哪侧，哪侧的网格摊开、另一侧收起
-//! （水墨穿浅色主题，照浅侧算）；手动折过以后以手动为准。收起的网格不进元素树，
+//! 主题网格的**可见性由浅深档直接驱动**：钉浅色只出现浅侧、钉深色只出现深侧，
+//! 「跟随系统」两侧都出现，水墨整组让位——不出现的那侧连标题都不进元素树。
+//! 出现的那侧**默认收起**（折叠图标在标题左侧，纯手动，点开才见网格）。
 //! 一屏装得下更多内容。
 //!
 //! 界面语言从「关于」搬到这一页（2026-11-05）：它是**要改的东西**，不是「关于这个应用」
@@ -45,16 +46,15 @@ use super::super::*;
 pub(in crate::ui::features::settings) fn appearance_page(cx: &App) -> Page {
     // 顺序照改外观的目光走：浅深与主题是这一页的正事，语言一年也碰不上一回，
     // 压到最后 —— 别让它占着第一格。
-    page(
-        tr(cx, "page.appearance"),
-        IconName::Palette,
-        vec![
-            mode_group(cx),
-            themes_group(cx),
-            reading_theme_group(cx),
-            language_group(cx),
-        ],
-    )
+    // 水墨档下整组配色主题不进页（[`theme_side_shown`] 的立场延伸到组这一层）：
+    // 水墨没有颜色可选，「主题消失」比摆一个空组或一句解释都诚实。
+    let mut groups = vec![mode_group(cx)];
+    if ConfigHolder::default_appearance(cx).mode != Mode::Ink {
+        groups.push(themes_group(cx));
+    }
+    groups.push(reading_theme_group(cx));
+    groups.push(language_group(cx));
+    page(tr(cx, "page.appearance"), IconName::Palette, groups)
 }
 
 /// 「界面语言」这一格的搜索词：通用几个，加上**每一门在选的语言**的本族名与标签。
@@ -292,19 +292,84 @@ fn mode_card(
 /// 固定色让这一行在任何主题下读起来都一样。裸色值在这里放行是 design guides 里
 /// 「颜色本身是数据」的那条例外 —— 预览画的就是那几格固定的明暗。
 fn mode_preview(mode: Mode, selected: bool, compact: bool) -> AnyElement {
-    // 窄卡档（一排四列的手机行）样张矮一截、不带头条（纯书页）：预览在 ~70px 宽的
-    // 卡里只说「这一侧明还是暗」，再大就把一行顶成两屏；桌面档高一些、带一条头条
-    // 小横条，让它读作「应用里的一页」。
-    let (frame_h, page_w, page_h, page_bar) = if compact {
-        (px(64.), 36., 52., false)
-    } else {
-        (px(120.), 72., 104., true)
-    };
-    let badge = if compact { 12. } else { 16. };
-    // 「跟随系统」的半幅页随档缩：窄卡那格两半各剩 ~30px，页样张再按全幅的比画
-    // 就糊成一团。
-    let (half_w, half_h) = if compact { (24., 36.) } else { (52., 80.) };
-    // 壁纸框：整幅预览的底，样张居中。
+    // 手机档（一排四列）：**整格铺纸**，没有壁纸框 —— 框里套页是盒中盒，读者不
+    // 喜欢（2026-11-12）：预览就是那一页纸本身，纸/墨/强调线说「这一侧明还是暗」。
+    // 桌面档保留壁纸框 + 竖样张（带头条），那里空间够，框读作「应用里的一页」。
+    if compact {
+        let page = |pal: PreviewPalette| {
+            div()
+                .relative()
+                .w_full()
+                .h(px(72.))
+                .overflow_hidden()
+                .rounded(px(6.))
+                .bg(pal.window)
+                .p(px(8.))
+                .child(
+                    v_flex()
+                        .gap(px(4.))
+                        .child(bar(pal.accent, 40.))
+                        .child(bar(pal.bar.opacity(0.30), 60.))
+                        .child(bar(pal.bar.opacity(0.18), 48.))
+                        .child(bar(pal.bar.opacity(0.12), 56.)),
+                )
+        };
+        let badge = 12.;
+        return match mode {
+            Mode::Light => page(light_preview())
+                .when(selected, |this| {
+                    this.child(mode_check_badge(light_preview(), badge))
+                })
+                .into_any_element(),
+            Mode::Dark => page(dark_preview())
+                .when(selected, |this| {
+                    this.child(mode_check_badge(dark_preview(), badge))
+                })
+                .into_any_element(),
+            Mode::Ink => {
+                let pal = ink_preview();
+                page(pal)
+                    .when(selected, |this| this.child(mode_check_badge(pal, badge)))
+                    .into_any_element()
+            }
+            // 不用文案解释在跟谁：左半浅纸右半深纸，一眼即知（OpenLogi 的 split
+            // 同款思路）。勾压在右上角，底色取浅侧的强调色 —— 两半的强调色本就是
+            // 同一个蓝。
+            Mode::System => {
+                let half = |pal: PreviewPalette| {
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .overflow_hidden()
+                        .bg(pal.window)
+                        .p(px(6.))
+                        .child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(bar(pal.accent, 20.))
+                                .child(bar(pal.bar.opacity(0.30), 28.))
+                                .child(bar(pal.bar.opacity(0.18), 22.)),
+                        )
+                };
+                h_flex()
+                    .w_full()
+                    .h(px(72.))
+                    .overflow_hidden()
+                    .rounded(px(6.))
+                    .relative()
+                    .child(half(light_preview()))
+                    .child(half(dark_preview()))
+                    .when(selected, |this| {
+                        this.child(mode_check_badge(light_preview(), badge))
+                    })
+                    .into_any_element()
+            }
+        };
+    }
+
+    // 桌面档：壁纸框 + 竖样张（带头条小横条，读作「应用里的一页」）。
+    let (frame_h, page_w, page_h, page_bar) = (px(120.), 72., 104., true);
+    let badge = 16.;
     let frame = |wallpaper: Hsla| {
         div()
             .relative()
@@ -316,18 +381,6 @@ fn mode_preview(mode: Mode, selected: bool, compact: bool) -> AnyElement {
             .flex()
             .items_center()
             .justify_center()
-    };
-    // 「跟随系统」的左右两半：各半自己的壁纸 + 一页窄样张。
-    let half = |pal: PreviewPalette| {
-        div()
-            .flex_1()
-            .h_full()
-            .overflow_hidden()
-            .bg(pal.wallpaper)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(mini_page(pal, half_w, half_h, page_bar))
     };
     match mode {
         Mode::Light => frame(light_preview().wallpaper)
@@ -349,21 +402,31 @@ fn mode_preview(mode: Mode, selected: bool, compact: bool) -> AnyElement {
                 .when(selected, |this| this.child(mode_check_badge(pal, badge)))
                 .into_any_element()
         }
-        // 不用文案解释在跟谁：左半浅右半深各一页，一眼即知（OpenLogi 的 split
-        // 同款思路，搬到竖样张上）。勾压在右上角，底色取浅侧的强调色 ——
-        // 两半的强调色本来就是同一个蓝。
-        Mode::System => h_flex()
-            .w_full()
-            .h(frame_h)
-            .overflow_hidden()
-            .rounded(px(6.))
-            .relative()
-            .child(half(light_preview()))
-            .child(half(dark_preview()))
-            .when(selected, |this| {
-                this.child(mode_check_badge(light_preview(), badge))
-            })
-            .into_any_element(),
+        Mode::System => {
+            let half = |pal: PreviewPalette| {
+                div()
+                    .flex_1()
+                    .h_full()
+                    .overflow_hidden()
+                    .bg(pal.wallpaper)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(mini_page(pal, 52., 80., page_bar))
+            };
+            h_flex()
+                .w_full()
+                .h(frame_h)
+                .overflow_hidden()
+                .rounded(px(6.))
+                .relative()
+                .child(half(light_preview()))
+                .child(half(dark_preview()))
+                .when(selected, |this| {
+                    this.child(mode_check_badge(light_preview(), badge))
+                })
+                .into_any_element()
+        }
     }
 }
 
@@ -496,50 +559,57 @@ fn ink_preview() -> PreviewPalette {
 }
 
 /// 两侧各用哪一套。每一套画成一张卡，浅深各一组 —— 读者要先看见颜色再决定，
-/// 名字里读不出「这本主题长什么样」。
+/// 名字里读不出「这本主题长什么样」。**哪侧出现由浅深档直接驱动**（2026-11-12 改的，
+/// 见 [`theme_side_shown`]）：钉浅色只出现浅侧，钉深色只出现深侧，「跟随系统」与
+/// 水墨两侧都出现 —— 规格每帧重建，选完当下就切换。出现的那侧带一条**手动折叠头**
+/// （图标在标题左侧），想收起随时收，自动规则不存在。
 fn themes_group(cx: &App) -> Group {
-    group(
-        tr(cx, "group.themes"),
-        vec![
-            theme_cards_row(ThemeMode::Light),
-            theme_cards_row(ThemeMode::Dark),
-        ],
-    )
+    let mode = ConfigHolder::default_appearance(cx).mode;
+    let mut rows = Vec::new();
+    if theme_side_shown(mode, false) {
+        rows.push(theme_cards_row(ThemeMode::Light));
+    }
+    if theme_side_shown(mode, true) {
+        rows.push(theme_cards_row(ThemeMode::Dark));
+    }
+    group(tr(cx, "group.themes"), rows)
 }
 
-/// 折叠状态那格的键。状态存在**窗口的 keyed state** 里：规格每帧重建，这里存不得；
-/// 页面切走再回来状态自然复位，自动规则重新接管 —— 那正是想要的行为。
+/// 折叠状态那格的键。**纯手动**：只有读者点过折叠头才有 `Some`，浅深档怎么切都
+/// 不会替读者折起哪一侧。状态存在窗口的 keyed state 里：规格每帧重建，这里存不得；
+/// 页面切走再回来自然复位成**收起**（默认档，见 [`theme_section`]）。
 const THEME_FOLD_KEY: &str = "appearance-theme-fold";
 
-/// 没被手动折过时，一侧的主题网格跟着浅深档走：钉了哪侧就先看见哪侧的主题，
-/// 「跟随系统」与水墨（穿浅色主题）两边都摊开。[`theme_section`] 的纯函数半边，
-/// 测试钉这一格。
-fn theme_side_auto_open(mode: Mode, dark: bool) -> bool {
+/// 哪一侧的主题网格该**出现**：钉浅色只出现浅侧、钉深色只出现深侧，「跟随系统」
+/// 两侧都出现；**水墨两侧都不出现**——水墨把整套界面褪成灰，配色主题没有可选项，
+/// 「主题消失」才符合它的使用状态（2026-11-12 改的；[`themes_group`] 在水墨下整组
+/// 不进页）。纯函数半边，测试钉这一格。
+fn theme_side_shown(mode: Mode, dark: bool) -> bool {
     match mode {
         Mode::Dark => dark,
-        Mode::Light | Mode::Ink => !dark,
+        Mode::Light => !dark,
         Mode::System => true,
+        Mode::Ink => false,
     }
 }
 
-/// 一侧（浅或深）的主题网格，连着一条**可点的折叠头**。标题与说明沿用
-/// `field.theme_*` 文案；说明只上桌面档（手机那一档行内不摆灰字）。浅深钉在哪侧，
-/// 哪侧摊开、另一侧收起；手动折过以后以手动为准 —— 一屏装得下更多内容，
-/// 收起的那侧随时点开头就回来。
+/// 一侧（浅或深）的主题网格，标题左侧一枚**折叠图标**，点标题（或图标）收起 /
+/// 摊开这一侧——纯手动，浅深档只决定这一侧出不出（见 [`theme_side_shown`]），
+/// 从不替读者折；**默认收起**，点开才见网格。标题与说明沿用 `field.theme_*` 文案；
+/// 说明只上桌面档。
 fn theme_cards_row(mode: ThemeMode) -> Row {
     Row::custom(move |window, cx| theme_section(window, cx, mode))
         .keywords(&["theme", "color", "主题", "配色", "外观", "折叠"])
 }
 
-/// 折叠头 + 网格那一行。折叠状态是 `None = 跟随浅深档自动 / Some = 读者手动折过`，
-/// 两侧各一格。
+/// 折叠头 + 网格那一行。折叠状态是 `None = 摊开 / Some(读者点过)`，两侧各一格；
+/// 图标在标题**左侧**，合上朝右、摊开朝下 —— 与阅读目录那棵树同一套指向。
 fn theme_section(window: &mut Window, cx: &mut App, mode: ThemeMode) -> AnyElement {
     let compact = SizeClass::of(window).is_compact();
     let fold = window.use_keyed_state(THEME_FOLD_KEY, cx, |_, _| [None::<bool>; 2]);
     let side: usize = if mode.is_dark() { 1 } else { 0 };
-    let mode_now = ConfigHolder::default_appearance(cx).mode;
-    let auto = theme_side_auto_open(mode_now, mode.is_dark());
-    let open = fold.read(cx)[side].unwrap_or(auto);
+    // 默认**收起**（2026-11-12 读者定的档）：选浅/深先看见「有这一格」，点开才见网格。
+    let open = fold.read(cx)[side].unwrap_or(false);
     let (title, hint) = if mode.is_dark() {
         (tr(cx, "field.theme_dark"), tr(cx, "field.theme_dark.desc"))
     } else {
@@ -550,8 +620,8 @@ fn theme_section(window: &mut Window, cx: &mut App, mode: ThemeMode) -> AnyEleme
     };
     let fold_state = fold.clone();
 
-    // 头：标题（+ 桌面档的灰说明）在左，chevron 在右 —— 合上时朝右、摊开时朝下，
-    // 与阅读目录那棵树同一套指向。
+    // 头：折叠图标在**左**，标题（+ 桌面档的灰说明）跟在后面 —— 读者先看见
+    // 「这里能收」，再看见这一格是什么。
     let mut head_label = v_flex()
         .flex_1()
         .min_w_0()
@@ -566,17 +636,15 @@ fn theme_section(window: &mut Window, cx: &mut App, mode: ThemeMode) -> AnyEleme
     }
     let head = h_flex()
         .id(SharedString::from(format!("theme-fold-{side}")))
+        .test_support()
         .w_full()
         .items_center()
         .gap_2()
         .py_1()
         .cursor_pointer()
         .on_click(move |_, _, cx| {
-            // 对**当前有效状态**取反：自动收着的侧，点一下是展开；手动展开的侧，
-            // 再点一下是折回。
             fold_state.update(cx, |sides, _| sides[side] = Some(!open));
         })
-        .child(head_label)
         .child(
             Icon::new(if open {
                 IconName::ChevronDown
@@ -586,12 +654,14 @@ fn theme_section(window: &mut Window, cx: &mut App, mode: ThemeMode) -> AnyEleme
             .small()
             .flex_none()
             .text_color(cx.theme().muted_foreground),
-        );
+        )
+        .child(head_label);
 
+    // Collapsible 按插入序渲染 children —— 头要**先**挂，才在网格上面。
     Collapsible::new()
         .open(open)
-        .content(theme_grid(cx, mode, compact))
         .child(head)
+        .content(theme_grid(cx, mode, compact))
         .into_any_element()
 }
 
@@ -699,45 +769,69 @@ fn selected_name(cx: &App, mode: ThemeMode) -> SharedString {
 
 /// 一套主题的网格。桌面与平板三列、手机两列（按窗口宽窄分档）—— 手机那块
 /// 393dp 的宽度放三列会把名字挤成省略号，而名字正是让人分辨两套相近配色的最后一格。
+/// 卡面上的名字：剥掉尾巴上的「 Light」/「 Dark」——所在的区段标题已经说了
+/// 浅深，名字里再带一遍是重复（2026-11-12 读者反馈）。只动**显示**，存储与
+/// 选中比对的键仍是全名；用户自装的主题没这个尾巴就原样显示。
+fn display_name(name: &str) -> &str {
+    name.strip_suffix(" Light")
+        .or_else(|| name.strip_suffix(" Dark"))
+        .unwrap_or(name)
+}
+
 fn theme_grid(cx: &App, mode: ThemeMode, compact: bool) -> AnyElement {
     let ink = ConfigHolder::default_appearance(cx).mode == folio_core::infra::config::Mode::Ink;
-    let themes: Vec<(SharedString, Swatch)> = {
+    let themes: Vec<(SharedString, SharedString, Swatch)> = {
         let registry = ThemeRegistry::global(cx);
         registry
             .sorted_themes()
             .into_iter()
             .filter(|config| config.mode == mode)
-            .map(|config| (config.name.clone(), swatch_of(config, ink)))
+            .map(|config| {
+                (
+                    config.name.clone(),
+                    SharedString::from(display_name(&config.name).to_string()),
+                    swatch_of(config, ink),
+                )
+            })
             .collect()
     };
     if themes.is_empty() {
         return muted_label(tr(cx, "appearance.no_themes"), cx).into_any_element();
     }
     let selected = selected_name(cx, mode);
-    let mut grid = div().w_full().grid().gap_2();
-    grid = if compact {
-        grid.grid_cols(2)
-    } else {
-        grid.grid_cols(3)
-    };
-    for (name, swatch) in themes {
+    // 列数**按屏幕宽窄判**，不是写死的常量：手机（窄屏）三列 —— 竖卡窄好摆，
+    // 真机上读者确认过好看；平板与桌面走横卡，三列下 88px 的预览条与名字比例
+    // 正好。哪天两档要分开，判在这里（`compact` 就在手边）。
+    let columns = 3;
+    let mut grid = div().w_full().grid().gap_2().grid_cols(columns);
+    for (name, label, swatch) in themes {
         let is_selected = name == selected;
-        grid = grid.child(theme_card(cx, name, mode, swatch, is_selected, compact));
+        grid = grid.child(theme_card(
+            cx,
+            name,
+            label,
+            mode,
+            swatch,
+            is_selected,
+            compact,
+        ));
     }
     grid.into_any_element()
 }
 
-/// 一张主题卡。两端的差别只在**卡片里装什么**（按窗口宽窄分档，平板随桌面）：
+/// 一张主题卡。两档的差别是**卡片的朝向**（按窗口宽窄分档，平板随桌面）：
 ///
-/// - 桌面档：预览是一页**竖样张**，页里一块 `Aa` 字样（看得出这套主题的字色与底色
-///   关系），名字右边挂「浅色 / 深色」标签，方便在一屏混排时认；
-/// - 手机档：预览只有几条色带，名字一行，浅深由上方那一组标题说 —— 同一句话在
-///   172 宽的卡里再写一遍，只会把名字挤掉。
+/// - 桌面（宽屏）：**横卡** —— 预览是一条横样张摆在左侧，名字与「浅色 / 深色」
+///   标签竖排在右；三列的宽卡装得下这一行。
+/// - 手机（窄屏）：**竖卡** —— 预览整格铺纸（这套主题自己的底、墨、强调线），
+///   与深浅卡的手机档同一剪影，名字一行在下；三列之后一张卡只剩 ~100px 宽，
+///   卡与卡之间只差配色，两个卡族读起来是一族。
 ///
 /// 两侧共同的是：选中态同时有**主色描边**与**右上角勾**，不只靠颜色传义。
 fn theme_card(
     cx: &App,
     name: SharedString,
+    label: SharedString,
     mode: ThemeMode,
     swatch: Swatch,
     selected: bool,
@@ -760,7 +854,8 @@ fn theme_card(
         tr(cx, "appearance.light")
     };
     let id = format!("theme-card-{name}");
-    let aria = format!("{name} · {mode_label}");
+    // aria 用显示名（读者听到的就是卡面上那一行），浅深由 mode_label 补齐。
+    let aria = format!("{label} · {mode_label}");
     let click_name = name.clone();
 
     let preview = if compact {
@@ -769,122 +864,123 @@ fn theme_card(
         desktop_preview(swatch, selected)
     };
 
-    let mut card = v_flex()
-        .id(id)
-        .test_support()
-        .aria_label(aria)
-        .aria_selected(selected)
-        .w_full()
-        .gap_1()
-        .p_2()
-        .rounded(theme.radius_lg)
-        .border_1()
-        .border_color(border)
-        .bg(theme.popover)
-        .cursor_pointer()
-        .hover(move |style| {
-            if selected {
-                style
-            } else {
-                style.border_color(hover)
-            }
-        })
-        .on_click(move |_, _, cx| choose_theme(cx, mode, click_name.clone()))
-        .child(preview);
+    let click_shell = |card: gpui_kit::Div| {
+        card.id(id)
+            .test_support()
+            .aria_label(aria)
+            .aria_selected(selected)
+            .w_full()
+            .p_2()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(border)
+            .bg(theme.popover)
+            .cursor_pointer()
+            .hover(move |style| {
+                if selected {
+                    style
+                } else {
+                    style.border_color(hover)
+                }
+            })
+            .on_click(move |_, _, cx| choose_theme(cx, mode, click_name.clone()))
+    };
 
     if compact {
-        card = card.child(
-            div()
-                .min_w_0()
-                .w_full()
-                .text_sm()
-                .text_ellipsis()
-                .text_color(ink)
-                .child(name),
-        );
+        // 竖卡：预览在上、名字一行在下。
+        click_shell(
+            v_flex().gap_1().child(preview).child(
+                div()
+                    .min_w_0()
+                    .w_full()
+                    .text_xs()
+                    .text_ellipsis()
+                    .text_color(ink)
+                    .child(name),
+            ),
+        )
+        .into_any_element()
     } else {
-        card = card.child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .text_sm()
-                        .text_ellipsis()
-                        .text_color(ink)
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(mode_label),
-                ),
-        );
+        // 横卡：预览条在左，名字与「浅色 / 深色」标签竖排在右。
+        click_shell(
+            h_flex().items_center().gap_2().child(preview).child(
+                v_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .w_full()
+                            .text_sm()
+                            .text_ellipsis()
+                            .text_color(ink)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(mode_label),
+                    ),
+            ),
+        )
+        .into_any_element()
     }
-    card.into_any_element()
 }
 
-/// 桌面档的预览：一页**竖样张**，页里一块 `Aa` 与一栏墨色浓淡交替的文本线 ——
-/// 这套主题自己的纸、墨、主色三格关系一眼可读。纸就是这套主题自己的底色，
-/// 整页铺满（模式卡才有壁纸环）。
+/// 宽屏档的预览：一条**横样张**摆在横卡左侧 —— `Aa` 与两三条文本线竖着挤在
+/// 这一小格里，纸就是这套主题自己的底色，整格铺满（模式卡才有壁纸环）。
 fn desktop_preview(swatch: Swatch, selected: bool) -> AnyElement {
     div()
         .relative()
-        .w_full()
-        .h(px(120.))
+        .w(px(88.))
+        .h(px(56.))
+        .flex_shrink_0()
         .overflow_hidden()
         .rounded(px(6.))
-        .bg(swatch.background)
-        .p(px(10.))
-        .child(
-            v_flex()
-                .gap(px(5.))
-                .child(
-                    div()
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(swatch.foreground)
-                        .child("Aa"),
-                )
-                .child(bar(swatch.primary, 44.))
-                .child(bar(swatch.foreground.opacity(0.30), 66.))
-                .child(bar(swatch.foreground.opacity(0.18), 52.))
-                .child(bar(swatch.foreground.opacity(0.12), 60.))
-                .child(bar(swatch.foreground.opacity(0.30), 40.))
-                .child(bar(swatch.foreground.opacity(0.18), 58.))
-                .child(bar(swatch.foreground.opacity(0.12), 46.)),
-        )
-        .when(selected, |this| this.child(check_badge(swatch, 16.)))
-        .into_any_element()
-}
-
-/// 手机档的预览：只有一栏细色带。卡片窄，`Aa` 会跟名字抢同一条视线。
-fn phone_preview(swatch: Swatch, selected: bool) -> AnyElement {
-    div()
-        .relative()
-        .w_full()
-        .h(px(96.))
-        .overflow_hidden()
-        .rounded(px(4.))
         .bg(swatch.background)
         .p(px(8.))
         .child(
             v_flex()
                 .gap(px(4.))
-                .child(bar(swatch.primary, 36.))
-                .child(bar(swatch.foreground.opacity(0.30), 52.))
-                .child(bar(swatch.foreground.opacity(0.18), 44.))
-                .child(bar(swatch.foreground.opacity(0.12), 56.))
-                .child(bar(swatch.foreground.opacity(0.30), 34.))
-                .child(bar(swatch.foreground.opacity(0.18), 50.))
-                .child(bar(swatch.foreground.opacity(0.12), 40.)),
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(swatch.foreground)
+                        .child("Aa"),
+                )
+                .child(bar(swatch.primary, 40.))
+                .child(bar(swatch.foreground.opacity(0.30), 56.))
+                .child(bar(swatch.foreground.opacity(0.18), 46.)),
         )
         .when(selected, |this| this.child(check_badge(swatch, 14.)))
+        .into_any_element()
+}
+
+/// 窄屏档（三列竖卡）的预览：**整格铺纸**，与深浅卡的手机档同一剪影 —— 没有
+/// 壁纸框（框里套页是盒中盒，2026-11-12 读者反馈去掉），纸就是这套主题自己的
+/// 底色，墨与强调线也是它的。卡与卡之间只差配色。
+fn phone_preview(swatch: Swatch, selected: bool) -> AnyElement {
+    div()
+        .relative()
+        .w_full()
+        .h(px(72.))
+        .overflow_hidden()
+        .rounded(px(6.))
+        .bg(swatch.background)
+        .p(px(8.))
+        .child(
+            v_flex()
+                .gap(px(4.))
+                .child(bar(swatch.primary, 40.))
+                .child(bar(swatch.foreground.opacity(0.30), 60.))
+                .child(bar(swatch.foreground.opacity(0.18), 48.))
+                .child(bar(swatch.foreground.opacity(0.12), 56.)),
+        )
+        .when(selected, |this| this.child(check_badge(swatch, 12.)))
         .into_any_element()
 }
 
@@ -1019,12 +1115,11 @@ mod tests {
         );
     }
 
-    /// 折展的自动规则：钉了哪侧就先看见哪侧的主题网格，「跟随系统」与水墨
-    /// （穿浅色主题）两边都摊开。手动折过的那一格走 `Some`，轮不到这条规则。
+    /// 可见性规则：钉浅色只出现浅侧、钉深色只出现深侧，「跟随系统」与水墨两侧都出现。
     #[test]
-    fn the_theme_grids_follow_the_pinned_side_until_overridden() {
-        use super::theme_side_auto_open;
-        // (模式, 是否深侧) → 该侧摊开吗
+    fn the_theme_grid_of_the_pinned_side_is_the_one_shown() {
+        use super::theme_side_shown;
+        // (模式, 是否深侧) → 该侧出现吗
         let cases = [
             (Mode::System, false, true),
             (Mode::System, true, true),
@@ -1032,16 +1127,16 @@ mod tests {
             (Mode::Light, true, false),
             (Mode::Dark, false, false),
             (Mode::Dark, true, true),
-            (Mode::Ink, false, true),
+            (Mode::Ink, false, false),
             (Mode::Ink, true, false),
         ];
-        for (mode, dark, open) in cases {
+        for (mode, dark, shown) in cases {
             assert_eq!(
-                theme_side_auto_open(mode, dark),
-                open,
+                theme_side_shown(mode, dark),
+                shown,
                 "{mode:?} 档下{}侧的网格该{}",
                 if dark { "深" } else { "浅" },
-                if open { "摊开" } else { "收起" }
+                if shown { "出现" } else { "不出现" }
             );
         }
     }

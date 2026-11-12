@@ -22,6 +22,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClipboardItem, Entity, InteractiveElement as _, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement as _, Styled, div,
@@ -82,6 +83,18 @@ fn value_item(
 /// 他视线停留的地方，而不是藏在另一层里。正文那一段现在按 Markdown 排 —— 与「更新日志」
 /// 那张卡片同一件元素，不再手写「认三样」的降级版。
 ///
+/// **格下那行灰色注释（`Row::description`）2026-11-12 全撤了**，读者嫌这一卡话太多：
+/// 三行各顶一句解释，摆出来像说明书而不像开关。「更新日志」格里那句「看这一版改了什么」
+/// 也随行撤掉 —— 标题已经说了它是什么，那颗「查看」靠右。检查结果另有去处：查完往
+/// 按下那扇窗推一条通知（`services::update::check`），「是不是最新」由它来答。
+/// 默认态的灰字（「还没查过」「还没发过」）同日撤掉：没动过的那两行左半边本来就没话；
+/// 隐私提示（日志带《书名》与路径）也一并撤了 —— 界面上从此没有这句告知，代价记在
+/// 反馈那一格的注释里。
+///
+/// **更新那一行的左侧状态字当天也全撤了**：查完的「已经是最新 / 连不上 / GitHub 限流」
+/// 通知里已经原样念过一遍，格子左边再挂一份是同一句话说两次。读屏与视觉都只留那颗按钮；
+/// 正在查由按钮自己禁用（连点会花掉两次配额），失败与「已最新」都由通知负责。
+///
 /// 「更新日志」那一格开的是 [`NotesSheet`]（一块从底边升起来的卡片，整篇正文摊在里面）。
 /// 卡片要宿主，桌面与紧凑两屏因此**各挂了一份**：`BottomSheet` 的用法是「功能自己持有实体、
 /// 在自己的 `render` 里挂」（`shelf/view/mod.rs:221-327` 与 `:1375-1381`），句柄由建它的那一屏
@@ -107,24 +120,18 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
                 let busy = status == Status::Checking;
                 let newer = matches!(status, Status::Newer);
 
-                let row = h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(muted_label(status_label_text(&status, cx), cx)),
-                    )
-                    .child(
-                        Button::new("about-check-update")
-                            .label(tr(cx, "update.check").to_string())
-                            .ghost()
-                            .small()
-                            .disabled(busy)
-                            .on_click(|_, _, cx| update::check(cx)),
-                    );
+                // 左侧不摆任何状态字：查完的那句（已最新 / 失败原因）由通知念，这一格
+                // 只留按钮。正在查的时候按钮自己禁用 —— 两颗提示说的是同一件事时，
+                // 格子左边那份就是重复。
+                let row = h_flex().w_full().items_center().justify_end().child(
+                    Button::new("about-check-update")
+                        .label(tr(cx, "update.check").to_string())
+                        .ghost()
+                        .small()
+                        .disabled(busy)
+                        // 窗口递进去：查完那条通知要落回按下时的这一扇窗。
+                        .on_click(|_, window, cx| update::check(window, cx)),
+                );
 
                 if newer {
                     // 面板挂在同一格里而不是另起一屏：读者按下的就是这一格，
@@ -138,7 +145,6 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
                 }
                 row.into_any_element()
             })
-            .description(tr(cx, "update.desc"))
             .keywords(&[
                 "update", "check", "version", "release", "更新", "检查", "版本", "新版",
             ]),
@@ -149,16 +155,12 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
                 // 规格里那两层的闭包都要 `'static`，所以借用在这一格就换成一份拥有权；
                 // 每一帧一份、每一次点击一份，`Entity` 的 clone 只是一次引用计数。
                 let card = card.clone();
+                // 「查看」靠右，与上面两行的按钮同一条竖线：这一格左边是标题，
+                // 按钮居中会让三行读起来像三块各自为政的碎片。
                 h_flex()
                     .w_full()
                     .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(muted_label(tr(cx, "update.notes_hint").to_string(), cx)),
-                    )
+                    .justify_end()
                     .child(
                         Button::new("about-show-notes")
                             .label(tr(cx, "update.view").to_string())
@@ -178,7 +180,6 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
                     )
                     .into_any_element()
             })
-            .description(tr(cx, "update.notes.desc"))
             .keywords(&[
                 "changelog",
                 "notes",
@@ -190,15 +191,18 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
                 "说明",
             ]),
             // 「反馈日志」也落在这一组：读者到这一屏要办的事是「这应用不对劲，我要说一声」，
-            // 那一格是上面两格的下一步。
-            //
-            // **隐私那句话摆在按下之前**：日志里有《书名》与落盘路径（`import:` 那些行带的
-            // 就是它们，见 `folio-core/src/ingest/import/pipeline.rs:974`），事后告知等于没告知。
+            // 那一格是上面两格的下一步。「还没发过」与「日志里会有你看过的书名和文件路径」
+            // 两句都撤了（2026-11-12，读者定稿）—— 前者与「还没查过」同理是默认态的废话；
+            // 后者撤掉之后，日志带《书名》与路径这件事在界面上不再有告知，这是这一撤
+            // 换来的代价，记在这里。
             Row::custom_titled(tr(cx, "feedback.title"), move |_, cx| {
                 let status = feedback::handle(cx)
                     .map(|entity| entity.read(cx).status().clone())
                     .unwrap_or_default();
                 let busy = status == feedback::FeedbackStatus::Working;
+                // 与「还没查过」同一条：没发过是默认态，不念；动了之后的那几档
+                // （整理中 / 已交分享面板 / 副本在哪 / 出错）才是状态。
+                let idle = status == feedback::FeedbackStatus::Idle;
                 let shown = feedback::status_label(&status, cx);
                 let mut body = v_flex().w_full().gap_1().child(
                     h_flex()
@@ -209,7 +213,7 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .child(muted_label(shown.to_string(), cx)),
+                                .when(!idle, |this| this.child(muted_label(shown.to_string(), cx))),
                         )
                         .child(
                             Button::new("about-send-logs")
@@ -229,20 +233,13 @@ fn update_group(cx: &App, notes: &Entity<NotesSheet>) -> Group {
                             .child(muted_label(path.display().to_string(), cx)),
                     );
                 }
-                body.child(div().child(muted_label(tr(cx, "feedback.privacy").to_string(), cx)))
-                    .into_any_element()
+                body.into_any_element()
             })
-            .description(tr(cx, "feedback.desc"))
             .keywords(&[
                 "feedback", "log", "logs", "report", "bug", "反馈", "日志", "问题", "报错",
             ]),
         ],
     )
-}
-
-/// 那一格右侧的一句状态。文案表在服务层（两屏共用一份），这里只是把它变成字。
-fn status_label_text(status: &Status, cx: &App) -> String {
-    update::status_label(status, cx).to_string()
 }
 
 /// 发现新版本时摊开的那块：版本号、这一端有没有包、正文、两颗按钮。

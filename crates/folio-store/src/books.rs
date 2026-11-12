@@ -182,7 +182,10 @@ struct StaleRow {
     size: i64,
     mtime: i64,
     version: i64,
+    /// 封面文件名的两半：`covers/<hash 前 20 字>.<mime 决定的扩展名>`。
+    /// 少一半就拼不出路径，也就没有「文件在不在」这一问。
     cover_hash: Option<String>,
+    cover_mime: Option<String>,
     /// 这份索引算自哪一份分章规则表（v22 起）。NULL 的含义见 `store::schema` 那一版。
     rules_hash: Option<String>,
 }
@@ -280,6 +283,16 @@ fn progress_of(
     let offset = at.offset as f32;
     // 章内偏移可能比整本书还大（旧串、或章表变过），夹到分母以内。
     Some(((read + offset) / total as f32).clamp(0.0, 1.0))
+}
+
+/// 封面补齐那一趟要读的一行：`BookRow` 不带封面描述，而补齐既要判「指针在不在」
+/// 也要判「那个文件还在不在」。
+#[derive(Debug, Clone)]
+pub struct CoverBackfillRow {
+    pub id: i64,
+    pub path: String,
+    pub cover_hash: Option<String>,
+    pub cover_mime: Option<String>,
 }
 
 impl Store {
@@ -650,6 +663,38 @@ impl Store {
         Ok(n as usize)
     }
 
+    /// 封面补齐那一趟要读的所有行。
+    ///
+    /// **不过滤**：`cover_hash` 有值但 `covers/` 里文件没了（`covers/` 被清过、
+    /// 只导数据的备份恢复过来、书库搬过家）同样是要补的一档，漏掉它封面还是不回来。
+    /// 只 SELECT 四列，不开容器；判文件在不在交给调用方按 `book_root` + `cover::resolve` 做。
+    pub fn rows_for_cover_backfill(&self) -> Result<Vec<CoverBackfillRow>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt =
+            conn.prepare("SELECT id, path, cover_hash, cover_mime FROM books ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(CoverBackfillRow {
+                    id: r.get(0)?,
+                    path: r.get(1)?,
+                    cover_hash: r.get(2)?,
+                    cover_mime: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// 写一本书的封面描述（补齐那一趟的落点）：只动这两列，不碰进度、批注与索引版本。
+    pub fn set_cover_ref(&self, id: i64, hash: &str, mime: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "UPDATE books SET cover_hash = ?2, cover_mime = ?3 WHERE id = ?1",
+            params![id, hash, mime],
+        )?;
+        Ok(())
+    }
+
     /// 还有几条**别的**记录指着同一张封面 —— 删书时决定那个封面文件能不能删。
     ///
     /// 与 [`Store::rows_sharing_path`] 同一条规矩（`plans/导入管线.md` §八 第 4 条
@@ -941,31 +986,6 @@ impl Store {
         let pattern = like_pattern(trimmed);
         Ok(stmt
             .query_map(params![trimmed, pattern], shelf_from_row)?
-            .collect::<std::result::Result<_, _>>()?)
-    }
-
-    /// 挂着**某一个标签**的书，序与整架同一条（[`SHELF_ORDER`]）。
-    ///
-    /// 名分用 `IN (SELECT …)` 问而不是 join `book_tags`：join 进来会让一本书挂两个标签时
-    /// 在结果里出两行，而那条共用的 [`SHELF_ORDER`] 用的还是裸列名 —— 与
-    /// [`Store::shelf_in_collection_in`] 同一条写法、同一个理由。标签是**多选**，但这一格
-    /// 筛的是「挂着这一个的所有书」（any-of 的单标签版）：界面上一次筛一颗，
-    /// 一次筛多颗留给将来有真实读者之前再说。
-    pub fn shelf_by_tag(&self, tag: crate::Tag, query: &str) -> Result<Vec<ShelfItem>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let trimmed = query.trim();
-        let sql = format!(
-            r#"SELECT {SHELF_COLUMNS} FROM books
-             LEFT JOIN positions ON positions.book_id = books.id
-             WHERE books.id IN (SELECT book_id FROM book_tags WHERE tag = ?1)
-               AND {}
-             {SHELF_ORDER}"#,
-            query_clause("?2", "?3")
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let pattern = like_pattern(trimmed);
-        Ok(stmt
-            .query_map(params![tag.as_str(), trimmed, pattern], shelf_from_row)?
             .collect::<std::result::Result<_, _>>()?)
     }
 
@@ -1277,6 +1297,12 @@ pub enum StaleReason {
     /// 「索引旧了」，而读者刚换了一份规则表、想看到的是这一句。
     /// 分开的代价是零：两者的处置本来相同（重扫），只是出处不同。
     RulesChanged,
+    /// 库里记着一份封面（`cover_hash` / `cover_mime`），但 `covers/` 里那个文件不在了。
+    ///
+    /// 与作废的 `OldCover`（封面按旧规格生成）不是一件事：那是「规格变了」，这是
+    /// 「文件没了」。封面字节 v16 起不在库里，唯一的来源是那份书，所以重扫一次
+    /// 就能重新抽出来 —— 这也是「封面突然消失」在升级之外唯一的自愈入口。
+    MissingCover,
     // 曾经还有一档 `OldCover`（封面按旧规格生成）：v16 之后封面是一个文件，
     // 换规格只要重新生成缩略图（`content::assets::thumb`），不必重扫全书 —— 所以这一档
     // 连同它的判据（`cover_spec` 那一列）一起作废了。
@@ -1286,13 +1312,13 @@ impl Store {
     /// 这本书记下的索引还可信吗？`None` = 可信。
     ///
     /// 正文只在文件里（见 `plans/text-out-of-db.md`），所以「文件还是那份文件吗」从
-    /// 锦上添花变成了**能不能读**的前提。五种不可信各自有后果：
+    /// 锦上添花变成了**能不能读**的前提。六种不可信各自有后果：
     ///
     /// - 文件不在 → 这一章取不到，重扫也没用；
     /// - 文件换了 → 位置指到别的内容上，进度与批注也跟着漂；
     /// - 索引是旧引擎算的 → 序号（`Section(n)`）按旧规则算的，可能整体错位；
     /// - 规则表换了 → 同上，只是换的是那份 JSON 而不是代码；
-    /// - 封面旧了 → 只影响书架那张缩略图，重扫一次就按新规格重生成。
+    /// - 封面文件不在 → 装饰没了，重扫一次能从书里重新抽出来。
     ///
     /// 第一种可以直接删数据（`prune_missing`），其余该重扫 —— 调用方选。
     pub fn stale_reason(&self, book_id: i64) -> Result<Option<StaleReason>> {
@@ -1301,11 +1327,11 @@ impl Store {
         // `plans/阅读管线.md` §十.4 第 1 条点名的「锁内做了文件系统操作」就是这一处。
         let row: Option<StaleRow> = {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            // `cover_hash` 只用来在下面判「这一本有没有封面」——v16 之后封面规格那一档
-            // （`cover_spec`）连同 BLOB 一起没了：封面现在是一个文件，换规格只要重新生成
-            // 缩略图（`content::assets::thumb::purge` + 懒生成），不必重扫全书。
+            // `cover_hash` 用来在最后判「记过的那份封面文件还在不在」。v16 之后封面规格
+            // 那一档（`cover_spec`）连同 BLOB 一起没了：封面只是 `covers/` 里一个文件，
+            // 它丢了不会让正文读不了，所以排在最后，并由重扫顺手重新抽出来。
             conn.query_row(
-                "SELECT path, format, size, mtime, index_version, cover_hash, rules_hash
+                "SELECT path, format, size, mtime, index_version, cover_hash, cover_mime, rules_hash
                    FROM books WHERE id = ?1",
                 params![book_id],
                 |r| {
@@ -1316,7 +1342,8 @@ impl Store {
                         mtime: r.get(3)?,
                         version: r.get(4)?,
                         cover_hash: r.get(5)?,
-                        rules_hash: r.get(6)?,
+                        cover_mime: r.get(6)?,
+                        rules_hash: r.get(7)?,
                     })
                 },
             )
@@ -1325,7 +1352,6 @@ impl Store {
         let Some(row) = row else {
             return Ok(None);
         };
-        let _has_cover = row.cover_hash.as_ref().is_some_and(|h| !h.is_empty());
         // 顺序即优先级：文件不在最严重（要删数据），其次才是「算法换了」与「文件换了」。
         let meta = std::fs::metadata(&row.path);
         let Ok(meta) = meta else {
@@ -1358,6 +1384,21 @@ impl Store {
             && row.rules_hash.as_deref() != Some(want.as_str())
         {
             return Ok(Some(StaleReason::RulesChanged));
+        }
+        // 排在最后：封面是装饰，别让它盖过上面那些真问题。
+        // **只认「库里记过封面、文件却不在」这一种**：从来没有封面的那些行
+        // （TXT / Markdown / 没声明封面的 EPUB，`cover_hash` 是 NULL）不能被算成不可信，
+        // 否则每次开书都要为一本注定没有封面的书白重扫一遍。
+        // 这一档也是 `backfill_covers` 那趟开机补齐之外的兜底：那一趟按记号整机只跑
+        // 一次，之后 `covers/` 再被清掉就得靠开书时认出来。
+        if let (Some(hash), Some(mime)) = (row.cover_hash.as_deref(), row.cover_mime.as_deref())
+            && !hash.is_empty()
+            && !mime.is_empty()
+        {
+            let root = book_root(Path::new(&row.path));
+            if crate::assets::cover::resolve(&root, hash, mime).is_none() {
+                return Ok(Some(StaleReason::MissingCover));
+            }
         }
         let _ = row.size;
         Ok(None)

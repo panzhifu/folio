@@ -24,25 +24,26 @@ fn tag_filter_label(tag: Tag) -> &'static str {
         Tag::Unread => "shelf.tag_unread",
         Tag::Reading => "shelf.tag_reading",
         Tag::Finished => "shelf.tag_finished",
-        Tag::Abandoned => "shelf.tag_abandoned",
     }
 }
 
 impl ShelfView {
-    /// 标签筛选那一排：四个状态 chip（未读 / 在读 / 读完 / 弃读），常驻整架那一屏。
+    /// 标签筛选那一排：三颗状态 chip（未读 / 在读 / 读完），常驻整架那一屏。
     ///
-    /// 挂在顶栏折叠容器之外（见 render 那一段为什么不进那个定高裁切的容器），横向
-    /// 留白与搜索行共用 [`GUTTER`]。点一下筛上那一个（实心档），再点一下取消；一次
-    /// 只筛一颗 —— 多颗 any-of 的查询面留给有真实读者之前再说。
+    /// 筛的是**有效状态**：手动挂过标签的书以手动为准（`Tag::effective`），没挂的
+    /// 按阅读数据自动判（`ShelfItem::auto_status` —— 没翻开是未读，进度到线是读完，
+    /// 其余在读）。挂在顶栏折叠容器之外（见 render 那一段为什么不进那个定高裁切的
+    /// 容器），横向留白与搜索行共用 [`GUTTER`]。点一下筛上那一个（实心档），再点一下
+    /// 取消；一次只筛一颗。
     ///
-    /// 无筛选时四个都是描边档（ghost）：没有另配「全部」那颗，一颗都不实心就是不筛，
+    /// 无筛选时三颗都是描边档（ghost）：没有另配「全部」那颗，一颗都不实心就是不筛，
     /// 与扫描清单那一排 chips 的口径一致。
     pub(in crate::ui::features::shelf) fn tag_filter_bar(
         &self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let entity = cx.entity().clone();
-        // 四颗 chip **就地搭好**：搭一颗要读一次文案（`cx` 的账），闭包里借不动它 ——
+        // 三颗 chip **就地搭好**：搭一颗要读一次文案（`cx` 的账），闭包里借不动它 ——
         // 与卡片角标、标记浮层那两处同一个做法。
         let chips: Vec<_> = Tag::ALL
             .iter()

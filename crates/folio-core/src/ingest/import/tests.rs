@@ -978,6 +978,92 @@ fn backfill_fills_the_hash_without_moving_a_file_we_do_not_own() {
     assert!(store.rows_missing_hash().unwrap().is_empty());
 }
 
+/// 封面补齐：v15/v16 那次升级把 `books.cover` 删了、老行的 `cover_hash` 是 NULL，
+/// 而封面字节只在那份书文件里。这一趟要把它重新抽出来写回 `covers/`，并回填两列。
+///
+/// 顺带钉三件容易安静坏掉的事：① 只跑一次（记号在 `prefs`）—— 不然每次开机都把
+/// 全库解一遍；② 描述在但**文件没了**也要补（`covers/` 被清过）；③ 源文件不在时
+/// 不删行、不报错，跳过去就行。
+#[test]
+fn cover_backfill_restores_a_lost_cover_and_runs_only_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("books");
+    std::fs::create_dir_all(&lib).unwrap();
+    let db = tmp.path().join("folio.db");
+
+    // 一份带封面的 FB2：封面在 `<binary>` 里，库里那一行故意不带任何封面描述 ——
+    // 这正是 v16 之后老行的形状（BLOB 没了、两列是 NULL）。
+    let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89";
+    let b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(png)
+    };
+    let xml = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <FictionBook xmlns=\"http://www.gribuser.ru/xml/fictionbook/2.0\" \
+                      xmlns:l=\"http://www.w3.org/1999/xlink\">\n\
+         <description><title-info><book-title>有封面的书</book-title>\n\
+         <coverpage><image l:href=\"#cover.png\"/></coverpage>\n\
+         </title-info></description>\n\
+         <body><section><p>正文</p></section></body>\n\
+         <binary id=\"cover.png\" content-type=\"image/png\">{b64}</binary>\n\
+         </FictionBook>"
+    );
+    let path = lib.join("有封面的书.fb2");
+    std::fs::write(&path, xml).unwrap();
+
+    let store = Store::open_at(&db).unwrap();
+    let meta = crate::content::format::DocMeta {
+        title: "有封面的书".into(),
+        format: crate::content::format::Format::Fb2,
+        size: 0,
+        ..crate::content::format::DocMeta::default()
+    };
+    let id = store.add_book(&path, &meta).unwrap();
+    assert_eq!(store.book_cover(id).unwrap(), None, "起点：封面丢了");
+
+    let report = super::backfill_covers(&store, &StageCtx::detached());
+    assert_eq!(report.restored, 1, "这一本该被补回来：{report:?}");
+    assert_eq!(
+        store.book_cover(id).unwrap().as_deref(),
+        Some(&png[..]),
+        "封面字节要能从 covers/ 读回来"
+    );
+    assert_eq!(
+        store.pref_number(super::COVER_BACKFILL_KEY).unwrap(),
+        Some(super::COVER_BACKFILL_VERSION),
+        "跑完要记下记号"
+    );
+
+    // 第二次不该再读全库。
+    let again = super::backfill_covers(&store, &StageCtx::detached());
+    assert_eq!(again.scanned, 0, "记号在，第二趟整趟跳过");
+
+    // 文件被清掉（只导数据的备份恢复、covers/ 被手工删）也要补回来：记号先抹掉，
+    // 模拟下一版带新补齐逻辑的升级。
+    store.set_pref_number(super::COVER_BACKFILL_KEY, 0).unwrap();
+    let covers =
+        crate::store::book_root(std::path::Path::new(&store.book(id).unwrap().unwrap().path));
+    let cover_file = crate::content::assets::cover::cover_path(
+        &covers,
+        &store.rows_for_cover_backfill().unwrap()[0]
+            .cover_hash
+            .clone()
+            .unwrap(),
+        "image/png",
+    );
+    std::fs::remove_file(&cover_file).unwrap();
+    assert_eq!(store.book_cover(id).unwrap(), None, "文件没了就该画占位");
+
+    let third = super::backfill_covers(&store, &StageCtx::detached());
+    assert_eq!(third.restored, 1, "描述在、文件不在也要补：{third:?}");
+    assert_eq!(
+        store.book_cover(id).unwrap().as_deref(),
+        Some(&png[..]),
+        "补回来之后还是同一份字节"
+    );
+}
+
 /// 「还有别人指着这个文件吗」这一问要问得出数。
 ///
 /// 内容寻址之后「两行共用一个副本」是 `plans/导入管线.md` §六 明确会出现的状态，而它现在

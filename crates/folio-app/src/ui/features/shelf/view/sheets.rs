@@ -21,28 +21,28 @@ use gpui_kit::{
 
 use super::{GUTTER, ShelfView};
 
-/// 标记那张浮层的宽与整卡高：一行标题、一行提示、四颗短词按钮。宽 300 装得下
-/// 手机那 384 逻辑像素的视口还有余（四颗小按钮一行放不下时 `flex_wrap` 折两行，
+/// 标记那张浮层的宽与整卡高：一行标题、一行提示、三颗短词按钮。宽 300 装得下
+/// 手机那 384 逻辑像素的视口还有余（三颗小按钮一行放不下时 `flex_wrap` 折两行，
 /// 卡片只偏几像素 —— 与 [`overlay::FORM_HEIGHT`] 那条「报的数与真实高对不上」
 /// 同一条代价），高按内容报一个定数供居中上抬。
 pub(in crate::ui::features::shelf) const TAG_WIDTH: f32 = 300.0;
 pub(in crate::ui::features::shelf) const TAG_HEIGHT: f32 = 148.0;
 
-/// 标签 → 它的本地化键。四个固定档各有一条，判据收在这一处。
+/// 标签 → 它的本地化键。三个固定档各有一条，判据收在这一处。
 fn tag_key(tag: Tag) -> &'static str {
     match tag {
         Tag::Unread => "shelf.tag_unread",
         Tag::Reading => "shelf.tag_reading",
         Tag::Finished => "shelf.tag_finished",
-        Tag::Abandoned => "shelf.tag_abandoned",
     }
 }
 
 impl ShelfView {
-    /// 标记那张浮层：固定四档的开关（未读 / 在读 / 读完 / 弃读），多选。
+    /// 标记那张浮层：固定三档的**单选**（未读 / 在读 / 读完）—— 手动指定的书以手动
+    /// 为准（[`Tag::effective`]），再点同一档退回自动判断。
     ///
     /// 两端都是居中的那一张：它答的是一句话（「这本读到哪儿了」），不是一块要滚的
-    /// 清单；四颗小按钮也装得下手机那 384 逻辑像素的视口，不值得为它铺一套
+    /// 清单；三颗小按钮也装得下手机那 384 逻辑像素的视口，不值得为它铺一套
     /// 底部弹层的双容器。打勾读的是打开那一刻的库（[`Self::tag_entry`] 里的快照），
     /// 点一格当场落库（[`Self::toggle_tag`]），关掉（点外面 / 返回）只收意图。
     pub(in crate::ui::features::shelf) fn tag_popover(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -52,7 +52,7 @@ impl ShelfView {
         let shelf = cx.entity().clone();
         let book_id = *book_id;
         let snapshot = snapshot.clone();
-        // 四颗开关**就地搭好**：搭一颗要读一次文案（`cx` 的账），闭包里借不动它 ——
+        // 三颗开关**就地搭好**：搭一颗要读一次文案（`cx` 的账），闭包里借不动它 ——
         // 与卡片角标、扫描筛选那两处同一个做法。
         let chips: Vec<AnyElement> = Tag::ALL
             .iter()
@@ -87,7 +87,7 @@ impl ShelfView {
             )
             .child(muted_label(tr(cx, "shelf.tag_hint"), cx))
             .child(
-                // 四颗开关横排：四个短词一行放得下，一行也读得出「这是一套档位」。
+                // 三颗开关横排：三个短词一行放得下，一行也读得出「这是一套档位」。
                 // 选中的实心（secondary），没选的描边（ghost）—— 与扫描筛选那一排
                 // chips 同一套摆法，读者不用学第二种。
                 h_flex().w_full().flex_wrap().gap_2().children(chips),

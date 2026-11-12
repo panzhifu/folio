@@ -554,6 +554,8 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
     crate::ui::services::library::sweep_partials(cx);
     // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
     crate::ui::services::library::schedule_backfill(cx);
+    // 封面补齐：升级把 books.cover 那个 BLOB 删了之后，老行的封面得从书文件里重抽一次。
+    crate::ui::services::library::schedule_cover_backfill(cx);
 
     // 还没有窗口，浅深只能问平台。这一趟只求「先有个能看的配色」：窗口一开，
     // `AppShell::render` 每帧按窗口自己的浅深判该不该重涂，系统翻面也有那条订阅接住。

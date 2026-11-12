@@ -231,12 +231,14 @@ pub struct ShelfView {
     /// 卡片上那张二维码（第一个地址的 PNG）。打开卡片时算一次，之后每帧只画，
     /// 不重编码；收卡时丢掉。没探到局域网地址时是 `None`。
     network_qr: Option<Arc<Image>>,
-    /// 整架的标签表：书号 → 挂着的标签。与架面同一次重查取（[`Self::reload`]），
-    /// 卡片画角标读它；标记浮层落库后也只改它那一格，不必整架重查。
+    /// 整架的标签表：书号 → 挂着的标签（**手动覆盖**的那几行，老库可能一格多行）。
+    /// 与架面同一次重查取（[`Self::reload`]），卡片角标与状态筛选都读它；
+    /// 标记浮层落库后也只改它那一格，不必整架重查。
     pub(in crate::ui::features::shelf) tags: HashMap<i64, Vec<Tag>>,
-    /// 架面的标签筛选。`Some(tag)` = 整架那一片只摆挂着这一个标签的书
-    /// （[`Store::shelf_by_tag`]），组卡区跟着藏起（与搜索词非空同一处理）。
-    /// 单颗可点选 / 再点取消；一次筛一颗，多颗 any-of 留给有真实读者之前再说。
+    /// 架面的状态筛选。`Some(tag)` = 整架那一片只摆**有效状态**是它的书 —— 手动挂过
+    /// 标签的以手动为准（`Tag::effective`），没挂的按阅读数据自动判
+    /// （`ShelfItem::auto_status`）；组卡区跟着藏起（与搜索词非空同一处理）。
+    /// 单颗可点选 / 再点取消；一次筛一颗。
     tag_filter: Option<Tag>,
     /// 架面上是不是站着那块「书库位置」确认面板。
     ///
@@ -255,6 +257,9 @@ pub struct ShelfView {
     /// 上面那份封面是在哪一档下解的（水墨 / 正常）。翻档之后整份丢掉重解：缓存键是
     /// 书号，里面没有「哪一档」这一格，彩色那几份会原样留着继续画。
     pub(in crate::ui::features::shelf) covers_ink: bool,
+    /// 解这批封面时后台补齐作业走到第几趟（`folio_core::cover_epoch`）。
+    /// 补回一本就把 `None` 缓存作废 —— 否则封面文件已经出现在 `covers/`，架面还画占位。
+    pub(in crate::ui::features::shelf) covers_epoch: u64,
     _search_watch: Subscription,
     /// 导入那条异步链：等选择器 → 把选中的文件交给后端管线 → 收事件直到这批结束。
     /// Task 一 drop 链就断，于是「选了文件但界面已经忘了」；而断在管线跑到一半时，
@@ -501,6 +506,7 @@ impl ShelfView {
             confirming: false,
             covers: HashMap::new(),
             covers_ink: false,
+            covers_epoch: folio_core::cover_epoch(),
             _search_watch,
             _import: None,
             importing: None,
@@ -595,9 +601,11 @@ impl ShelfView {
         // 搜不出来（某一组那一页没有搜索行），而读者读到的结果是「书丢了」。
         let queried = self.store.as_ref().map(|store| match self.scope {
             ShelfScope::Shelf => {
-                // 筛着标签时只查挂着它的那一片（any-of 的单标签版）；搜索词叠在标签之上。
-                if let Some(tag) = self.tag_filter {
-                    store.shelf_by_tag(tag, query)
+                // 筛着状态时查整架再按有效状态滤（下面）：状态回答「读到哪儿了」，
+                // 不回答「收进哪个组」，进了组的书也按状态看得见 —— 与旧的那条
+                // `shelf_by_tag` 同一片。搜索词叠在状态之上。
+                if self.tag_filter.is_some() {
+                    store.shelf(query)
                 } else if query.trim().is_empty() {
                     store.shelf_ungrouped(query)
                 } else {
@@ -612,11 +620,29 @@ impl ShelfView {
             Some(Ok(items)) => {
                 self.query = query.into();
                 // 卡片角标要的那份标签表与架面同一次重查取：逐卡再查一次等于几百本就是几百趟。
+                // 它同时也是状态筛选的「手动那一半」，所以要先落进来再滤。
                 if let Some(store) = &self.store
                     && let Ok(map) = store.tags_map()
                 {
                     self.tags = map;
                 }
+                // 筛着状态时按**有效状态**留书：手动挂过标签的以手动为准
+                // （`Tag::effective`），没挂的按阅读数据自动判（`ShelfItem::auto_status`
+                // —— 没翻开是未读，进度到线是读完，其余在读）。在 Rust 这一侧滤而不是
+                // 在 SQL 里滤：有效状态是两条数据（进度、手动标签）会合出来的，SQL 里
+                // 拼得出但读不懂；而整架那一趟本来就全量取回来（进度条与封面都要）。
+                let items = match self.tag_filter {
+                    Some(tag) => items
+                        .into_iter()
+                        .filter(|item| {
+                            Tag::effective(
+                                self.tags.get(&item.id).map_or(&[], Vec::as_slice),
+                                item.auto_status(),
+                            ) == tag
+                        })
+                        .collect::<Vec<_>>(),
+                    None => items,
+                };
                 // 先把封面解析出来再收集：`map(|item| self.card(item))` 那种写法同时借
                 // `self` 的不可变与可变两半，编译器不让过。
                 self.items = items
@@ -1525,11 +1551,13 @@ impl ShelfView {
         }
     }
 
-    /// 标记浮层里点了一格：当场写库，并只更新架面那份标签表的**这一格**。
+    /// 标记浮层里点了一格：**单选** —— 点中的那档当场落库，再点同一档退回自动（清空），
+    /// 点别的档直接换过去。手动指定的书以手动为准（[`Tag::effective`]），清空就是交给
+    /// 阅读数据自动判。
     ///
     /// 写走 [`Store::set_book_tags`] 整组替换（幂等），架面不整架重查 —— 角标归
-    /// [`Self::tags`] 管，改完那一格 `notify` 一帧就够；只有「这本书挂没挂这个标签」
-    /// 变了，架面上的书一排都没动。
+    /// [`Self::tags`] 管，改完那一格 `notify` 一帧就够；只有「这本的有效状态」变了，
+    /// 架面上的书一排都没动。
     pub(in crate::ui::features::shelf) fn toggle_tag(
         &mut self,
         book_id: i64,
@@ -1542,16 +1570,16 @@ impl ShelfView {
         if *entry_id != book_id {
             return;
         }
-        let on = if let Some(at) = snapshot.iter().position(|t| *t == tag) {
-            snapshot.remove(at);
-            false
+        // 老数据可能一格多行：点任何一档都先归一成单选 —— 点中的那档，或清空。
+        let want: Vec<Tag> = if snapshot.len() == 1 && snapshot[0] == tag {
+            Vec::new()
         } else {
-            snapshot.push(tag);
-            true
+            vec![tag]
         };
         // 要写的整组先抄一份：快照那笔可变借用借在 `self.tag_entry` 上，而下面要借
         // `self.store` 落库 —— 两次借用都得从 `self` 出发，抄一份让前一笔当场收手。
-        let want = snapshot.clone();
+        let on = !want.is_empty();
+        *snapshot = want.clone();
         let Some(store) = &self.store else {
             return;
         };
@@ -1563,14 +1591,13 @@ impl ShelfView {
             // 写失败把快照拨回去：浮层上的勾说的是库，不是本地这次没写成的意图。
             if let Some((_, snapshot)) = self.tag_entry.as_mut() {
                 if on {
-                    snapshot.retain(|t| *t != tag);
+                    snapshot.clear();
                 } else {
-                    snapshot.push(tag);
+                    *snapshot = vec![tag];
                 }
             }
         } else {
-            let row = if on { vec![tag] } else { Vec::new() };
-            self.tags.insert(book_id, row);
+            self.tags.insert(book_id, want);
         }
         cx.notify();
     }
@@ -2850,6 +2877,61 @@ mod tests {
             );
         })
         .expect("窗口应可更新");
+    }
+
+    /// 状态筛选按**有效状态**放书：没挂手动标签的书按阅读数据自动判（没翻开 = 未读，
+    /// 翻开过 = 在读），手动挂过的以手动为准 —— 进度差得远也归手动那一档。
+    ///
+    /// 这扇门钉的是自动判状态的两句承诺：筛「未读」筛的是「从没翻开过的书」，判据
+    /// 跟着数据走（`touch_opened` 一顶它就挪档，不需要谁记得去改标签）；筛「读完」
+    /// 时手动标的赢过自动算的 —— 进度停在九成七的书有处可去。
+    #[gpui_kit::test]
+    fn the_status_filter_follows_reading_data_with_manual_override(cx: &mut TestAppContext) {
+        use folio_core::Tag;
+
+        let (shelf, _, store, _) = boot_shelf(cx);
+        add(&store, "未翻"); // 没翻开 → 自动未读
+        let opened = add(&store, "翻开");
+        let pinned = add(&store, "手标");
+        store.touch_opened(opened).expect("翻开");
+        store
+            .set_book_tags(pinned, &[Tag::Finished])
+            .expect("手动标成读完");
+        shelf.update(cx, |this, cx| this.force_reload(cx));
+
+        shelf.update(cx, |this, cx| this.toggle_tag_filter(Tag::Unread, cx));
+        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_title(0)),
+            Some("未翻".into()),
+            "没翻开的那本归未读"
+        );
+
+        // 翻开过的自动挪到在读：判据跟着数据走。
+        shelf.update(cx, |this, cx| this.toggle_tag_filter(Tag::Reading, cx));
+        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_title(0)),
+            Some("翻开".into()),
+            "翻开过、进度没到线的就是在读"
+        );
+
+        // 手动覆盖赢过自动判断：进度没动的书，手动标了读完就在读完那一档。
+        shelf.update(cx, |this, cx| this.toggle_tag_filter(Tag::Finished, cx));
+        assert_eq!(shelf.read_with(cx, |this, _| this.card_count()), 1);
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_title(0)),
+            Some("手标".into()),
+            "手动挂的标签赢过自动判断"
+        );
+
+        // 再点同一颗是取消筛选：整架回来，三本都在。
+        shelf.update(cx, |this, cx| this.toggle_tag_filter(Tag::Finished, cx));
+        assert_eq!(
+            shelf.read_with(cx, |this, _| this.card_count()),
+            3,
+            "取消筛选后整架都回来"
+        );
     }
 
     /// 多选态里点一张卡是**勾选**，不是开书：两条路共用 `tap_card` 这一个入口，走错一条

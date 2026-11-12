@@ -605,16 +605,17 @@ CREATE TABLE import_records (
 
 CREATE INDEX import_records_recent ON import_records (id DESC);
 "#,
-    // v31：**阅读状态标签**（`book_tags`）。未读 / 在读 / 读完 / 弃读，固定四档，
-    // 类型在 folio-model 的 `Tag`。
+    // v31：**阅读状态标签**（`book_tags`）。未读 / 在读 / 读完，固定三档
+    // （第四档「弃读」后来撤了，见 folio-model 的 `Tag`），类型在 folio-model。
     //
-    // 是一张 `(book_id, tag)` 表而不是 `books` 上的一列，因为标签是**多选**：读者可以
-    // 同时挂几个，一列装不下。主键 `(book_id, tag)` 让重复挂同一个标签天然幂等；
-    // `ON DELETE CASCADE` 让删书带走它的标签，与批注 / 书签同一条路。
+    // 是一张 `(book_id, tag)` 表而不是 `books` 上的一列，为的是**手动覆盖**：状态
+    // 默认按阅读数据自动判（`ShelfItem::auto_status`），这张表只记读者亲手指定过的
+    // 那几本。主键 `(book_id, tag)` 让重复挂同一个标签天然幂等；`ON DELETE CASCADE`
+    // 让删书带走它的标签，与批注 / 书签同一条路。
     //
     // `tag` 存**名字**而不是序号：枚举的顺序是界面该出现的顺序，会动；名字是身份
     // （与 `annotations.style`、`import_records.status` 同一条口径）。认不出的名字
-    // 读侧直接跳过，不冒出一档说不清的东西。
+    // （含撤掉的 `abandoned`）读侧直接跳过，不冒出一档说不清的东西。
     //
     // 不发同步墓碑：标签是本机的阅读管理，别的设备没有这份行也不该被远程删除——
     // 与「删书不给批注发墓碑」的立场同源，局限（换设备不同步标签）写进 `store::tags`。

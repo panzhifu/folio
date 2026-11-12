@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension as _, params};
 
 use folio_format::ext::ChapterExt;
 
@@ -95,6 +95,7 @@ pub use folio_model::types;
 #[cfg(test)]
 mod tests;
 
+pub use books::CoverBackfillRow;
 pub use books::StaleReason;
 // 导入记录那一列的形状：界面上那张卡与结清时写库那一手共用同一份类型。
 pub use import_log::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry};
@@ -288,6 +289,31 @@ impl Store {
     pub fn user_version(&self) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// 读一个数字型的一次性标记。`prefs` 表 v1 就建好了，缺键 = 从没跑过。
+    ///
+    /// 认不出来的值（手改过的库、将来换了形状）当「没跑过」—— 宁可多跑一趟
+    /// 幂等的补齐，也不要因为一个读不动的记号永远不修。
+    pub fn pref_number(&self, key: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let raw: Option<String> = conn
+            .query_row("SELECT value_json FROM prefs WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(raw.and_then(|s| serde_json::from_str::<i64>(&s).ok()))
+    }
+
+    /// 写一个数字型的一次性标记（有则覆盖）。
+    pub fn set_pref_number(&self, key: &str, value: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO prefs (key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![key, serde_json::to_string(&value)?],
+        )?;
+        Ok(())
     }
 
     /// 库里**空闲着没人用**的那几页折成字节（`freelist_count × page_size`）。

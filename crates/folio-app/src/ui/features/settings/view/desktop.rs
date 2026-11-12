@@ -226,7 +226,7 @@ mod tests {
     /// 外观页的每一套主题都要真的长成一张卡，而不是又退回一列下拉框：
     /// 注册框架主题之后按卡片的元素 id 找得到默认那两套。桌面这一档是三列网格。
     #[gpui_kit::test]
-    async fn the_appearance_page_draws_one_card_per_theme(cx: &mut TestAppContext) {
+    async fn the_appearance_page_folds_theme_grids_by_default(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         cx.update(crate::ui::foundation::theme::register_builtin_themes);
         let handle = cx
@@ -239,13 +239,20 @@ mod tests {
 
         cx.update_window(handle, |_, window, cx| {
             window.render_frame(cx);
+            // 两侧的折叠头都在；卡片默认收起，不进元素树。
+            for side in 0..2 {
+                assert!(
+                    window.try_find(format!("theme-fold-{side}")).is_some(),
+                    "找不到主题折叠头 {side}：这一页没有把主题画成可折叠的网格"
+                );
+            }
             for name in [
                 crate::ui::foundation::theme::DEFAULT_LIGHT,
                 crate::ui::foundation::theme::DEFAULT_DARK,
             ] {
                 assert!(
-                    window.try_find(format!("theme-card-{name}")).is_some(),
-                    "找不到主题卡 {name}：这一页没有把主题画成卡片"
+                    window.try_find(format!("theme-card-{name}")).is_none(),
+                    "主题卡 {name} 不该在树里：网格默认收起"
                 );
             }
         })
@@ -283,11 +290,11 @@ mod tests {
         .expect("窗口应能渲染");
     }
 
-    /// 钉了深色之后，深侧的主题网格摊开、浅侧收起（元素树里没有浅色主题卡）——
-    /// 「选中的深浅直接显示对应侧主题」靠的就是这一格；收起的网格不进树，
-    /// 一屏才装得下。收回「跟随系统」两侧都回来。
+    /// 钉了深色之后，浅侧整段不出现（连折叠头都不进树），深侧的折叠头在而网格
+    /// 默认收起 ——「选浅色出现浅色、选深色出现深色」靠的就是这一格。
+    /// 收回「跟随系统」两侧的头都回来。
     #[gpui_kit::test]
-    async fn pinning_dark_folds_the_light_theme_grid(cx: &mut TestAppContext) {
+    async fn pinning_dark_hides_the_light_theme_grid(cx: &mut TestAppContext) {
         use folio_core::infra::config::Mode;
 
         cx.update(gpui_kit::init);
@@ -300,38 +307,35 @@ mod tests {
             })
             .into();
 
-        let light_card = crate::ui::foundation::theme::DEFAULT_LIGHT;
-        let dark_card = crate::ui::foundation::theme::DEFAULT_DARK;
+        // 找的是**折叠头**（卡片默认收起，不进元素树——头在就代表这一侧出现了）。
         let rendered = |cx: &mut TestAppContext| {
             cx.update_window(handle, |_, window, cx| {
                 window.render_frame(cx);
                 (
-                    window
-                        .try_find(format!("theme-card-{light_card}"))
-                        .is_some(),
-                    window.try_find(format!("theme-card-{dark_card}")).is_some(),
+                    window.try_find("theme-fold-0").is_some(),
+                    window.try_find("theme-fold-1").is_some(),
                 )
             })
             .expect("窗口应能渲染")
         };
 
-        // 跟随系统：两侧都摊开。
+        // 跟随系统：两侧的头都在（网格默认收起）。
         let (light, dark) = rendered(cx);
-        assert!(light && dark, "跟随系统时两侧主题网格都该摊开");
+        assert!(light && dark, "跟随系统时两侧主题区都该出现");
 
-        // 钉深色：浅侧收起（不在树里），深侧还在。
+        // 钉深色：浅侧整段不出现（连头都不在树里），深侧的头在。
         cx.update(|cx| {
             ConfigHolder::edit_appearance(cx, |appearance| appearance.mode = Mode::Dark);
         });
         let (light, dark) = rendered(cx);
-        assert!(!light, "钉深色后浅侧主题网格该收起（不在元素树里）");
-        assert!(dark, "钉深色后深侧主题网格该摊开");
+        assert!(!light, "钉深色后浅侧主题区该整段不出现");
+        assert!(dark, "钉深色后深侧主题区该出现");
 
         // 收回跟随系统：浅侧回来。
         cx.update(|cx| {
             ConfigHolder::edit_appearance(cx, |appearance| appearance.mode = Mode::System);
         });
         let (light, dark) = rendered(cx);
-        assert!(light && dark, "收回跟随系统后两侧网格都该回来");
+        assert!(light && dark, "收回跟随系统后两侧都该回来");
     }
 }

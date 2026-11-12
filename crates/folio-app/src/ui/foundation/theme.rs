@@ -31,6 +31,27 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const DEFAULT_LIGHT: &str = "Default Light";
 pub const DEFAULT_DARK: &str = "Default Dark";
 
+/// 通知条（toast）的宽度上限。框架默认 382 是按桌面窗口给的，而通知栈按 `right(边距)`
+/// 贴边摆、**宽度不夹视口** —— 384 逻辑像素的手机上右缘让 16，左缘就出屏 14
+/// （1080×2400 @ 450dpi 的机型视口正好 384）。所以宽度得按视口现算，不能只钉一个数：
+/// 钉 328 只在 360 及更宽的屏上成立，320 那档小屏仍会溢出。
+const NOTIFICATION_MAX_WIDTH: f32 = 382.0;
+
+/// 通知栈左右各让的宽度。与框架 `NotificationSettings::default()` 的左右
+/// `margins`（16）同一档 —— 那一条我们没改，这里的算式要把左边也留出来。
+const NOTIFICATION_MARGIN: f32 = 16.0;
+
+/// 通知条该多宽：视口减掉左右两条边距，上限是框架的 382。
+///
+/// 手机竖屏按视口收（384 → 352，左右各剩 16），桌面 / 平板仍用 382。没有窗口时给上限
+/// —— 开机第一趟 `platform` 还没开窗，随后 `open_main_window` 里那次带窗口的 `apply`
+/// 会算准；屏幕朝向在清单里锁死（`android:screenOrientation="locked"`），所以算一次够用。
+fn notification_width(viewport: Option<f32>) -> f32 {
+    viewport.map_or(NOTIFICATION_MAX_WIDTH, |width| {
+        (width - NOTIFICATION_MARGIN * 2.0).clamp(160.0, NOTIFICATION_MAX_WIDTH)
+    })
+}
+
 // `BUILTIN_THEME_JSON` 由 build.rs 从依赖源码里的 `themes/` 生成。
 include!(concat!(env!("OUT_DIR"), "/folio_themes.rs"));
 
@@ -271,7 +292,17 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
         theme.dark_theme = dark;
     }
 
+    // 视口要在 `Theme::change` 吃掉 `window` 之前问：那一下之后就借不到了。
+    let toast_width = notification_width(
+        window
+            .as_ref()
+            .map(|window| f32::from(window.viewport_size().width)),
+    );
     Theme::change(mode, window, cx);
+    // 通知条的宽也在 `Theme::change` 之后钉：与水墨同一条理由 —— 那一步从主题文件把
+    // 该铺的值铺进来，之后写的才不会被盖回去。主题文件里没有这一格，每次换肤重钉一遍
+    // 是让「默认 382」没有第二个生效的窗口。
+    Theme::global_mut(cx).notification.width = gpui_kit::px(toast_width);
     // 水墨：在**已经解析好的**这一本上把颜色统一去饱和。放在 `Theme::change` 之后是因为
     // 那一步才从主题文件把色值铺进来（`Theme::update` 里 `apply_config` 的注释写着
     // 「closure 之后编辑的东西会被文件里的值盖回去」，反过来写就没用）。
@@ -296,8 +327,8 @@ pub fn repaint(appearance: &Appearance, window: Option<&mut Window>, cx: &mut Ap
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_DARK, DEFAULT_LIGHT, SCROLLBAR_TINT, register_builtin_themes, repaint,
-        resolve_mode, theme_names,
+        DEFAULT_DARK, DEFAULT_LIGHT, NOTIFICATION_MARGIN, SCROLLBAR_TINT, notification_width,
+        register_builtin_themes, repaint, resolve_mode, theme_names,
     };
     use folio_core::infra::config::Mode;
     use gpui_kit::component::{Theme, ThemeMode};
@@ -373,6 +404,25 @@ mod tests {
         }
         // 两套的墨本来就不同；相同的话上面那几条断言就只是一句空话。
         assert_ne!(inks[0], inks[1], "夹具里浅深两本的 foreground 是同一个色");
+    }
+
+    /// 通知条在窄屏上必须**整条落在屏里**：通知栈是 `right(16)` 贴边摆、宽度不夹视口，
+    /// 钉死 382 时 384 宽的机器左缘就出屏 14（真机上看到的那一版）。
+    #[test]
+    fn the_toast_fits_the_narrowest_phone() {
+        for viewport in [320.0, 360.0, 384.0, 412.0] {
+            let width = notification_width(Some(viewport));
+            assert!(
+                width + NOTIFICATION_MARGIN * 2.0 <= viewport,
+                "{viewport} 宽上通知条 {width} 加两侧边距仍会出屏"
+            );
+        }
+        // 384（1080@450dpi）左右各留 16，而不是右边 16、左边出屏。
+        assert_eq!(notification_width(Some(384.0)), 352.0);
+        // 桌面 / 平板保持框架那一档，不会被这条规则缩窄。
+        assert_eq!(notification_width(Some(1200.0)), 382.0);
+        // 开机第一趟没有窗口，先给上限；开窗那次会算准。
+        assert_eq!(notification_width(None), 382.0);
     }
 
     #[test]

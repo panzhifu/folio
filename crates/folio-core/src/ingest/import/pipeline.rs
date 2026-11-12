@@ -1033,8 +1033,21 @@ fn land_cover(root: &Path, doc: &mut dyn crate::content::document::Document) {
     if bytes.is_empty() {
         return;
     }
-    let mime = cover_mime(&bytes);
-    let written = match crate::content::assets::cover::write(root, &bytes, &mime) {
+    if let Some(cover) = write_cover(root, &bytes) {
+        doc.set_cover_ref(Some(cover));
+    }
+}
+
+/// 把一份封面字节写进 `covers/` 并生成缩略图，交回描述；失败回 `None`。
+///
+/// 拆出来给「封面补齐」那一趟共用：它是同一份字节、同一个文件命名、同一对列，
+/// 不该在维护作业里抄第二遍。失败只记日志，不回 `Err` —— 封面是装饰。
+pub(super) fn write_cover(
+    root: &Path,
+    bytes: &[u8],
+) -> Option<crate::content::assets::cover::CoverRef> {
+    let mime = cover_mime(bytes);
+    let written = match crate::content::assets::cover::write(root, bytes, &mime) {
         Ok(hash) => hash.to_hex(),
         Err(err) => {
             // 字节不进库（v16），所以这一次失败就是「这本书没有封面」——
@@ -1043,28 +1056,24 @@ fn land_cover(root: &Path, doc: &mut dyn crate::content::document::Document) {
                 path = %root.display(),
                 "import: 封面没写进 covers/，这本书将没有封面：{err}"
             );
-            return;
+            return None;
         }
     };
     let cover = crate::content::assets::cover::CoverRef {
         hash: written,
         mime,
     };
-    // **缩略图在导入时一起生成**（`plans/导入管线.md` §八「缩略图」那一段推荐的正是
+    // **缩略图在落盘时一起生成**（`plans/导入管线.md` §八「缩略图」那一段推荐的正是
     // 这一档）。这一版能这么选，是因为字节不再进库：封面只有一个来源（`covers/` 那个
-    // 文件），所以「导入时生成」不会与「懒生成」抢同一份输入。
-    //
-    // 为什么放导入：导入是读者**唯一愿意等待**的时刻，而缩略图是「每本一次」的活。
-    // 懒生成的代价文档写得很清楚 —— 第一次进一个空书架时几十张图同时开工，
-    // 而那正是最要 CPU 的时刻（书架滚动）。
+    // 文件），所以「落盘时生成」不会与「懒生成」抢同一份输入。
     //
     // 失败不阻断，也不记 warn：做不出来的那些格自己回 `None`，
     // 而它失败的原因（原图是坏字节）对读者来说与「这本书本来就没有封面」同一种表现。
     //
     // 用 `ensure_all` 而不是逐档 `ensure`：同一份封面字节只该解一次图（实测省下的
     // 那一次解码约 3-7 ms/本，而两档的产出逐字节不变）。
-    crate::content::assets::thumb::ensure_all(root, &cover, &bytes);
-    doc.set_cover_ref(Some(cover));
+    crate::content::assets::thumb::ensure_all(root, &cover, bytes);
+    Some(cover)
 }
 
 /// 封面的 MIME：**只看字节头**。

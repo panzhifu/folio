@@ -97,6 +97,24 @@ pub use folio_model::position;
 // 从这里拿，不必直接依赖 folio-format。
 pub use error::{Error, ImportReject, Result};
 pub use folio_format::ext::{ChapterExt, FlowDocExt, FormatExt, PageTextExt};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// 封面在后台被补回来过几趟。架面按这个数判断缓存里的「这本没有封面」还作不作数：
+///
+/// `ShelfView` 会把 `None` 也存进封面缓存（不存就每帧重查一遍磁盘），而补齐作业在
+/// 后台线程上改的是 `covers/` 那个文件 —— 架面没有别的方式知道该文件已经出现了。
+/// 补回至少一本就 `+1`，下一帧整份缓存作废重查。原子量用 `Relaxed` 就够：它只是个
+/// 「变过没有」的记号，不与其他内存次序挂钩，丢了最多晚一帧看见封面。
+static COVER_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+pub fn cover_epoch() -> u64 {
+    COVER_EPOCH.load(Ordering::Relaxed)
+}
+
+pub(crate) fn bump_cover_epoch() {
+    COVER_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
 pub use folio_model::Tag;
 pub use folio_model::group::{GroupBy, ShelfGroup, UNGROUPED, UNKNOWN_AUTHOR, group_shelf};
 // BookSettings 的数据半边在 folio-model（阶段二下沉）；咬配置的行为经这个扩展 trait
@@ -123,9 +141,10 @@ pub use infra::time::{
     days_in_month, duration_parts, local_day, local_hour, weekday_monday0,
 };
 pub use ingest::import::{
-    BackfillReport, Candidate, CloudItem, CloudSource, ImportKind, ImportOutcome, ImportReport,
-    Imported, Origin, PathsSource, Registered, Source, UrlSource, backfill_copies, forward,
-    import_from, reindex, schedule_reindex, submit_import, sweep_orphan_copies, sweep_partials,
+    BackfillReport, COVER_BACKFILL_VERSION, Candidate, CloudItem, CloudSource, CoverBackfillReport,
+    ImportKind, ImportOutcome, ImportReport, Imported, Origin, PathsSource, Registered, Source,
+    UrlSource, backfill_copies, backfill_covers, forward, import_from, reindex, schedule_reindex,
+    submit_import, sweep_orphan_copies, sweep_partials,
 };
 pub use ingest::scan::{ScanFilter, ScanReport, ScanSource, find, format_of};
 pub use position::{LOCATOR_FORMAT_VERSION, Locator};

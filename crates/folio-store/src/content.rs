@@ -99,10 +99,20 @@ impl Store {
         //
         // 哈希是那一份**字节**的身份而不是这本书的，所以两本书共用一张封面时
         // 磁盘上只有一个文件（`content::assets::cover::write` 那边保证）。
+        //
+        // **COALESCE 保留旧指针**：这一趟没抽出封面时 `?5/?6` 是 NULL（解析没给封面、
+        // `land_cover` 写盘失败、或 provider 那一路压根没有封面），直接写 NULL 会把
+        // 原来指着的那份 `covers/` 文件变成孤儿 —— 文件还在盘上，界面却画占位，
+        // 读者看到的就是「封面突然消失」。重扫是常事（`INDEX_VERSION` 一 bump 就
+        // 逐本重扫），不能由它来抹掉一份还有效的封面。
+        // 代价写在明处：换了一份「确实没有封面」的文件时，旧封面会留着，直到下一次
+        // 真的抽出新封面才被盖掉 —— 那是一张过时的装饰，比丢掉封面轻得多。
         tx.execute(
             "UPDATE books
                 SET css = ?2, toc_json = ?3, index_version = ?4,
-                    cover_hash = ?5, cover_mime = ?6, progression_rtl = ?7,
+                    cover_hash = COALESCE(?5, cover_hash),
+                    cover_mime = COALESCE(?6, cover_mime),
+                    progression_rtl = ?7,
                     rules_hash = ?8, font_charset = ?9
               WHERE id = ?1",
             params![
@@ -378,10 +388,14 @@ impl Store {
         // 字节不进库（v16），文件在 `covers/<hash>.<ext>`，库里只留拼文件名的两个数。
         // 这两列以前**不在这一条 UPDATE 里**，于是 `land_cover` 写进磁盘的那份首页图
         // 没有哪一列指向它 —— 漫画与 PDF 的书架封面就是这么整个丢掉的。
+        //
+        // 同样用 COALESCE 保留旧指针：定版式的首页栅格化失败（`PageSource::Render`
+        // 那一趟拿不到像素）时 `cover_ref` 为空，不该把这份已经落盘的封面抹成孤儿。
         conn.execute(
             "UPDATE books
                 SET fixed_json = ?2, toc_json = ?3, index_version = ?4,
-                    cover_hash = ?5, cover_mime = ?6
+                    cover_hash = COALESCE(?5, cover_hash),
+                    cover_mime = COALESCE(?6, cover_mime)
               WHERE id = ?1",
             params![
                 book_id,

@@ -102,6 +102,24 @@ pub struct ShelfItem {
     pub cover_root: Option<std::path::PathBuf>,
 }
 
+impl ShelfItem {
+    /// 这本书按阅读数据**自动**落的状态档 —— 三条判据，全用这一行已有的两格，不回库：
+    ///
+    /// - **从没翻开过**（[`Self::last_opened_at`] 是 `None`）→ 未读。「翻开」由阅读
+    ///   会话那一侧顶（`Store::touch_opened`），「清除阅读记录」会把它清回 `NULL`，
+    ///   那本书也就自动回到未读 —— 判据跟着数据走，不需要谁记得去改标签。
+    /// - **翻开过且进度到了 [`Tag::FINISHED_PROGRESS`]** → 读完。
+    /// - **其余**（翻开过、进度没到，或进度算不出来）→ 在读。进度算不出（章节字数
+    ///   还没算过、全书字数为零）不动摇「翻开过」这个事实。
+    pub fn auto_status(&self) -> Tag {
+        match self.last_opened_at {
+            None => Tag::Unread,
+            Some(_) if self.progress.is_some_and(|p| p >= Tag::FINISHED_PROGRESS) => Tag::Finished,
+            Some(_) => Tag::Reading,
+        }
+    }
+}
+
 /// 界面那五色划线的合法取值，按菜单里圆点从左到右摆：红 / 紫 / 蓝 / 绿 / 黄。
 /// 存的是**名字**而不是 ARGB：配色属于主题，把颜色值写死进标注，将来换主题就成了
 /// 修不了的数据问题。
@@ -252,9 +270,14 @@ impl Collection {
     }
 }
 
-/// 阅读状态标签，固定四档：未读 / 在读 / 读完 / 弃读。**多选**：一本书可以同时挂着
-/// 不止一个（读者自己决定组合说不说得通），所以存的是一张 `(book_id, tag)` 表而不是
-/// `books` 上的一列。
+/// 阅读状态标签，固定三档：未读 / 在读 / 读完。手动标记走一张 `(book_id, tag)` 表
+/// （标记浮层写入），但这张表**不是状态的真相源** —— 状态默认按阅读数据自动判
+/// （[`ShelfItem::auto_status`]），手动挂的标签只是对自动判断的**覆盖**：进度停在
+/// 九成七但确实读完了的书，读者可以亲手把它标成读完。
+///
+/// 「弃读」曾是第四档（v31 引入），随自动判状态一起撤了：翻开又放下的书自动归「在读」，
+/// 手动盖章那一格价值撑不起一档。老库里写过的 `abandoned` 行由 [`Self::parse`] 当
+/// 认不出的键跳过 —— 那本书落回自动判断，不需要迁移。
 ///
 /// 与 [`AnnotationStyle`] 同一条存法：**存名字不存序号** —— 枚举的顺序是界面该出现的
 /// 顺序，会动；名字是身份，往中间插一档不能把老行读错。
@@ -265,13 +288,18 @@ pub enum Tag {
     Unread,
     Reading,
     Finished,
-    Abandoned,
 }
 
 impl Tag {
-    /// 全部四档，按界面该出现的顺序（阅读的一生）。加一档忘了在这里挂，界面上就永远选不到它。
-    pub const ALL: &'static [Self] =
-        &[Self::Unread, Self::Reading, Self::Finished, Self::Abandoned];
+    /// 进度到多少算「读完」。
+    ///
+    /// 进度几乎不会**恰好**到 1.0 —— 那要求读者停在全书最后一个字符上，而正文之后
+    /// 常常还跟着版权页、附录这些读完的人不会去读的东西。给一档余量：读到 99% 就算
+    /// 读完，最后一格的零头不跟读者计较。
+    pub const FINISHED_PROGRESS: f32 = 0.99;
+
+    /// 全部三档，按界面该出现的顺序（阅读的一生）。加一档忘了在这里挂，界面上就永远选不到它。
+    pub const ALL: &'static [Self] = &[Self::Unread, Self::Reading, Self::Finished];
 
     /// 库里 `book_tags.tag` 用的键名。
     pub fn as_str(self) -> &'static str {
@@ -279,21 +307,40 @@ impl Tag {
             Self::Unread => "unread",
             Self::Reading => "reading",
             Self::Finished => "finished",
-            Self::Abandoned => "abandoned",
         }
     }
 
     /// 认不出的名字交回 `None`：老版本写进库的键、或手改坏的键不该在界面上冒出一档
     /// 说不清的东西 —— 读侧直接跳过那一行。这与 [`AnnotationStyle::parse`] 落默认档
     /// 不同：那里是「三选一的偏好」，总有正确答案；这里是「读者挂的标记」，没有默认。
+    ///
+    /// 撤掉的「弃读」（`abandoned`）从这里落下去，与坏键同一处置：那本书回到自动判断。
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "unread" => Self::Unread,
             "reading" => Self::Reading,
             "finished" => Self::Finished,
-            "abandoned" => Self::Abandoned,
             _ => return None,
         })
+    }
+
+    /// 一本书的**有效状态**：手动挂过标签的以手动为准，没挂的用自动判出的 `auto`。
+    ///
+    /// 手动那半边可能是老数据的多选行（标记浮层曾经能同时挂几档），取「读得最远」的
+    /// 那档 —— {未读, 在读} 归在读，{在读, 读完} 归在读完：手动那本账说的是「这本
+    /// 走到哪儿了」，以走得最远的那格为准。新写入只会是一档（标记浮层已改单选），
+    /// 老行随读者的下一次标记自然归一。
+    pub fn effective(manual: &[Tag], auto: Tag) -> Tag {
+        manual
+            .iter()
+            .max_by_key(|tag| {
+                Self::ALL
+                    .iter()
+                    .position(|known| known == *tag)
+                    .unwrap_or(usize::MAX)
+            })
+            .copied()
+            .unwrap_or(auto)
     }
 }
 
@@ -406,10 +453,87 @@ mod tag_tests {
     }
 
     /// 认不出的键交 `None` 而不是默认档：没有默认标签这一说，坏键直接跳过。
+    /// 撤掉的「弃读」也从这里落下去 —— 老库里的 `abandoned` 行当坏键跳过，
+    /// 那本书回到自动判断，不需要迁移。
     #[test]
     fn unknown_names_do_not_become_a_tag() {
         assert_eq!(Tag::parse(""), None);
         assert_eq!(Tag::parse("Reading"), None);
         assert_eq!(Tag::parse("archived"), None);
+        assert_eq!(Tag::parse("abandoned"), None);
+    }
+
+    /// 有效状态：手动挂过的以手动为准，没挂的用自动判出的那档。
+    #[test]
+    fn manual_tags_win_over_the_auto_one() {
+        assert_eq!(
+            Tag::effective(&[Tag::Finished], Tag::Reading),
+            Tag::Finished
+        );
+        assert_eq!(Tag::effective(&[Tag::Unread], Tag::Reading), Tag::Unread);
+        assert_eq!(Tag::effective(&[], Tag::Reading), Tag::Reading);
+        assert_eq!(Tag::effective(&[], Tag::Unread), Tag::Unread);
+    }
+
+    /// 老数据的多选行取「读得最远」的那档：手动那本账说的是「这本走到哪儿了」。
+    #[test]
+    fn legacy_multi_rows_take_the_furthest_tier() {
+        assert_eq!(
+            Tag::effective(&[Tag::Unread, Tag::Reading], Tag::Unread),
+            Tag::Reading
+        );
+        assert_eq!(
+            Tag::effective(&[Tag::Reading, Tag::Finished], Tag::Reading),
+            Tag::Finished
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_status_tests {
+    use super::{ShelfItem, Tag};
+
+    /// 两格判据之外的字段都不参与：封面、作者、格式随便填。
+    fn item(opened: Option<i64>, progress: Option<f32>) -> ShelfItem {
+        ShelfItem {
+            id: 1,
+            title: "书".into(),
+            authors: Vec::new(),
+            format: "epub".into(),
+            cover: None,
+            last_opened_at: opened,
+            progress,
+            cover_ref: None,
+            cover_root: None,
+        }
+    }
+
+    /// 没翻开过就是未读 —— 哪怕那一行不知怎么带了进度。
+    #[test]
+    fn a_book_never_opened_is_unread() {
+        assert_eq!(item(None, None).auto_status(), Tag::Unread);
+        assert_eq!(item(None, Some(0.5)).auto_status(), Tag::Unread);
+    }
+
+    /// 翻开过、进度没到线（或根本算不出）就是在读。
+    #[test]
+    fn an_opened_book_below_the_line_is_reading() {
+        assert_eq!(item(Some(1), Some(0.0)).auto_status(), Tag::Reading);
+        assert_eq!(item(Some(1), Some(0.98)).auto_status(), Tag::Reading);
+        assert_eq!(
+            item(Some(1), None).auto_status(),
+            Tag::Reading,
+            "进度算不出不动摇「翻开过」这个事实"
+        );
+    }
+
+    /// 进度到 [`Tag::FINISHED_PROGRESS`] 就是读完 —— 1.0 几乎到不了，0.99 算数。
+    #[test]
+    fn an_opened_book_past_the_line_is_finished() {
+        assert_eq!(
+            item(Some(1), Some(Tag::FINISHED_PROGRESS)).auto_status(),
+            Tag::Finished
+        );
+        assert_eq!(item(Some(1), Some(1.0)).auto_status(), Tag::Finished);
     }
 }

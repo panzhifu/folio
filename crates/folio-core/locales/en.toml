@@ -732,13 +732,13 @@ no_results_hint = "Try another word — this searches titles and authors, not th
 # end that has a system share sheet (Android).
 share = "Share"
 book_delete = "Delete"
-# Reading status tags: four fixed values, multi-select; the type lives in folio-model as Tag.
+# Reading status tags: three fixed values, single-select manual override; the status is
+# auto-detected from reading activity by default. The type lives in folio-model as Tag.
 tag = "Mark"
-tag_hint = "Give this book a status. You can set several at once; tapping outside saves."
+tag_hint = "Pin a status for this book; tap it again to go back to automatic, or leave it blank to let your reading decide."
 tag_unread = "Unread"
 tag_reading = "Reading"
 tag_finished = "Finished"
-tag_abandoned = "Abandoned"
 # Clear reading history: the long-press entry. It clears "how far I got"; annotations stay.
 clear_history = "Clear reading history"
 clear_history_body = "This book's progress, read chapters and reading time will be cleared. Annotations are kept. This cannot be undone."
@@ -773,6 +773,8 @@ info_author_hint = "Separate authors with ·"
 # Save stays disabled while the title is empty — say why beside it.
 info_title_required = "Title is required"
 info_save = "Save"
+info_section_publication = "Publication"
+info_section_file = "File"
 info_format = "Format"
 info_size = "Size"
 # Below that: the book's own bibliographic record (the Dublin Core set). Only the fields
@@ -917,7 +919,6 @@ delete = "Delete"
 # 少一句或两句同文，`services/update.rs` 那条「五档念五句」的测试会红。
 [update]
 group = "Updates"
-desc = "Check once for a newer version. Folio never checks on its own and sends no telemetry."
 check = "Check for updates"
 idle = "Not checked yet"
 checking = "Checking…"
@@ -934,12 +935,8 @@ notes_missing = "No release notes were left for this version"
 open_page = "Open downloads"
 copy_url = "Copy download link"
 notes = "Release notes"
-notes_hint = "What changed in this version"
-"notes.desc" = "The text comes from this version's entry in the release repository; it can't be fetched while offline."
 view = "View"
 
-# 日志反馈那一格。`privacy` 那句必须摆在**按下之前**而不是之后：日志里带《书名》与
-# 落盘路径（`import:` 那些行写的就是它们），事后告知等于没告知。
 download = "Download and install"
 install = "Install"
 downloading = "Downloading…"
@@ -952,7 +949,6 @@ fail_checksum = "**Checksum mismatch**: this package is not the one that was pub
 fail_io = "Couldn't write to disk (out of space, or not allowed)"
 [feedback]
 title = "Send logs"
-desc = "When something breaks — a book that won't open, a screen that looks wrong, the app quitting on its own — hand the tail of the log to the author."
 send = "Send logs"
 idle = "Not sent yet"
 working = "Preparing the log…"
@@ -961,7 +957,6 @@ copied = "A copy is in your Downloads folder and a draft is open — please atta
 no_mail = "This device has no mail client; the copy is saved and the address and path are on your clipboard"
 no_log = "Logging is off: logging.file is disabled in the config"
 failed = "Something went wrong preparing the log"
-privacy = "The log contains book titles and file paths from your library"
 
 # 「笔记」目的地：全书库的书签与批注，按书分组。读不到库与「还没有批注」是两句话。
 [notes]
@@ -1077,7 +1072,7 @@ baidu = "Baidu Netdisk"
 not_configured = "Not set up"
 token_saved = "access_token saved"
 edit = "Edit"
-drives_hint = "Open a drive to browse its books, tick the ones to add."
+drives_hint = "Pick a drive; once it's set up, its folders appear below — tick the books to add."
 url = "Address"
 username = "Username"
 password = "Password"

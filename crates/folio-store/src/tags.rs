@@ -1,9 +1,11 @@
-//! 阅读状态标签：一本书挂着哪几个标记，以及「清除阅读记录」这一把总闸。
+//! 阅读状态标签：读者**亲手指定**过的状态，以及「清除阅读记录」这一把总闸。
 //!
-//! 标签是**固定四档**（folio-model 的 [`Tag`]，存名字不存序号），不是读者自建的词汇 ——
-//! 自建词汇那件事库里有现成的答案：[`collections`](super::collections)。两者分开的理由
-//! 是语义：分组回答「这几本归一堆」，标签回答「这一本读到哪儿了」，前者要多对多的
-//! 自由名字，后者要一套人人认得的档位。
+//! 状态的真相源不在这一张表：三档（folio-model 的 [`Tag`]，存名字不存序号）默认按
+//! 阅读数据自动判（`ShelfItem::auto_status` —— 没翻开是未读，进度到线是读完，其余
+//! 在读），这张表只记**手动覆盖** —— 进度停在九成七但确实读完的书，读者可以亲手
+//! 把它标成读完。不是读者自建词汇那件事库里有现成的答案：
+//! [`collections`](super::collections)。两者分开的理由是语义：分组回答「这几本归一堆」，
+//! 标签回答「这一本读到哪儿了」，前者要多对多的自由名字，后者要一套人人认得的档位。
 //!
 //! 不发同步墓碑：标签是本机的阅读管理，同步链（`store::sync`）不认识这张表，
 //! 换设备不同步标签 —— 这是刻意的取舍，不是漏了。
@@ -171,12 +173,10 @@ mod tests {
         let store = Store::in_memory().unwrap();
         let a = book(&store, "a.epub");
         store.set_book_tags(a, &[Tag::Reading]).unwrap();
-        store
-            .set_book_tags(a, &[Tag::Finished, Tag::Abandoned])
-            .unwrap();
+        store.set_book_tags(a, &[Tag::Finished]).unwrap();
         assert_eq!(
             store.tags_of_book(a).unwrap(),
-            vec![Tag::Finished, Tag::Abandoned],
+            vec![Tag::Finished],
             "上一次的 Reading 不该残留"
         );
 
@@ -260,39 +260,9 @@ mod tests {
         );
     }
 
-    /// 标签筛选取的是「挂着这一个的所有书」：一本挂两个标签不出两行，序照旧最近在先，
-    /// 搜索词照常叠在上面。没挂任何标签的那本不出现。
-    #[test]
-    fn shelf_by_tag_returns_each_book_once_in_shelf_order() {
-        let store = Store::in_memory().unwrap();
-        let a = book(&store, "a.epub");
-        let b = book(&store, "b.epub");
-        book(&store, "丙.epub");
-        store
-            .set_book_tags(a, &[Tag::Reading, Tag::Unread])
-            .unwrap();
-        store.set_book_tags(b, &[Tag::Reading]).unwrap();
-
-        let got = store.shelf_by_tag(Tag::Reading, "").unwrap();
-        assert_eq!(
-            got.iter().map(|item| item.id).collect::<Vec<_>>(),
-            vec![b, a],
-            "挂了 Reading 的两本各出一行，序照旧最近在先（同秒入库后落库在先）；丙没挂标签，不出现"
-        );
-        assert_eq!(
-            store.shelf_by_tag(Tag::Reading, "丙").unwrap().len(),
-            0,
-            "搜索词叠在标签之上"
-        );
-        assert_eq!(
-            store.shelf_by_tag(Tag::Abandoned, "").unwrap().len(),
-            0,
-            "没人挂的标签筛出来是空的"
-        );
-    }
-
     /// 标签的键认不出就跳过：老版本写进库的坏键不该在界面上冒出一档说不清的东西。
-    /// 文件库 + 裸连接按**库文件契约**插一行坏键，再走公开 API 读。
+    /// 文件库 + 裸连接按**库文件契约**插一行坏键，再走公开 API 读。撤掉的「弃读」
+    /// （`abandoned`）与坏键同一处置 —— 那本书落回自动判断，不需要迁移。
     #[test]
     fn an_unknown_tag_name_is_skipped_on_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -303,11 +273,13 @@ mod tests {
 
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
-            conn.execute(
-                "INSERT INTO book_tags (book_id, tag) VALUES (?1, 'archived')",
-                rusqlite::params![a],
-            )
-            .unwrap();
+            for name in ["archived", "abandoned"] {
+                conn.execute(
+                    "INSERT INTO book_tags (book_id, tag) VALUES (?1, ?2)",
+                    rusqlite::params![a, name],
+                )
+                .unwrap();
+            }
         }
 
         let store = Store::open_at(&db).unwrap();

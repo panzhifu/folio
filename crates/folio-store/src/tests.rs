@@ -926,6 +926,63 @@ fn a_changed_file_or_an_old_index_is_reported_as_stale() {
     assert_eq!(store.stale_reason(id).unwrap(), Some(StaleReason::Missing));
 }
 
+/// 库里记着一份封面、`covers/` 里文件却不在了 —— 认成 `MissingCover`，由开书那趟
+/// 重扫从书里重新抽出来。反过来，从来没有封面的书（两列 NULL）不能被算成不可信：
+/// 否则每本 TXT 每次开书都要白重扫一遍。
+#[test]
+fn a_missing_cover_file_is_stale_but_a_coverless_book_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let root = dir.path();
+    let path = root.join("a.md");
+    std::fs::write(&path, "# 一\n\n正文\n").unwrap();
+    let store = Store::open_at(&db).unwrap();
+
+    // 一本从来没封面的：两列 NULL。
+    let plain = store.add_book(&path, &meta("没封面")).unwrap();
+    store
+        .save_flow(plain, &flow(&[("一", "正文")]), Format::Markdown)
+        .unwrap();
+    assert_eq!(
+        store.stale_reason(plain).unwrap(),
+        None,
+        "没有封面的书不该被判成要重扫"
+    );
+
+    // 一本记过封面的：写下两格描述，也真的在 covers/ 里放一份文件。
+    let cover = b"pretend-jpeg-cover-bytes";
+    let hash = crate::assets::cover::write(root, cover, "image/jpeg").unwrap();
+    let file = crate::assets::cover::cover_path(root, &hash.to_hex(), "image/jpeg");
+    let second = root.join("b.epub");
+    std::fs::write(&second, "fake").unwrap();
+    let mut doc = flow(&[("一", "正文")]);
+    doc.cover = Some(cover.to_vec());
+    doc.cover_ref = Some(crate::assets::cover::CoverRef {
+        hash: hash.to_hex(),
+        mime: "image/jpeg".into(),
+    });
+    let with_cover = store.add_book(&second, &meta("有封面")).unwrap();
+    store.save_flow(with_cover, &doc, Format::Markdown).unwrap();
+    assert_eq!(
+        store.stale_reason(with_cover).unwrap(),
+        None,
+        "文件在就可信"
+    );
+
+    // 文件被清掉（用户清了 covers/、只导数据的备份恢复过来……）。
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(
+        store.stale_reason(with_cover).unwrap(),
+        Some(StaleReason::MissingCover),
+        "记过的封面没了要认出来，交给重扫重新抽"
+    );
+    assert_eq!(
+        store.stale_reason(plain).unwrap(),
+        None,
+        "同一趟里没封面的那本仍然可信"
+    );
+}
+
 /// 读回 `books.rules_hash` 那一格（库文件契约，不碰私有字段）。
 fn rules_hash_column(db: &Path, book_id: i64) -> Option<String> {
     let conn = rusqlite::Connection::open(db).unwrap();
@@ -1852,6 +1909,82 @@ fn a_cover_lives_in_a_file_and_never_in_the_database() {
         .unwrap();
     assert_eq!(store.book_cover(plain).unwrap(), None);
     assert!(store.orphan_cover_file(plain).unwrap().is_none());
+}
+
+/// 重扫那一趟**没抽出封面**时，不许把库里原有的封面指针抹成 NULL。
+///
+/// 症状就是「封面突然消失」：`covers/` 里那份文件还在，而 `cover_hash` / `cover_mime`
+/// 被无条件 UPDATE 写成 NULL，`book_cover()` 从此回 None。重扫是常事（`INDEX_VERSION`
+/// 一 bump 就逐本重扫），不能由它把一份还有效的封面变成孤儿。
+#[test]
+fn a_rescan_without_a_cover_keeps_the_existing_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("folio.db");
+    let root = dir.path();
+    let store = Store::open_at(&db).unwrap();
+
+    let cover = b"pretend-jpeg-cover-bytes";
+    let hash = crate::assets::cover::write(root, cover, "image/jpeg").unwrap();
+    let mut with_cover = flow(&[("一", "正文")]);
+    with_cover.cover = Some(cover.to_vec());
+    with_cover.cover_ref = Some(crate::assets::cover::CoverRef {
+        hash: hash.to_hex(),
+        mime: "image/jpeg".into(),
+    });
+
+    // 可重排那一路。
+    let flow_id = store.add_book(&root.join("a.epub"), &meta("甲")).unwrap();
+    store
+        .save_flow(flow_id, &with_cover, Format::Markdown)
+        .unwrap();
+    assert_eq!(
+        store.book_cover(flow_id).unwrap().as_deref(),
+        Some(&cover[..])
+    );
+
+    let mut no_cover = flow(&[("一", "正文")]);
+    no_cover.cover = None;
+    no_cover.cover_ref = None;
+    store
+        .save_flow(flow_id, &no_cover, Format::Markdown)
+        .unwrap();
+    assert_eq!(
+        store.book_cover(flow_id).unwrap().as_deref(),
+        Some(&cover[..]),
+        "重扫没抽到封面，旧指针必须留着"
+    );
+
+    // 定版式那一路：`save_fixed_in` 与可重排共用同一条式子，首页栅格化失败时
+    // `cover_ref` 同样为空，也不该抹掉。
+    let fixed_id = store.add_book(&root.join("b.cbz"), &meta("乙")).unwrap();
+    let fixed = FixedDoc {
+        pages: vec![FixedPage {
+            source: PageSource::Image {
+                href: "1.png".into(),
+            },
+            width: 800,
+            height: 1200,
+            extra_images: Vec::new(),
+        }],
+        toc: Vec::new(),
+        cover: Some(cover.to_vec()),
+        cover_ref: with_cover.cover_ref.clone(),
+        images: Vec::new(),
+        width: 800,
+        height: 1200,
+    };
+    store.save_fixed(fixed_id, &fixed).unwrap();
+    let without = FixedDoc {
+        cover: None,
+        cover_ref: None,
+        ..FixedDoc::default()
+    };
+    store.save_fixed(fixed_id, &without).unwrap();
+    assert_eq!(
+        store.book_cover(fixed_id).unwrap().as_deref(),
+        Some(&cover[..]),
+        "定版式重扫没抽到封面，旧指针也必须留着"
+    );
 }
 
 /// 都柏林那几项写进去再读出来，一格都不该变样。

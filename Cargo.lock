@@ -2250,14 +2250,14 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "folio-account"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ring",
 ]
 
 [[package]]
 name = "folio-ai"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "folio-base",
  "folio-net",
@@ -2268,7 +2268,7 @@ dependencies = [
 
 [[package]]
 name = "folio-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "android-activity",
  "android_logger",
@@ -2296,7 +2296,7 @@ dependencies = [
 
 [[package]]
 name = "folio-base"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -2311,7 +2311,7 @@ dependencies = [
 
 [[package]]
 name = "folio-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "folio-account",
@@ -2357,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "folio-fonts"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "folio-base",
  "folio-format",
@@ -2375,7 +2375,7 @@ dependencies = [
 
 [[package]]
 name = "folio-format"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "cfb",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "folio-model"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "folio-net"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2445,7 +2445,7 @@ dependencies = [
 
 [[package]]
 name = "folio-render"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "folio-core",
  "folio-format",
@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "folio-search"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "folio-base",
  "folio-format",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "folio-speech"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-channel",
  "tracing",
@@ -2476,7 +2476,7 @@ dependencies = [
 
 [[package]]
 name = "folio-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "folio-base",
  "folio-format",
@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "folio-translate"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flate2",
  "folio-base",

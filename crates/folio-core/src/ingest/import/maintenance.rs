@@ -1,8 +1,8 @@
-//! 两趟只动库、不动来源的维护：补齐（给还没身份的行认身份，并把旧名字的副本改成哈希名）
-//! 与启动时扫半成品。
+//! 开机那几趟维护：给还没身份的行认身份并改名、扫半成品，以及把丢掉的封面补回来。
 //!
-//! 判据是这一趟读不读**来源**：两趟都只面对库里那一行与它记的那个路径，所以都不进暂存区，
-//! 也不走 `ingest` / `index`（重扫那条在 [`pipeline`](super::pipeline)）。
+//! 前两趟只动库、不动来源，也不走 `ingest` / `index`（重扫那条在
+//! [`pipeline`](super::pipeline)）。**封面补齐是例外**：封面字节 v16 起只活在
+//! `covers/` 那个文件里，丢了的唯一来源就是书本身，所以那一趟必须回容器读一次。
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -10,12 +10,15 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use crate::content::format::Format;
+use crate::content::format::ParseBudget;
 use crate::error::IoResultExt as _;
 use crate::infra::paths;
 use crate::infra::task::StageCtx;
 use crate::ingest::identity;
 use crate::store::BookRow;
+use crate::store::CoverBackfillRow;
 use crate::store::Store;
+use crate::store::book_root;
 use folio_format::ext::FormatExt;
 
 /// 一趟补齐：给「还没有内容身份」的行算哈希，并把旧名字的副本改成哈希名。
@@ -92,6 +95,149 @@ pub fn backfill_copies(store: &Store, book_dir: &Path, ctx: &StageCtx) -> Backfi
         );
     }
     report
+}
+
+/// 这一版「封面补齐」的记号。改了补齐的判据或解析法就往上加，老机器下次开机再跑一趟。
+///
+/// 存在库的 `prefs` 表里（v1 就在），不另建表、不进迁移清单 —— 迁移是「库长什么样」，
+/// 而这是一趟「跑没跑过」的作业记账，改它不需要动 schema。
+pub const COVER_BACKFILL_VERSION: i64 = 1;
+pub(super) const COVER_BACKFILL_KEY: &str = "cover_backfill";
+
+/// 封面补齐一趟的账。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoverBackfillReport {
+    /// 看过的行数（含本来就好的）。
+    pub scanned: u64,
+    /// 真的重新抽出来、写回 `covers/` 的行数。
+    pub restored: u64,
+    /// 描述在、文件也在的行，或源文件已经不在的行。
+    pub skipped: u64,
+    /// 源文件在、但解析 / 写盘没成的行。
+    pub failed: u64,
+}
+
+/// **把丢掉的封面补回来**：v15/v16 那次升级把 `books.cover` 这个 BLOB 删了，却没有
+/// 先把老行写成 `covers/` 文件；`covers/` 被清过、只导数据的备份恢复过来、以及某次
+/// 重扫把 `cover_hash` 写成 NULL 的行，症状都是「架面上那张图不见了」。
+///
+/// 封面字节不可再生于库（v16 起库里只有两格描述），唯一来源是那份书文件，所以这一趟
+/// 必须回容器读一次。它跑在 `Cleanup` 档、按 `prefs` 里的记号**整机只跑一次**，不是
+/// 每次开机都把全库解一遍 —— 与 `backfill_copies` 同一条懒补口径
+/// （`plans/基础设施.md` §1.2 第 1 条）。
+///
+/// 取消点在书与书之间，**被取消就不写记号**：已经补好的那些下次会被「文件在」挡掉，
+/// 没走到的那些下次接着补。
+pub fn backfill_covers(store: &Store, ctx: &StageCtx) -> CoverBackfillReport {
+    let mut report = CoverBackfillReport::default();
+    // 先问记号，跑过就整趟不读全库。读不出来按「没跑过」处理：多跑一趟是幂等的。
+    if let Ok(Some(done)) = store.pref_number(COVER_BACKFILL_KEY)
+        && done >= COVER_BACKFILL_VERSION
+    {
+        return report;
+    }
+    let rows = match store.rows_for_cover_backfill() {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!("import: 封面补齐问不到书目：{err:#}");
+            return report;
+        }
+    };
+    let total = rows.len() as u64;
+    let mut cancelled = false;
+    for (done, row) in rows.iter().enumerate() {
+        if ctx.cancel().triggered() {
+            cancelled = true;
+            tracing::info!("import: 封面补齐被取消，已看 {done} / {total} 本");
+            break;
+        }
+        ctx.item(done as u64, total);
+        report.scanned += 1;
+        match restore_cover(store, row) {
+            RestoreCover::Already => report.skipped += 1,
+            RestoreCover::Restored => report.restored += 1,
+            RestoreCover::Unavailable => report.skipped += 1,
+            RestoreCover::Failed => report.failed += 1,
+        }
+    }
+    ctx.item(total, total);
+    if !cancelled
+        && let Err(err) = store.set_pref_number(COVER_BACKFILL_KEY, COVER_BACKFILL_VERSION)
+    {
+        // 记号没写上，下次会再跑一趟；已补好的被「文件在」挡掉，不会重复写盘。
+        tracing::warn!("import: 封面补齐的记号没写上：{err:#}");
+    }
+    if report.restored > 0 {
+        // 架面把「没有封面」也缓存了，得让它下一帧重查一次，否则封面补回来了还画占位。
+        crate::bump_cover_epoch();
+    }
+    if report.restored > 0 || report.failed > 0 {
+        tracing::info!(
+            "import: 封面补齐一趟 —— 看过 {} 本，补回 {}，跳过 {}，没补成 {}",
+            report.scanned,
+            report.restored,
+            report.skipped,
+            report.failed
+        );
+    }
+    report
+}
+
+enum RestoreCover {
+    /// 描述在、`covers/` 里文件也在。
+    Already,
+    /// 重新抽出来写回去了。
+    Restored,
+    /// 源文件不在 / 这本书本来就没封面，没得补。
+    Unavailable,
+    /// 源文件在，但解析或写盘失败。
+    Failed,
+}
+
+fn restore_cover(store: &Store, row: &CoverBackfillRow) -> RestoreCover {
+    let root = book_root(Path::new(&row.path));
+    // 两格都有、且拼出来的文件真的在 → 这一本没事。
+    if let (Some(hash), Some(mime)) = (row.cover_hash.as_deref(), row.cover_mime.as_deref())
+        && !hash.is_empty()
+        && !mime.is_empty()
+        && crate::content::assets::cover::resolve(&root, hash, mime).is_some()
+    {
+        return RestoreCover::Already;
+    }
+    let path = Path::new(&row.path);
+    if !path.is_file() {
+        return RestoreCover::Unavailable;
+    }
+    // 带口令的 PDF 少这一格就解不出首页；口令按整本记，本机自持。
+    let passphrase = store.passphrase_for_book(row.id).ok().flatten();
+    let document = match crate::content::document::open_with(
+        path,
+        // 后台清理档一次只处理一本，别为一本封面把整机核数都占上。
+        ParseBudget::AtMost(1),
+        passphrase,
+    ) {
+        Ok(document) => document,
+        Err(err) => {
+            tracing::debug!(book_id = row.id, "import: 封面补齐读不动这本书：{err:#}");
+            return RestoreCover::Failed;
+        }
+    };
+    let Some(bytes) = document.cover() else {
+        return RestoreCover::Unavailable;
+    };
+    if bytes.is_empty() {
+        return RestoreCover::Unavailable;
+    }
+    let Some(cover) = super::pipeline::write_cover(&root, bytes) else {
+        return RestoreCover::Failed;
+    };
+    match store.set_cover_ref(row.id, &cover.hash, &cover.mime) {
+        Ok(()) => RestoreCover::Restored,
+        Err(err) => {
+            tracing::warn!(book_id = row.id, "import: 封面补齐写不回描述：{err:#}");
+            RestoreCover::Failed
+        }
+    }
 }
 
 /// 一行。`Some((改过名没有, 改指过没有))` = 身份写进去了；`None` = 这一行跳过。

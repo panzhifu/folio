@@ -704,13 +704,12 @@ no_results_hint = "Prueba con otra palabra — aquí se busca en títulos y auto
 # 「分享」递的是库里那一份副本的文件本身，只在有系统分享面板的那一端摆这一条（Android）。
 share = "Compartir"
 book_delete = "Eliminar"
-# Etiquetas de estado de lectura: cuatro valores fijos, selección múltiple; el tipo es Tag en folio-model.
+# Etiquetas de estado de lectura: tres valores fijos, elección manual única sobre la automática; el estado se deduce por defecto de tu lectura. El tipo es Tag en folio-model.
 tag = "Marcar"
-tag_hint = "Ponle un estado a este libro. Puedes poner varios a la vez; tocar fuera guarda."
+tag_hint = "Fija el estado de este libro; tócalo de nuevo para volver al automático, o déjalo vacío para deducirlo por tu lectura."
 tag_unread = "Sin leer"
 tag_reading = "Leyendo"
 tag_finished = "Terminado"
-tag_abandoned = "Abandonado"
 # Borrar historial de lectura: la entrada del menú de pulsación larga. Borra «hasta dónde llegué»; las notas quedan.
 clear_history = "Borrar historial de lectura"
 clear_history_body = "El progreso, los capítulos leídos y el tiempo de lectura de este libro se borrarán. Las anotaciones se conservan. No se puede deshacer."
@@ -742,6 +741,8 @@ info_author_hint = "Separa los autores con ·"
 # 书名清空时那颗「保存」按不动 —— 只禁用不解释，读者得自己猜是哪里不对。
 info_title_required = "El título no puede quedar vacío"
 info_save = "Guardar"
+info_section_publication = "Publicación"
+info_section_file = "Archivo"
 info_format = "Formato"
 info_size = "Tamaño"
 # 底下那一组是这本书自带的书目（都柏林核心那一组）。**有值才摆那一行** —— 一本电子书
@@ -877,7 +878,6 @@ delete = "Eliminar"
 # 少一句或两句同文，`services/update.rs` 那条「五档念五句」的测试会红。
 [update]
 group = "Actualizaciones"
-desc = "Comprueba una vez si hay una versión más nueva. Folio nunca comprueba solo ni envía estadísticas."
 check = "Buscar actualizaciones"
 idle = "Aún sin comprobar"
 checking = "Comprobando…"
@@ -894,12 +894,8 @@ notes_missing = "Esta versión no dejó notas de actualización"
 open_page = "Abrir la página de descargas"
 copy_url = "Copiar el enlace de descarga"
 notes = "Notas de la versión"
-notes_hint = "Qué cambió en esta versión"
-"notes.desc" = "El texto viene de la entrada de esta versión en el repositorio de publicaciones; sin conexión no se puede obtener."
 view = "Ver"
 
-# 日志反馈那一格。`privacy` 那句必须摆在**按下之前**而不是之后：日志里带《书名》与
-# 落盘路径（`import:` 那些行写的就是它们），事后告知等于没告知。
 download = "Descargar e instalar"
 install = "Instalar"
 downloading = "Descargando…"
@@ -912,7 +908,6 @@ fail_checksum = "**La suma de verificación no coincide**: este paquete no es el
 fail_io = "No se pudo escribir en el disco (sin espacio o sin permiso)"
 [feedback]
 title = "Enviar registros"
-desc = "Cuando algo falla —un libro que no abre, una pantalla rara, la app que se cierra sola— entrega el final del registro al autor."
 send = "Enviar registros"
 idle = "Aún sin enviar"
 working = "Preparando el registro…"
@@ -921,7 +916,6 @@ copied = "Quedó una copia en Descargas y el borrador está abierto — adjunta 
 no_mail = "Este dispositivo no tiene cliente de correo; la copia está guardada y la dirección y la ruta están en el portapapeles"
 no_log = "El registro está apagado: logging.file está desactivado en la configuración"
 failed = "Algo salió mal al preparar el registro"
-privacy = "El registro contiene títulos y rutas de los libros de tu biblioteca"
 
 [notes]
 search_placeholder = "Buscar títulos o notas"
@@ -1036,7 +1030,7 @@ baidu = "Baidu Netdisk"
 not_configured = "Sin configurar"
 token_saved = "access_token guardado"
 edit = "Editar"
-drives_hint = "Abre un disco para hojear sus libros y marca los que quieras añadir."
+drives_hint = "Elige un disco; cuando esté configurado, sus carpetas aparecerán abajo: marca los libros que quieras añadir."
 url = "Dirección"
 username = "Usuario"
 password = "Contraseña"

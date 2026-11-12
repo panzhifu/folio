@@ -26,7 +26,12 @@ use crate::ui::platform;
 use crate::ui::services::l10n::tr;
 use folio_core::net::remote::Transport;
 use folio_core::net::update::{self, Asset, Outcome, Release};
-use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString, WeakEntity, Window};
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::{
+    AnyWindowHandle, App, AppContext as _, Context, Entity, Global, SharedString, WeakEntity,
+    Window,
+};
 
 /// 那一格当前该念哪一句。
 ///
@@ -130,7 +135,10 @@ impl UpdateState {
     }
 
     /// 起一次检查。已经在跑就什么都不做（见 [`UpdateState::busy`]）。
-    fn check_now(&mut self, cx: &mut Context<UpdateState>) {
+    ///
+    /// `target` 是要收**查完那条提示**的窗，按下那一刻摘好递进来（见 [`check`]）；
+    /// `None` = 没有窗可收（测试里直接驱状态机的那几条），查照查，提示不发。
+    fn check_now(&mut self, cx: &mut Context<UpdateState>, target: Option<AnyWindowHandle>) {
         if self.busy() {
             return;
         }
@@ -144,12 +152,29 @@ impl UpdateState {
         let work = cx.background_spawn(async move { update::check(transport.as_ref(), &local) });
         cx.spawn(async move |this: WeakEntity<UpdateState>, cx| {
             let outcome = work.await;
-            let _ = this.update(cx, |state, cx| state.settle(outcome, cx));
+            // 状态先落实体（设置那一格自己会变字），提示从**同一次落定**里带出来：
+            // 两条路念的是同一句，不会一个说「已最新」另一个说「失败了」。
+            let note = this.update(cx, |state, cx| state.settle(outcome, cx));
+            if let (Some(target), Ok(note)) = (target, note) {
+                // 推回**按下那一刻那扇窗**：`AsyncApp` 手里没有窗，`active_window()`
+                // 在 Android 上实测不可靠（`with_notes` 顶部那条注释）。
+                let _ = cx.update_window(target, |_, window, cx| {
+                    window.push_notification(note, cx);
+                });
+            }
         })
         .detach();
     }
 
-    fn settle(&mut self, outcome: Result<Outcome, update::Error>, cx: &mut Context<UpdateState>) {
+    /// 落一次检查的结果，**顺手把要说给读者的那句话带出来**。
+    ///
+    /// 状态机本身只写 `status`；通知在这里一起造（而不是调用方再查一次），是因为
+    /// 「念哪句」的判据就是刚落的这一档，分开写等于把同一张文案表查两遍。
+    fn settle(
+        &mut self,
+        outcome: Result<Outcome, update::Error>,
+        cx: &mut Context<UpdateState>,
+    ) -> Notification {
         match outcome {
             Ok(Outcome::Newer(release)) => {
                 tracing::info!("发现新版本 {}", release.version);
@@ -162,12 +187,29 @@ impl UpdateState {
                 self.status = Status::Current;
             }
             Err(error) => {
-                // 失败只记日志与上屏，不弹任何东西：一次检查失败不是读者的错。
+                // 失败记日志、落状态；提示照发（warning 档）—— 查了没查成这件事要让
+                // 读者知道，但一次检查失败不是读者的错，所以不走打断性的弹窗。
                 tracing::warn!("检查更新失败：{error}");
                 self.status = Status::Failed(error);
             }
         }
         cx.notify();
+        settle_note(&self.status, cx)
+    }
+}
+
+/// 查完那一档 → 推给读者的那条通知。
+///
+/// 句子与设置那一格的灰字同源（[`status_label`]）：同一件事两处不该说两套话。
+/// 档位定轻重：已是最新是好消息（success），失败不是读者的错、但得让他知道查没成
+/// （warning），发现新版本是中性的一个事实（info）。`Idle` / `Checking` 不会出现在
+/// 落定那一刻，落上去也按中性档念同一句 —— 通知不该为不可能的档位 panic。
+fn settle_note(status: &Status, cx: &App) -> Notification {
+    let message = status_label(status, cx);
+    match status {
+        Status::Current => Notification::success(message),
+        Status::Failed(_) => Notification::warning(message),
+        _ => Notification::info(message),
     }
 }
 
@@ -203,9 +245,15 @@ pub fn entity(cx: &mut App) -> Entity<UpdateState> {
 }
 
 /// 那颗「检查更新」按钮唯一的入口。
-pub fn check(cx: &mut App) {
+///
+/// 窗口句柄**在这一刻摘下**：检查是一次后台往返，回来时手里早没有 `&mut Window` 了，
+/// 而查完那条「是不是最新」的提示要推回按下时的那一扇窗（[`with_notes`] 顶部那条
+/// 注释记过为什么不能用 `active_window()`）。读者按下的那一刻问出的问题，答案就该
+/// 主动来到眼前，而不是等他自己盯着那一小行灰字。
+pub fn check(window: &mut Window, cx: &mut App) {
+    let target = window.window_handle();
     let entity = entity(cx);
-    entity.update(cx, |state, cx| state.check_now(cx));
+    entity.update(cx, |state, cx| state.check_now(cx, Some(target)));
 }
 
 /// 测试用：把**手上这一版**的正文预装进缓存，让「查看」那颗按钮走 [`with_notes`] 的
@@ -532,7 +580,8 @@ mod tests {
         let entity = cx.update(|cx| cx.new(|_cx| UpdateState::default()));
         entity.update(cx, |state, _app| state.status = Status::Checking);
         assert!(cx.read(|cx| entity.read(cx).busy()));
-        entity.update(cx, |state, app| state.check_now(app));
+        // `None` = 没有窗要收提示：这一条只钉「busy 挡住第二下」，不发通知。
+        entity.update(cx, |state, app| state.check_now(app, None));
         assert!(cx.read(|cx| entity.read(cx).status() == &Status::Checking));
     }
 

@@ -1139,12 +1139,15 @@ impl AppShell {
         }
     }
 
-    /// 把让位状态报两处：导航栏（这一格是弹簧的目标）与架面（它那一行搜索带跟着收放 ——
-    /// 它读的是自己手上那份投影，判据不再由它自己算）。
+    /// 把让位状态报三处：导航栏（这一格是弹簧的目标）、架面（它那一行搜索带跟着收放）
+    /// 与统计（顶部那条固定带同理）—— 后两者读的都是自己手上那份投影，判据不再由
+    /// 它们自己算。
     fn push_nav_fold(&mut self, cx: &mut Context<Self>) {
         let folded = self.nav.folded();
         self.shelf
             .update(cx, |shelf, cx| shelf.set_fold(folded, cx));
+        self.stats
+            .update(cx, |stats, cx| stats.set_fold(folded, cx));
         cx.notify();
     }
 

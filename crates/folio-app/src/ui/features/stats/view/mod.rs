@@ -6,6 +6,10 @@
 //! （`gpui-kit-design-guides` 的「先尺寸、字重、留白与分隔线，再考虑加颜色或容器」），
 //! 所以这里没有 Readingo 那种整块浅紫底。
 //!
+//! **顶部固定带**（2026-11-12）：区间开关与周期导航不进滚动容器 —— 它们是这一屏的
+//! 指挥台，跟着报表滚走的话，换个周期得先把页面滚回顶上。往下读时按书架搜索带同一条
+//! 规矩收折让位（投影由外壳递进来，[`StatsView::set_fold`]），往回拨再滑回来；桌面不收。
+//!
 //! 状态归 [`StatsView`]：快照在 [`StatsView::refresh`]（切进这一屏、关掉一本书、切区间、
 //! 翻页）里取，`render` 一律不碰库。区间由用户选，翻页只改锚点日。
 //!
@@ -31,7 +35,10 @@
 //!
 //! 图的下面永远跟一句 muted 的结论；页面标题不写「统计」二字 —— 导航已经点亮了这一格。
 
+use std::time::Duration;
+
 use gpui_kit::assets::IconName;
+use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::chart::{AreaChart, BarChart};
 use gpui_kit::component::description_list::{DescriptionItem, DescriptionList};
@@ -71,6 +78,13 @@ const MIN_COLUMN: f32 = 300.0;
 const GUTTER: f32 = 16.0;
 /// 卡片之间的呼吸。横竖用同一个数：一屏只有一种缝，读者才不用猜哪条缝意味着哪一层。
 const CARD_GAP: f32 = 12.0;
+/// 顶部固定带里两行各自的定高（逻辑像素）：区间开关一行、周期导航一行。
+///
+/// 收折要按**已知的**带高裁（书架 `SEARCH_BAND` 同一条做法），而 `TabBar` 的自然高是
+/// 内容撑的、量不着，所以行高由这里说了算：行内容在带内居中，自然高不足时上下让出的
+/// 那几个像素归带 —— 比收折时裁掉半个字好。
+const TABS_BAND: f32 = 40.0;
+const PERIOD_BAND: f32 = 44.0;
 /// 热力图五档的分界（秒）：<30m、30–60m、1–3h、>3h。与图例一字不差。
 const HEAT_STEPS: [i64; 3] = [1_800, 3_600, 10_800];
 
@@ -188,6 +202,9 @@ pub struct StatsView {
     range: Range,
     /// 窗口里的锚点日（本地日序号）。`0` = 还没初始化，`refresh` 会填成今天。
     anchor: i64,
+    /// 顶部固定带此刻收没收。**这是外壳递进来的投影**（[`Self::set_fold`]），与架面
+    /// 那条搜索带同一份判据 —— 让位的算账不归这一屏。
+    folded: bool,
 }
 
 impl StatsView {
@@ -196,6 +213,17 @@ impl StatsView {
             snapshot: None,
             range: Range::Month,
             anchor: 0,
+            folded: false,
+        }
+    }
+
+    /// 外壳递进来的让位投影：内容那一路在往下读时，顶部固定带收成零高让位，往回拨
+    /// 再滑回来。判据（攒多少增量算一次让位）四屏共用一句，在
+    /// [`crate::ui::shell::AppShell::note_scroll`] —— 这里只认投影，不算账。
+    pub(crate) fn set_fold(&mut self, folded: bool, cx: &mut Context<Self>) {
+        if self.folded != folded {
+            self.folded = folded;
+            cx.notify();
         }
     }
 
@@ -281,29 +309,108 @@ impl Render for StatsView {
             .as_ref()
             .filter(|snapshot| !snapshot.range.is_total())
             .map(|snapshot| self.period_bar(snapshot, cx));
+        // 有没有周期条这一格在摆 `top` 的时候就被 `when_some` 吃掉了，而带高还要问它
+        // 一遍 —— 先抄下来。
+        let has_period = period.is_some();
+        let wide = inner >= 900.0;
         let tabs = self.range_tabs(cx);
-        let top: AnyElement = if inner >= 900.0 {
+        // 两行各钉一个定高：收折要按**已知的**带高裁（书架 `SEARCH_BAND` 同一条做法），
+        // 而 `TabBar` 的自然高是内容撑的，量不着。行内容在带内居中，自然高不足时
+        // 上下各让出的那几个像素归带 —— 比裁掉半个字好。
+        let top: AnyElement = if wide {
             h_flex()
                 .w_full()
+                .h(px(PERIOD_BAND))
                 .items_center()
                 .gap_3()
-                .child(div().flex_none().w(px(480.0)).child(tabs))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(480.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(tabs),
+                )
                 .child(div().flex_1())
                 .when_some(period, |el, period| {
-                    el.child(div().flex_none().w(px(320.0)).child(period))
+                    el.child(
+                        div()
+                            .flex_none()
+                            .w(px(320.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .child(period),
+                    )
                 })
                 .into_any_element()
         } else {
             v_flex()
                 .w_full()
                 .gap(px(CARD_GAP))
-                .child(tabs)
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(TABS_BAND))
+                        .flex()
+                        .items_center()
+                        .child(tabs),
+                )
                 // 周期条在窄档不拉满：它是「‹ 2026-10 ›」一行，页面再宽也只该有那一段，
                 // 拉满之后两个箭头离标签半屏远。手机上 360 已经多过可用宽，仍是满幅。
                 .when_some(period, |el, period| {
-                    el.child(div().w_full().max_w(px(360.0)).child(period))
+                    el.child(
+                        div()
+                            .w_full()
+                            .max_w(px(360.0))
+                            .h(px(PERIOD_BAND))
+                            .flex()
+                            .items_center()
+                            .child(period),
+                    )
                 })
                 .into_any_element()
+        };
+        // 固定带的自然高：一行（宽屏并排，或「总」没有周期条）取两档里大的那档，
+        // 上下两行取两档加一条缝 —— 与上面摆 `top` 的两条路一一对应。
+        let band = match (has_period, wide) {
+            (true, true) => PERIOD_BAND.max(TABS_BAND),
+            (true, false) => TABS_BAND + CARD_GAP + PERIOD_BAND,
+            (false, _) => TABS_BAND,
+        };
+        // 往下读时顶带收成零高，让出的那一段给报表；往回拨再滑回来。弹簧按元素 id
+        // 存状态，反向拨动从当前值接着走（可打断）—— 与书架那条搜索带同一套，
+        // 桌面不收（`folded` 恒 false，`AppShell::note_scroll` 在 Expanded 档直接回）。
+        let top_fold = if !matches!(size, SizeClass::Expanded) {
+            transition(
+                "stats-top-fold",
+                if self.folded { 1.0 } else { 0.0 },
+                Transition::new(Duration::from_millis(220)),
+                window,
+                cx,
+            )
+        } else {
+            0.0
+        };
+        let header = v_flex().w_full().items_center().child(
+            v_flex()
+                .w_full()
+                .max_w(px(measure))
+                .px(px(GUTTER))
+                .pt(px(8.0))
+                .child(top),
+        );
+        let header = if top_fold > 0.001 {
+            div()
+                .w_full()
+                .h(px((band * (1.0 - top_fold)).max(0.0)))
+                .overflow_hidden()
+                .opacity(1.0 - top_fold)
+                .child(header)
+                .into_any_element()
+        } else {
+            header.into_any_element()
         };
 
         let blocks = match &self.snapshot {
@@ -317,6 +424,9 @@ impl Render for StatsView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // 顶部固定带**不进滚动容器**：区间开关与周期导航是这一屏的指挥台，跟着
+            // 报表滚走的话，换个周期得把页面滚回顶上才够得着。
+            .child(header)
             .child(
                 div()
                     .id("stats-scroll")
@@ -331,10 +441,11 @@ impl Render for StatsView {
                                 .w_full()
                                 .max_w(px(measure))
                                 .px(px(GUTTER))
-                                .pt(px(8.0))
+                                // 头带与第一张卡之间的一档缝：与卡与卡之间同一个数，
+                                // 一屏只有一种缝。
+                                .pt(px(CARD_GAP))
                                 .pb(px(GUTTER + tail))
                                 .gap(px(CARD_GAP))
-                                .child(top)
                                 .children(layout(blocks, columns)),
                         ),
                     ),

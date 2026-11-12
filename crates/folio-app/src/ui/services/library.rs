@@ -340,6 +340,22 @@ pub fn schedule_backfill(cx: &App) {
     tracing::info!("library: 补齐这一趟已投进 Cleanup 档（{for_log:?}）");
 }
 
+/// 封面补齐：把升级 / 清缓存 / 备份恢复弄丢的封面从书文件里重新抽一次。
+///
+/// 与 [`schedule_backfill`] 同一档、同一副形状，但**不需要书库目录**：每本的根从它自己
+/// 那行 `books.path` 反推（`folio_core::store::book_root`）。整机只跑一次，记号在库里的
+/// `prefs` 表，所以书库没确认过也照投 —— 老库升级的用户往往正卡在「还没确认目录」。
+pub fn schedule_cover_backfill(cx: &App) {
+    let Some(store) = super::app_store::handle(cx) else {
+        tracing::debug!("library: 书库没装上，封面补齐这一趟不投");
+        return;
+    };
+    let _report = super::resident::pool().submit_with(folio_core::Priority::Cleanup, move |ctx| {
+        Ok(folio_core::backfill_covers(&store, ctx))
+    });
+    tracing::info!("library: 封面补齐这一趟已投进 Cleanup 档");
+}
+
 /// 删掉一本书：先删库里的行（章节、正文、图片、进度、批注、集合都跟着级联走），
 /// 再连带删掉属于书库的那份副本。
 ///

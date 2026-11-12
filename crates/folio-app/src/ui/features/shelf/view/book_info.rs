@@ -7,12 +7,12 @@
 //! 左栏是那张封面，右边上下两格是**书名**与**作者** —— 这两条是读者自己认的，就地改得动：
 //! 写回 `books` 的那两列（[`Store::set_book_meta`](folio_core::Store::set_book_meta)），
 //! 并往外报一条 [`BookInfoEvent::Saved`]，架面收到就重查一次，那张卡上的一行字当场变。
-//! 底下那一组是这本书自带的书目（都柏林核心那一组：系列、贡献者、主题、简介、出版者、
-//! 出版日期、语言、ISBN、类型、版权，末尾再加格式与大小两条文件的事实），只摆不改 ——
-//! 读者改不动文件大小。**有值才摆那一行**：一本书通常只说其中几项，把空的那几项摆成一串
-//! 空栏位，读到的信息是「这本书什么都没写」，而不是「这一项没有」。
-//! 这里也不摆文件路径：这一屏要认的是「是哪一本、名字对不对」，而那一串内容是哈希的
-//! 副本文件名既读不出什么，也不是在这儿能改的东西。
+//! 底下是**三张卡**：**简介**在前（一段话独占一张整卡，长文不被别的行挤瘦），**出版信息**
+//! 居中（系列、贡献者、主题、出版者、出版日期、语言、ISBN、版权），**文件**收尾（格式与
+//! 大小两条文件的事实），只摆不改 —— 读者改不动文件大小。**有值才摆那一行**：一本书通常
+//! 只说其中几项，把空的那几项摆成一串空栏位，读到的信息是「这本书什么都没写」，而不是
+//! 「这一项没有」；空的整节连卡一起不摆。这里也不摆文件路径：这一屏要认的是「是哪一本、
+//! 名字对不对」，而那一串内容是哈希的副本文件名既读不出什么，也不是在这儿能改的东西。
 //!
 //! 事实由 [`ShelfView::show_info`] 在点开这一刻查齐再交进来，这一页不再回头查库 ——
 //! 它手上只有那一份 [`BookMeta`]、一张解码好的封面，以及写回用的句柄。
@@ -28,13 +28,13 @@ use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::form::{field, v_form};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::separator::Separator;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Image, InteractiveElement,
-    IntoElement, ObjectFit, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, StyledImage, Subscription, TestSupportExt as _, WeakEntity, Window, div, img, px,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FontWeight, Image,
+    InteractiveElement, IntoElement, ObjectFit, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage, Subscription, TestSupportExt as _, WeakEntity,
+    Window, div, img, px,
 };
 
 use crate::ui::components::TopBar;
@@ -306,14 +306,16 @@ impl Render for BookInfoView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             // 顶栏：返回 + 这一屏叫什么。压上来的那一页要自己带回去的路 —— 它把底栏
-            // 盖掉了，而系统返回键不是所有人都知道按。那条的样子在 [`TopBar`] 里，
-            // 与阅读页、紧凑设置子页共用一份（内缩跟着这一屏正文的 `GUTTER` 对齐）。
+            // 盖掉了，而系统返回键不是所有人都知道按。**返回只留图标**：带文字的那一档
+            // 会把「返回」两个字顶在标题前面，而这一屏的名字（信息）才是顶栏要说的；
+            // 按了去哪儿由 tooltip 与无障碍标签说（[`TopBar::back_tooltip`]）。
+            // 那条的样子在 [`TopBar`] 里，与阅读页、紧凑设置子页共用一份
+            // （内缩跟着这一屏正文的 `GUTTER` 对齐）。
             .child(
                 TopBar::new("book-info-bar")
                     .title(tr(cx, "shelf.info_title"))
                     .strong()
                     .back_tooltip(back_label)
-                    .show_back_label()
                     .pad_x(GUTTER)
                     .on_back(move |_, cx| {
                         back.update(cx, |this, cx| this.pop(cx));
@@ -333,7 +335,9 @@ impl Render for BookInfoView {
                         v_flex()
                             .w_full()
                             .max_w(px(PANEL_WIDTH))
-                            .gap_3()
+                            // 节与节之间的一档缝：节头离自己的卡近（`pb_2`）、
+                            // 离上一节远，三张卡读成三块。
+                            .gap_4()
                             // 封面与那两格同一档顶线：两格比封面矮得多，居中会让它看上去
                             // 浮在封面旁边。
                             .child(
@@ -379,13 +383,15 @@ impl Render for BookInfoView {
                                         v_flex().flex_1().min_w_0().child(
                                             v_form()
                                                 .child({
+                                                    // 不带「×」：一格清空钮答的是「推倒
+                                                    // 重写」，而这一格的错误写法由那颗
+                                                    // 「保存」拦着，清空反而把现值弄丢。
                                                     let mut field = field()
                                                         .label(title_label.clone())
                                                         .w_full()
                                                         .child(
                                                             Input::new(&self.title)
-                                                                .aria_label(title_label.clone())
-                                                                .cleanable(true),
+                                                                .aria_label(title_label.clone()),
                                                         );
                                                     // 空书名不写回，也不让「保存」亮着 ——
                                                     // 但读者得知道为什么按不动。
@@ -415,15 +421,11 @@ impl Render for BookInfoView {
                                         ),
                                     ),
                             )
-                            .child(Separator::horizontal())
-                            // 这一本自带的书目，加格式与大小两行。摆在这里是为了「这本是不是
-                            // 那一套的第 3 本 / 是不是那本 6.9 MB 的」这类问题当场有答案。
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    .gap_2()
-                                    .children(fact_rows(&self.meta, cx)),
-                            ),
+                            // 三张卡：简介 → 出版信息 → 文件。空的那一节整张不摆，
+                            // 与「有值才摆那一行」同一条口径。
+                            .children(description_section(&self.meta, cx))
+                            .children(publication_section(&self.meta, cx))
+                            .child(file_section(&self.meta, cx)),
                     ),
             )
             // 那颗提交钉在底下，不跟着内容滚走：改完手就在下面那一格上。
@@ -461,12 +463,53 @@ fn split_authors(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// 一张卡：**描边立住，不靠填色** —— 与设置页的分组卡同一条规矩
+/// （`settings/view/compact.rs` 的 `card`）：整屏只有一层表面，区域由圆角与那圈 1px 的
+/// 边定，卡内的行不再画自己的底。GPUI 不保证圆角的父容器裁掉孩子，所以显式
+/// `overflow_hidden`：行内哪天长出自己的悬停底色，也不会在卡角外头露出方角。
+fn card(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
+    v_flex()
+        .w_full()
+        .rounded(cx.theme().radius_lg)
+        .overflow_hidden()
+        .border_1()
+        .border_color(cx.theme().border)
+        .children(rows)
+        .into_any_element()
+}
+
+/// 卡上方那句节头：`text_sm` 比正文小一档、次要色、字重加一档 —— 层次靠字级、字重与
+/// 颜色，不靠容器与颜色再叠一层（与设置页 `section_header` 同一条）。
+fn section_header(title: SharedString, cx: &App) -> AnyElement {
+    div()
+        .w_full()
+        .pb_2()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(title)
+        .into_any_element()
+}
+
+/// 一节 = 节头 + 一张卡。节头离自己的卡近（`pb_2`）、离上一节远（摆它们的父层给
+/// `gap_4`）：同一节贴着，不同节分开 —— 三张卡才读成三块。
+fn section(title: SharedString, body: AnyElement, cx: &App) -> AnyElement {
+    v_flex()
+        .w_full()
+        .child(section_header(title, cx))
+        .child(body)
+        .into_any_element()
+}
+
 /// 一行书目：标签占一道固定栏，值在它右边、放不下就折行。
 ///
-/// 标签栏是固定的一道（`w_20` = 5 倍界面字号，跟着缩放走）而不是跟着字长走：这一屏一次摆
+/// 标签栏是固定的一道（`w_20` = 5 倍界面字号，跟着缩放走）而不是跟着字长走：一张卡里一次摆
 /// 十来行，错落的标签读不成一条竖线，扫一行要横向跳两次。那道栏取的是三种语言里最长的
 /// 标签 —— 中文「出版日期」、英文 "Contributors"、日文「内容紹介」；再窄就要折行，再宽就
 /// 把值那一栏挤瘦了。值用前景色、标签用次要色：读者要读的是值。
+///
+/// 行内的留白（`px_4 py_2`）归行自己：卡这一层不垫（与设置页同一句理由 —— 已经垫过的
+/// 面板里别再垫一整份）。
 ///
 /// `field` 同时是这一行的测试 id（`book-info-<field>`）：「有值才摆那一行」这一条口径在
 /// 编译期看不出来，摆错与摆漏都要靠回归门按 id 认。
@@ -475,6 +518,8 @@ fn fact(field: &'static str, label: SharedString, value: SharedString, cx: &App)
         .id(format!("book-info-{field}"))
         .test_support()
         .w_full()
+        .px_4()
+        .py_2()
         .gap_2()
         .items_start()
         .child(
@@ -489,17 +534,35 @@ fn fact(field: &'static str, label: SharedString, value: SharedString, cx: &App)
         .into_any_element()
 }
 
-/// 底下那一组书目，按读者要问的顺序排，**有值才摆那一行**。
-///
-/// 顺序不是都柏林核心的表序而是这里的读法：先「属于哪一套、还有谁写了它、讲什么题材、
-/// 内容简介」，再「谁出的、哪一年、什么语言、哪个书号、版权」，最后才是文件自己那两行。
-///
-/// 空的那几项不摆，有两个理由：一本电子书通常只说其中几项，全摆就成了空栏位的清单；
-/// 而一排「（空）」读出来的意思是「这本书什么都没写」，那不是这条信息。
-///
-/// `dc:type` 库里存着但不摆：电子书几乎全是 `text`，那一行答不出任何问题，
-/// 而界面里多一个词就要多读一个词。
-fn fact_rows(meta: &BookMeta, cx: &App) -> Vec<AnyElement> {
+/// **简介**那一节：一段话独占一张整卡，没有标签栏 —— 简介读的是内容本身，
+/// 不是「哪一项等于哪一段」。没写简介就整节不摆：一张空卡占住简介的位置，
+/// 读出来的意思是「这本书什么都没说」。
+fn description_section(meta: &BookMeta, cx: &App) -> Option<AnyElement> {
+    if meta.description.is_empty() {
+        return None;
+    }
+    Some(section(
+        tr(cx, "shelf.info_field_description"),
+        card(
+            vec![
+                div()
+                    .id("book-info-description")
+                    .test_support()
+                    .w_full()
+                    .px_4()
+                    .py_3()
+                    .child(meta.description.clone())
+                    .into_any_element(),
+            ],
+            cx,
+        ),
+        cx,
+    ))
+}
+
+/// **出版信息**那一节：这本是谁的（系列、贡献者）、讲什么（主题）、谁出的（出版者、
+/// 出版日期）、哪一语种、哪个书号、版权归谁，**有值才摆那一行**；一行都没的整节不摆。
+fn publication_section(meta: &BookMeta, cx: &App) -> Option<AnyElement> {
     // 多值那几项并成一行的分隔符由文案给：中文的顿号与英文的「逗号 + 空格」不是同一种
     // 约定，也不是能从别处的文案里推出来的。
     let sep = tr(cx, "shelf.info_sep");
@@ -534,14 +597,6 @@ fn fact_rows(meta: &BookMeta, cx: &App) -> Vec<AnyElement> {
             "subjects",
             tr(cx, "shelf.info_field_subjects"),
             list(&meta.subjects),
-            cx,
-        ));
-    }
-    if !meta.description.is_empty() {
-        rows.push(fact(
-            "description",
-            tr(cx, "shelf.info_field_description"),
-            meta.description.clone().into(),
             cx,
         ));
     }
@@ -585,19 +640,44 @@ fn fact_rows(meta: &BookMeta, cx: &App) -> Vec<AnyElement> {
             cx,
         ));
     }
-    rows.push(fact(
-        "format",
-        tr(cx, "shelf.info_format"),
-        meta.format.clone().into(),
+    if rows.is_empty() {
+        return None;
+    }
+    Some(section(
+        tr(cx, "shelf.info_section_publication"),
+        card(rows, cx),
         cx,
-    ));
-    rows.push(fact(
-        "size",
-        tr(cx, "shelf.info_size"),
-        fmt_size(meta.size).into(),
+    ))
+}
+
+/// **文件**那一节：格式与大小两条文件自己的事实，永远在 —— 「是不是那本 6.9 MB 的
+/// epub」这类问题当场有答案；它们同时是回归门的对照组（`try_find` 只认标了
+/// `test_support` 的元素，没有这对正例时「全都不在」也能一路绿到底）。
+///
+/// `dc:type` 库里存着但不摆：电子书几乎全是 `text`，那一行答不出任何问题，
+/// 而界面里多一个词就要多读一个词。
+fn file_section(meta: &BookMeta, cx: &App) -> AnyElement {
+    section(
+        tr(cx, "shelf.info_section_file"),
+        card(
+            vec![
+                fact(
+                    "format",
+                    tr(cx, "shelf.info_format"),
+                    meta.format.clone().into(),
+                    cx,
+                ),
+                fact(
+                    "size",
+                    tr(cx, "shelf.info_size"),
+                    fmt_size(meta.size).into(),
+                    cx,
+                ),
+            ],
+            cx,
+        ),
         cx,
-    ));
-    rows
+    )
 }
 
 #[cfg(test)]
