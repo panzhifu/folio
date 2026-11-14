@@ -54,6 +54,7 @@ use crate::ui::features::reader::model::rules_draft::DraftStatus;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::speech::split_sentences;
 use crate::ui::features::reader::model::translation::{self, TranslationStatus};
+use crate::ui::features::reader::view::regions::ProgressRow;
 use crate::ui::features::settings::CompactSettings;
 use crate::ui::features::shelf::AUTHOR_SEP;
 use crate::ui::foundation::images::cover_image;
@@ -229,6 +230,13 @@ pub struct ReadingPage {
     pub(in crate::ui::features::reader) auto_speed: Entity<SliderState>,
     /// 进度滑条，底栏那一格。`Slider` 是有状态组件，句柄必须跨帧持有 —— 每帧新建会把拖动打断。
     pub(in crate::ui::features::reader) progress: Entity<SliderState>,
+    /// 进度条是不是正被拖着。`Change` 只在真手势里发（`set_value` 不发事件），`Release`
+    /// 收手 —— 触摸的 Cancelled 也走 `Release`（base 轨道的 touch 层兜的），所以这对
+    /// 边界不会漏。拖着的时候 [`Self::sync_sliders`] 让路：圆钮此刻的权威是手指。
+    progress_dragging: bool,
+    /// 底栏那条进度行，**自己的视图**（[`regions::ProgressRow`]）：拖动中的跟手重画
+    /// 归它那一行，整页不跟着手指重建。
+    pub(in crate::ui::features::reader) progress_row: Entity<ProgressRow>,
     /// 阅读设置那一屏。七条滑条、那颗翻页下拉、那只字体输入框与弹层档位都装在它自己
     /// 那个实体里（见 [`ReadingSheet`]），这一屏只留一个句柄：开合状态要报给会话
     /// （身上压着东西时正文的手势让位），元素要挂在最后（谁在上面由入树顺序定）。
@@ -280,15 +288,28 @@ impl ReadingPage {
                 .step(0.001)
                 .default_value(0.0)
         });
-        // 进度这一条订阅一次：拖动当场把正文滚到那一处。设置卡片里那七条滑条各自的
-        // 订阅归它自己那一屏（见 [`ReadingSheet::new`]），拖动即写配置、即重排 ——
-        // 两端都没有「应用」按钮，也没有改了不生效的中间态。
-        let mut watches = vec![cx.subscribe(&progress, |this: &mut Self, _, event, cx| {
-            if let SliderEvent::Change(value) = event {
+        // 进度条的手势是两段式（radix 的 onValueChange / onValueCommit 那一套语义）：
+        // **拖动中只挪圆钮不落点** —— seek 是重排级的大动作，读者每挪一格来一次就是拿
+        // 手指跟重排赛跑，圆钮永远追不上（2026-11-14 实测的「不跟手」）；**松手才落点**
+        // （`Release`，触摸的 Cancelled 也走它），一次手势一次重排。`set_value` 不发事件，
+        // 所以 `Change` 只可能来自真手势 —— 拿它当「拖动中」的旗标是准的。
+        // 跟手的重画**不在这层**：state 的 observe 挂在进度行自己的视图上
+        // （[`regions::ProgressRow`]），手指写到哪、重画到哪一行为止，整页的元素树
+        // 不跟着拖动重建。
+        let mut watches = Vec::new();
+        watches.push(cx.subscribe(&progress, |this: &mut Self, _, event, cx| match event {
+            SliderEvent::Change(_) => this.progress_dragging = true,
+            SliderEvent::Release(value) => {
+                this.progress_dragging = false;
                 this.reader
                     .update(cx, |reader, cx| reader.seek_ratio(value.end(), cx));
             }
-        })];
+        }));
+        // 进度行是自己的视图：拖动中的跟手重画归它（regions.rs 的 ProgressRow），
+        // 整页不跟着手指重建。弱句柄在 cx.new 之前取 —— 进去之后 cx 已经是行自己的了。
+        let page = cx.weak_entity();
+        let progress_row =
+            cx.new(|cx| ProgressRow::new(reader.clone(), progress.clone(), page, cx));
         // 自动阅读工具栏那条速度滑条：量程与细档借阅读设置里「自动前进」那一格的同一份
         // 数据（见 [`chrome::AUTO_ADVANCE_RANGE`]）。初值停在量程下界，第一帧
         // [`ReadingPage::sync_sliders`] 就把配置里的真值推上来 —— 与进度条同一条路。
@@ -351,6 +372,8 @@ impl ReadingPage {
             chrome: Chrome::default(),
             auto_speed,
             progress,
+            progress_dragging: false,
+            progress_row,
             settings,
             toc,
             image_viewer,
@@ -675,17 +698,22 @@ impl ReadingPage {
     /// 设置卡片里那七条滑条不归这里 —— 它们对齐的是配置而不是正文，各自住在
     /// [`ReadingSheet::sync`] 里。
     ///
-    /// 带阈值比较：拖动的时候滑条自己就是权威，每帧再按别处读回来的数写回去，
-    /// 就是拿手指算出来的值和那边算出来的值互相追。
+    /// 进度这一条带阈值比较 + **拖动让路**：拖动中滑条自己就是权威，把手上的手指值拿
+    /// 别处读回来的数盖掉，就是拿两个算法互相追 —— 分页书把进度量化到页界，圆钮会被
+    /// 往回拽，抖就是从这里来的（readest #6646 是同一件事在 web 那边的样子）。松手那一
+    /// 帧 `Release` 已经 seek，两者天然对齐，不用这里再管。
     pub(in crate::ui::features::reader) fn sync_sliders(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 算不出全书量时滑条停在 0：它是**控件**不是读数，那一格的读数由 `percent_label`
-        // 空着表达。拖它没有后果 —— `seek_ratio` 在同一个 `None` 上直接返回。
-        let progress = self.reader.read(cx).progress().unwrap_or(0.0);
-        if (self.progress.read(cx).value().end() - progress).abs() > 0.005 {
+        // 全书量算不出（`None`）时也不推：瞬态的「不知道」把控件拽回 0 再弹回来就是
+        // 抖动本身，读数那一格本来就空着表达同一件事。开书那一帧 state 本来停在 0，
+        // 视觉不变；seek 在同一个 `None` 上直接返回，拖着也没有后果。
+        if !self.progress_dragging
+            && let Some(progress) = self.reader.read(cx).progress()
+            && (self.progress.read(cx).value().end() - progress).abs() > 0.005
+        {
             self.progress
                 .update(cx, |state, cx| state.set_value(progress, window, cx));
         }

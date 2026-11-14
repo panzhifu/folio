@@ -513,8 +513,8 @@ impl ReadingSheet {
                     format!("pill-slider-{}", knob.key()),
                     state,
                     value,
-                    start,
-                    end,
+                    Some(start),
+                    Some(end),
                 )
                 .accessibility_label(track_label),
             )
@@ -660,14 +660,14 @@ impl ReadingSheet {
                             "reading-theme-opacity",
                             self.bg_opacity.clone(),
                             format!("{}%", (opacity * 100.0).round() as i64),
-                            PillMark::Text {
+                            Some(PillMark::Text {
                                 text: tr(cx, "reader.pill.opacity_min"),
                                 size: 14.0,
-                            },
-                            PillMark::Text {
+                            }),
+                            Some(PillMark::Text {
                                 text: tr(cx, "reader.pill.opacity_max"),
                                 size: 14.0,
-                            },
+                            }),
                         )
                         .accessibility_label(tr(cx, "reading_theme.opacity")),
                     ),

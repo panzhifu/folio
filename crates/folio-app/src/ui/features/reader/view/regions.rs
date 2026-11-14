@@ -4,22 +4,24 @@
 //! `reading_page.rs` 只剩「什么时候挂哪一条」。每条自己不带状态 —— 顶栏底栏开没开在
 //! `chrome` 里判，两块弹层开没开在它们自己的实体里判，这里只画。
 
-use crate::ui::components::TopBar;
+use crate::ui::components::{PillSlider, TopBar};
 use crate::ui::features::reader::model::chrome;
+use crate::ui::features::reader::model::session::ReaderSession;
 
 use crate::ui::features::reader::view::bands;
 use crate::ui::services::l10n::{tf, tr};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::slider::Slider;
+use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt as _, ThemeMode,
     ThemeStyled as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Corners, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, div, px,
+    AnyElement, Context, Corners, Entity, Hsla, InteractiveElement, IntoElement, ParentElement,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
 use super::reading_page::ReadingPage;
@@ -87,7 +89,7 @@ impl ReadingPage {
             .into_any_element()
     }
 
-    /// 底栏：一块卡片，从上到下是「状态行 + 进度条 + 一排入口」。
+    /// 底栏：一块卡片，从上到下是「状态行 + 进度行 + 一排入口」。
     ///
     /// 这块卡片是常驻的三行，不再跟着展开的内容长高：从前「设置」那一格就地展开一块面板，
     /// 底栏因此有两张脸，而进度条与入口排在最底下，面板一展开就把它们顶到读者刚调完的那
@@ -118,7 +120,7 @@ impl ReadingPage {
                 bottom_right: px(0.),
             })
             .child(self.status_row(cx))
-            .child(self.progress_row(cx))
+            .child(self.progress_row.clone())
             .child(self.entry_row(cx));
         // 听书与「自动」都挂在卡片上方：听书是开关、自动也是开关，两颗并成一排贴在
         // 卡片上缘的右端（`listen_fabs` 自己绝对定位）。它们不占入口排那一行的位置
@@ -342,66 +344,6 @@ impl ReadingPage {
                     .child(position),
             )
             .child(div().text_sm().child(progress_label))
-            .into_any_element()
-    }
-
-    /// 进度条两端是上一章 / 下一章：手指在条上既能「跳到这一章的哪儿」，
-    /// 也能顺手跨到隔壁一章。
-    pub(in crate::ui::features::reader) fn progress_row(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let reader = self.reader.read(cx);
-        // 箭头仍然只指「往哪边走」，翻书方向跟着整本走：从右往左读的书里，左边那颗
-        // 按下去是**下一章**（图标不用换 —— 它指左，而左就是阅读的前方），要换的是
-        // 动作、标签和可不可用三样。
-        let rtl = reader.progression_rtl();
-        let (left_delta, right_delta) = if rtl {
-            (1isize, -1isize)
-        } else {
-            (-1isize, 1isize)
-        };
-        let can_left = reader.can_advance(left_delta);
-        let can_right = reader.can_advance(right_delta);
-        // 两个闭包各自要一份句柄（`Entity` 不 `Copy`），所以左边右边各克隆一次。
-        let page_left = cx.entity().clone();
-        let page_right = cx.entity().clone();
-        let prev_label = tr(cx, "reader.prev_chapter");
-        let next_label = tr(cx, "reader.next_chapter");
-        let (left_label, right_label) = if left_delta > 0 {
-            (next_label.clone(), prev_label.clone())
-        } else {
-            (prev_label.clone(), next_label.clone())
-        };
-        h_flex()
-            .w_full()
-            .items_center()
-            .gap_2()
-            .child(
-                Button::new("prev-chapter")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ChevronLeft)
-                    .tooltip(left_label.to_string())
-                    .accessibility_label(left_label)
-                    .disabled(!can_left)
-                    .on_click(move |_, _, cx| {
-                        page_left.update(cx, |this, cx| this.advance(left_delta, cx))
-                    }),
-            )
-            .child(Slider::new(&self.progress).flex_1().min_w_0())
-            .child(
-                Button::new("next-chapter")
-                    .ghost()
-                    .small()
-                    .icon(IconName::ChevronRight)
-                    .tooltip(right_label.to_string())
-                    .accessibility_label(right_label)
-                    .disabled(!can_right)
-                    .on_click(move |_, _, cx| {
-                        page_right.update(cx, |this, cx| this.advance(right_delta, cx))
-                    }),
-            )
             .into_any_element()
     }
 
@@ -695,4 +637,130 @@ fn entry_cell(icon: IconName, label: SharedString, ink: Hsla) -> AnyElement {
                 .child(label),
         )
         .into_any_element()
+}
+
+/// 底栏中间那条：上一章、胶囊进度、下一章。它是**自己的视图**，不是
+/// [`ReadingPage`] 的一个 fn —— 拖动中的重画只落在这一行。
+///
+/// 为什么要单独成格：滑条的 state 一动就有人要重画，从前这一动唤起的是**整页**
+/// （跟手的那次 `observe` 挂在阅读页上）—— 元素树整棵跟着手指重建，帧一重就晃。
+/// Flutter 的 material slider 把整条滑条隔离在自己的 RenderObject 里，pointer
+/// 逐帧只标脏滑条自己，页面其余部分不进那一帧；这一格借的就是那一课：`observe`
+/// 挂在视图自己身上，手指写到哪、重画到哪一行为止（源码在仓库
+/// `reference/flutter/packages/flutter/lib/src/material/slider.dart`，浅克隆只
+/// 为对照，不参与构建）。
+///
+/// 观察两条：滑条 state（拖动的跟手）与会话（箭头的可按与 RTL 方向，翻章与
+/// 滚动都会变）。会话动得勤，但这一行只有几个节点，重画便宜。
+pub(in crate::ui::features::reader) struct ProgressRow {
+    reader: Entity<ReaderSession>,
+    /// 底栏那条胶囊滑条的 state。拖动写它、松手 seek 的政策在 [`ReadingPage`]
+    /// 的订阅里；这一格只管把它的值画出来。
+    progress: Entity<SliderState>,
+    /// 箭头要翻章，翻章是阅读页的方法（边上还要落库），所以隔着弱句柄调回去。
+    page: WeakEntity<ReadingPage>,
+    _watches: Vec<Subscription>,
+}
+
+impl ProgressRow {
+    pub(in crate::ui::features::reader) fn new(
+        reader: Entity<ReaderSession>,
+        progress: Entity<SliderState>,
+        page: WeakEntity<ReadingPage>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let watches = vec![
+            cx.observe(&progress, |_, _, cx| cx.notify()),
+            cx.observe(&reader, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            reader,
+            progress,
+            page,
+            _watches: watches,
+        }
+    }
+}
+
+impl Render for ProgressRow {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let reader = self.reader.read(cx);
+        // 箭头仍然只指「往哪边走」，翻书方向跟着整本走：从右往左读的书里，左边那颗
+        // 按下去是**下一章**（图标不用换 —— 它指左，而左就是阅读的前方），要换的是
+        // 动作、标签和可不可用三样。
+        let rtl = reader.progression_rtl();
+        let (left_delta, right_delta) = if rtl {
+            (1isize, -1isize)
+        } else {
+            (-1isize, 1isize)
+        };
+        let can_left = reader.can_advance(left_delta);
+        let can_right = reader.can_advance(right_delta);
+        // 两个闭包各自要一份弱句柄（`Entity` 不 `Copy`）。升级不出实体就是页已经
+        // 不在了：那一击无声落下，与页面不在场同义。
+        let page_left = self.page.clone();
+        let page_right = self.page.clone();
+        let prev_label = tr(cx, "reader.prev_chapter");
+        let next_label = tr(cx, "reader.next_chapter");
+        let (left_label, right_label) = if left_delta > 0 {
+            (next_label.clone(), prev_label.clone())
+        } else {
+            (prev_label.clone(), next_label.clone())
+        };
+        // 圆钮上的数读**滑条自己**：拖动中它就是手指刚写进去的值（拖动中不 seek，
+        // 会话侧的进度是旧的），松手落定后 sync_sliders 把它与正文对齐在 0.005 之内
+        // —— 两种时刻都不必回读会话。全书量没算过（progress() 为 None）时仍念空：
+        // 「不知道」不是「0%」，与状态行同一条口径（percent_label(None) 的那个决定）。
+        let percent = if reader.progress().is_some() {
+            chrome::percent_label(Some(self.progress.read(cx).value().end()))
+        } else {
+            String::new()
+        };
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .child(
+                Button::new("prev-chapter")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ChevronLeft)
+                    .tooltip(left_label.to_string())
+                    .accessibility_label(left_label)
+                    .disabled(!can_left)
+                    .on_click(move |_, _, cx| {
+                        if let Some(page) = page_left.upgrade() {
+                            page.update(cx, |page, cx| page.advance(left_delta, cx))
+                        }
+                    }),
+            )
+            // 剩下的宽度整条让给胶囊：外层包一格 `flex_1`，胶囊自己是 `w_full`，
+            // 尺寸契约与阅读设置里那几条一致（弹层里它也是铺满所在行）。
+            .child(
+                div().flex_1().min_w_0().child(
+                    PillSlider::new(
+                        "reader-progress",
+                        self.progress.clone(),
+                        percent,
+                        None,
+                        None,
+                    )
+                    .accessibility_label(tr(cx, "reader.progress")),
+                ),
+            )
+            .child(
+                Button::new("next-chapter")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ChevronRight)
+                    .tooltip(right_label.to_string())
+                    .accessibility_label(right_label)
+                    .disabled(!can_right)
+                    .on_click(move |_, _, cx| {
+                        if let Some(page) = page_right.upgrade() {
+                            page.update(cx, |page, cx| page.advance(right_delta, cx))
+                        }
+                    }),
+            )
+    }
 }
