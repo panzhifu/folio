@@ -80,6 +80,30 @@ Linux 需要 fontconfig / Wayland / xkbcommon 开发包与可用 Vulkan 驱动�
 测试内联在被测文件底部、点名导入（不用 `use super::*`，`gpui_kit` 根有个名叫
 `test` 的属性宏会把 `#[test]` 递归展开成它）、只引 `pub` 项。
 
+## Android 打包三步：cargo-ndk 必须带 `-P 26`
+
+```bash
+cargo ndk -t arm64-v8a -P 26 -o crates/folio-app/android/app/src/main/jniLibs \
+    build --release -p folio-app                    # 编 libfolio_app.so 落进 jniLibs
+(cd crates/folio-app/android && ./gradlew assembleRelease)
+adb install -r crates/folio-app/android/app/build/outputs/apk/release/app-release.apk
+```
+
+`-P 26` 不能省（2026-11-14 实测）：本机 cargo-ndk 4.1.2 的默认 API 是 **21**，而
+gpui 链接要的 `libnativewindow.so` 在 NDK（r30，`/opt/android-ndk`）sysroot 里
+**26 起才有**，不带就是 `ld.lld: error: unable to find library -lnativewindow`；
+app 的 minSdk 也是 26。等价写法是环境变量 `CARGO_NDK_PLATFORM=26`。
+
+两条排错口径，别自己吓自己：
+
+- rustc 报「linking with /usr/bin/cargo-ndk」**不是配置错** —— 4.x 把自己垫在
+  NDK clang 前面当壳（靠 `_CARGO_NDK_LINK_*` 环境变量转手，strings 里可验），
+  真错看它下面那行 ld.lld / clang 的输出。
+- jniLibs 里 cargo-ndk 捎带拷进来的带哈希 cdylib 副本（`libdjvu_rs-<hash>.so`
+  之类）**不用管也别删**：链进主库的是 rlib，gradle 的
+  `packaging.jniLibs.excludes`（app/build.gradle.kts）已把它们排除出 APK，
+  手动删了下次构建又会生成。
+
 ## 测试：只跑新加的，全量等推送，真机走 scrcpy
 
 - **迭代时只跑这一轮新加 / 改到的那几条测试**（按名字过滤，通常一两秒）；
