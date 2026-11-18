@@ -9,11 +9,13 @@ use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::motion::NAV_TRANSITION;
 use folio_core::content::document::Document;
+use folio_core::infra::task::StageCtx;
+use folio_core::ingest::import::{PathsSource, import_from};
 use folio_core::store::Store;
 use folio_core::{Content, Format, Locator, PageTurn};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, ElementId, Entity, InputEvent as _, LongPressEvent,
+    AnyWindowHandle, AppContext as _, ElementId, Entity, Global, InputEvent as _, LongPressEvent,
     PinchEvent, Pixels, Point, TestAppContext, TouchPhase, point, px,
 };
 use std::sync::Arc;
@@ -62,8 +64,37 @@ fn pdf_char(
     })
 }
 
-/// 开一本真 PDF：入库 → 带容器打开 → 走 `open_book` 那条生产路（只有它按 `is_fixed()`
-/// 分流到定版式那一支 —— `with_document` 那条构造路不分族，用它测定版式就是测可重排）。
+#[derive(Default)]
+struct PdfLibraries(Vec<tempfile::TempDir>);
+impl Global for PdfLibraries {}
+
+/// 版本文件保活到测试上下文释放，重开窗口仍读取同一固定版本。
+fn import_pdf(cx: &mut TestAppContext, name: &str) -> (Arc<Store>, i64) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+    let library = tempfile::tempdir().expect("临时书库");
+    let store = Arc::new(Store::in_memory().expect("内存库"));
+    let outcomes = import_from(
+        &PathsSource::picked(vec![path]),
+        library.path(),
+        &store,
+        &StageCtx::detached(),
+    );
+    assert!(outcomes[0].result.is_ok(), "{:?}", outcomes[0].result);
+    let id = store.list_books().unwrap()[0].id;
+    assert_ne!(
+        store.active_revision(id).unwrap().unwrap().state,
+        "legacy-unverified"
+    );
+    cx.update(|cx| {
+        if cx.try_global::<PdfLibraries>().is_none() {
+            cx.set_global(PdfLibraries::default());
+        }
+        cx.global_mut::<PdfLibraries>().0.push(library);
+    });
+    (store, id)
+}
+
+/// 真 PDF 经生产导入发布固定版本，再由 open_book 装载与分流。
 fn open_fixed_pdf(
     cx: &mut TestAppContext,
     name: &str,
@@ -71,10 +102,7 @@ fn open_fixed_pdf(
     open_fixed_pdf_with_turn(cx, name, PageTurn::Slide)
 }
 
-/// 同上，但「翻页方式」在 `open_book` 之前就摆好。
-///
-/// 连续竖滚必须这么开：摆法在渲染帧里由 `page_turn` 解出来，先开成整页翻再改配置
-/// 也能到，但这里要测的正是「一打开就是连续」那条生产路。
+/// 翻页方式在 open_book 前设置，覆盖首次打开便处于连续滚动的路径。
 fn open_fixed_pdf_with_turn(
     cx: &mut TestAppContext,
     name: &str,
@@ -90,17 +118,11 @@ fn open_fixed_pdf_at(
     width: f32,
     turn: PageTurn,
 ) -> (Entity<ReaderSession>, AnyWindowHandle, Arc<Store>, i64) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
-    let (meta, content) = folio_core::content::format::provider_for(&path)
-        .expect("PDF 该有 provider")
-        .index(&path)
-        .expect("入库的那份真样本该读得开");
-    let store = Arc::new(Store::in_memory().expect("内存库"));
-    let id = store.add_book(&path, &meta).expect("入库");
-    store
-        .save_content(id, &content, Format::Pdf)
-        .expect("页表入库");
-    let document = folio_core::content::document::with_container(meta, content, &path, None);
+    let (store, id) = import_pdf(cx, name);
+    let leased = store.acquire_revision(id).expect("固定版本租约");
+    let fence = leased.snapshot.revision.fence;
+    let document = folio_core::ingest::updates::open_revision_document(leased.snapshot, None)
+        .expect("打开实际发布的版本");
     let (view, handle) = open_with_document(
         cx,
         Arc::from(document),
@@ -115,6 +137,11 @@ fn open_fixed_pdf_at(
     });
     view.update(cx, |v, cx| v.open_book(id, cx));
     settle(cx, handle);
+    view.read_with(cx, |v, _| {
+        assert!(v.content_version.opening.is_none(), "open_book 必须完成");
+        assert!(v.is_fixed(), "固定版本必须装载为定版式");
+        assert_eq!(v.coordinate_fence(), Some(fence));
+    });
     (view, handle, store, id)
 }
 
@@ -155,42 +182,12 @@ fn reopen_fixed_pdf(
     (view, handle)
 }
 
-/// 定版式的书签：点目录里的一条，屏上真的换成那一页，位置也当场落库。
-///
-/// 用入库的那本 PDF（`tests/fixtures/oss/pdf/three-pages.pdf`）而不是 `from_content` 造的
-/// 合成文档：这一条要测的是「书签的落点是**页号**」这一整路 —— 合成那一份没有容器，
-/// 取像素永远回空，界面就算跳对了也证明不了读者看得见。这里走的是生产上那条路：
-/// provider 读索引 → 落库 → `with_container` 打开（正文与像素都回原文件现取）。
+/// 点击真实 PDF 的目录后，固定版本页像素和保存的页号一起变化。
 #[gpui_kit::test]
 fn a_bookmark_in_a_pdf_moves_the_screen_to_that_page(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/oss/pdf/three-pages.pdf");
-    let (meta, content) = folio_core::content::format::provider_for(&path)
-        .expect("PDF 该有 provider")
-        .index(&path)
-        .expect("入库的那本夹具该读得开");
-    let store = Arc::new(Store::in_memory().expect("内存库"));
-    let id = store.add_book(&path, &meta).expect("入库");
-    store
-        .save_content(id, &content, folio_core::content::format::Format::Pdf)
-        .expect("页表入库");
-
-    let document = folio_core::content::document::with_container(meta, content, &path, None);
-    let (view, handle) = open_with_document(
-        cx,
-        Arc::from(document),
-        prefs(16.0),
-        Locator::start(),
-        460.0,
-        Some(store.clone()),
-        Some(id),
-    );
-    // `with_document` 那一条构造路不分族（它只吃一份现成的文档），而读者真的翻开一本
-    // 书走的是 `open_book`：从库读回内容 → 按 `doc.is_fixed()` 分流。这里按生产那条路
-    // 再走一遍，测的才是读者撞到的那一段。
-    view.update(cx, |v, cx| v.open_book(id, cx));
-    settle(cx, handle);
+    let (view, handle, store, id) =
+        open_fixed_pdf(cx, "../../tests/fixtures/oss/pdf/three-pages.pdf");
     assert_eq!(view.read_with(cx, |v, _| v.page_count()), 3);
     assert!(
         view.read_with(cx, |v, _| v.is_fixed()),

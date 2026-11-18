@@ -520,6 +520,7 @@ pub fn sync_once(
     store
         .apply_sync(&merged.plan)
         .map_err(|e| Error::Store(e.into()))?;
+    refresh_projections(store, &merged.plan);
 
     let body = serde_json::to_vec(&merged.snapshot)?;
     let path = if dir.is_empty() {
@@ -547,6 +548,30 @@ pub fn sync_once(
         deleted_bookmarks: merged.stats.bookmarks_deleted,
         uploaded_bytes: body.len(),
     })
+}
+
+/// 同步后的旧版记录重新计算当前版显示位置；派生失败不回滚已提交的用户数据。
+pub fn refresh_projections(store: &Store, plan: &Plan) {
+    let hashes = plan
+        .annotation_upserts
+        .iter()
+        .map(|(hash, _)| hash)
+        .chain(plan.bookmark_upserts.iter().map(|(hash, _)| hash));
+    let mut books = HashSet::new();
+    for hash in hashes {
+        if let Ok(ids) = store.books_for_content_hash(hash) {
+            books.extend(ids);
+        }
+    }
+    for book in books {
+        if let Err(error) = crate::ingest::updates::refresh_anchor_projections(
+            store,
+            book,
+            &crate::infra::task::StageCtx::detached(),
+        ) {
+            tracing::warn!(book,error=%error,"同步记录已保留，当前版本位置待重新定位");
+        }
+    }
 }
 
 /// 只连一下、建一下远端目录：设置页的「测试连接」。不读不写任何书籍数据。

@@ -22,7 +22,7 @@ pub use folio_base::logging::Logging;
 pub use folio_model::reading::ImageScale;
 pub use library::{Backup, Language, Library, Novel, WatchDir};
 pub use reading::{Reader, TextDirection, TocDensity};
-pub use speech::Speech;
+pub use speech::{Speech, SpeechRole};
 
 use crate::error::IoResultExt as _;
 use crate::infra::paths;

@@ -29,7 +29,9 @@ impl ReaderSession {
     /// 重读而不是手工往内存里追一条，id、时间戳都以库里为准。
     pub(in crate::ui::features::reader) fn load_bookmarks(&mut self) {
         let read = match (self.book_id, self.store.as_ref()) {
-            (Some(book_id), Some(store)) => store.bookmarks(book_id),
+            (Some(book_id), Some(store)) => {
+                store.bookmarks_for_revision(book_id, self.coordinate_fence().unwrap_or_default())
+            }
             _ => Ok(Vec::new()),
         };
         match read {
@@ -115,7 +117,11 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        match store.add_bookmark(book_id, &anchor) {
+        match store.add_bookmark_checked(
+            book_id,
+            self.coordinate_fence().unwrap_or_default(),
+            &anchor,
+        ) {
             Ok(id) => {
                 tracing::info!(
                     book_id,
@@ -138,7 +144,12 @@ impl ReaderSession {
             cx.notify();
             return false;
         };
-        if store.annotation(id).ok().flatten().is_none() {
+        if store
+            .annotation(id)
+            .ok()
+            .flatten()
+            .is_none_or(|row| Some(row.book_id) != self.book_id)
+        {
             tracing::warn!(annotation_id = id, "划线: 那一条已经不在库里");
             return false;
         }
@@ -166,7 +177,12 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        let Some(row) = store.bookmark(id).ok().flatten() else {
+        let Some(row) = store
+            .bookmark(id)
+            .ok()
+            .flatten()
+            .filter(|row| Some(row.book_id) == self.book_id)
+        else {
             tracing::warn!(bookmark_id = id, "书签: 那一枚已经不在库里");
             return;
         };
@@ -188,6 +204,10 @@ impl ReaderSession {
             return;
         };
         self.undo_seq += 1; // 作废在飞的到点计时：胶囊已经收了。
+        if Some(slot.row.book_id) != self.book_id {
+            cx.notify();
+            return;
+        }
         let Some(store) = self.store.clone() else {
             return;
         };

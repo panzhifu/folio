@@ -26,6 +26,7 @@ public final class GpuiFilePicker {
     public static String openFile(final Activity activity, final String mimeTypes) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         applyMimeTypes(intent, mimeTypes);
 
         ArrayList<String> result = launchPicker(activity, intent);
@@ -45,6 +46,7 @@ public final class GpuiFilePicker {
     public static String[] openFiles(final Activity activity, final String mimeTypes) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         applyMimeTypes(intent, mimeTypes);
 

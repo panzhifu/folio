@@ -1869,27 +1869,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dyn-clonable"
-version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a36efbb9bfd58e1723780aa04b61aba95ace6a05d9ffabfdb0b43672552f0805"
-dependencies = [
- "dyn-clonable-impl",
- "dyn-clone",
-]
-
-[[package]]
-name = "dyn-clonable-impl"
-version = "0.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e8671d54058979a37a26f3511fbf8d198ba1aa35ffb202c42587d918d77213a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2470,8 +2449,9 @@ name = "folio-speech"
 version = "0.1.5"
 dependencies = [
  "async-channel",
+ "serde",
+ "speech-dispatcher",
  "tracing",
- "tts",
 ]
 
 [[package]]
@@ -6094,15 +6074,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxilangtag"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d3b4eb570abd4a1dcb062c31fd37b832264d9dc7292c3e69acfe926c87b063f"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8861,29 +8832,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
-]
-
-[[package]]
-name = "tts"
-version = "0.26.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0727c46b3181e4f84e79f970e6a78d3b4054b72b6072e969ea4f07dfa4983ae2"
-dependencies = [
- "cocoa-foundation",
- "core-foundation 0.9.4",
- "dyn-clonable",
- "jni 0.21.1",
- "lazy_static",
- "libc",
- "log",
- "ndk-context",
- "objc",
- "oxilangtag",
- "speech-dispatcher",
- "thiserror 1.0.69",
- "wasm-bindgen",
- "web-sys",
- "windows 0.58.0",
 ]
 
 [[package]]

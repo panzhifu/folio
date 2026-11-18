@@ -1,5 +1,4 @@
-//! 书目、阅读位置与书架查询。内容哈希是书的身份，路径只表示副本位置。
-//! 老行的 content_hash 可空，由补齐作业填充；按路径查询仍用于确认路径归属。
+//! 书目与书架查询。书目身份稳定，内容哈希标识修订，路径表示阅读副本。
 
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -107,7 +106,7 @@ const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, b
      (SELECT COUNT(*) FROM chapters c \
        WHERE c.book_id = books.id AND c.char_len IS NULL \
          AND c.idx < json_extract(positions.locator_json, '$.chapter')) AS unknown_read, \
-     positions.locator_json, books.cover_hash, books.cover_mime";
+     positions.locator_json, books.cover_hash, books.cover_mime, books.managed_root";
 
 /// 整架与分组共用排序：最近导入或翻开的在前。
 /// 秒级时间可能并列，最终以 books.id DESC 保证稳定顺序。
@@ -128,6 +127,7 @@ struct StaleRow {
     cover_mime: Option<String>,
     /// 这份索引算自哪一份分章规则表（v22 起）。NULL 的含义见 `store::schema` 那一版。
     rules_hash: Option<String>,
+    managed_root: String,
 }
 
 /// 副本父目录是书库根；位于 .staging 的临时副本再向上取一层。
@@ -139,6 +139,14 @@ pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
             .map_or_else(|| parent.to_path_buf(), Path::to_path_buf);
     }
     parent.to_path_buf()
+}
+
+fn asset_root(managed_root: &str, path: &Path) -> std::path::PathBuf {
+    if managed_root.is_empty() {
+        book_root(path)
+    } else {
+        managed_root.into()
+    }
 }
 
 fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
@@ -159,6 +167,7 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
         _ => None,
     };
     let copy: String = r.get(1)?;
+    let managed_root: String = r.get(14)?;
     Ok(ShelfItem {
         id: r.get(0)?,
         title: r.get(2)?,
@@ -179,9 +188,7 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
             locator.as_deref(),
         ),
         cover_ref,
-        // 反推书库根：缩略图缓存目录挂在它底下。副本路径来自 `books.path`，
-        // 所以这一格与封面、正文用的是同一个来源（不是界面另推一遍）。
-        cover_root: Some(book_root(Path::new(&copy))),
+        cover_root: Some(asset_root(&managed_root, Path::new(&copy))),
     })
 }
 
@@ -249,16 +256,44 @@ fn source_unavailable(path: &Path) -> Option<SourceUnavailable> {
 }
 
 impl Store {
+    pub fn book_cover_ref(&self, id: i64) -> Result<Option<folio_format::CoverRef>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT cover_hash,cover_mime FROM books WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row
+            .and_then(|(hash, mime)| hash.zip(mime))
+            .filter(|(hash, mime)| !hash.is_empty() && !mime.is_empty())
+            .map(|(hash, mime)| folio_format::CoverRef { hash, mime }))
+    }
+
+    pub fn book_asset_root(&self, id: i64) -> Result<Option<std::path::PathBuf>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(conn
+            .query_row(
+                "SELECT managed_root,path FROM books WHERE id=?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .map(|(root, path)| asset_root(&root, Path::new(&path))))
+    }
+
     /// 同路径入库更新文件事实，保留读者修改的 title/authors；哈希去重由导入管线负责。
     /// content_hash 另由 set_content_hash 写入，中断留下的 NULL 可由补齐作业恢复。
     pub fn add_book(&self, path: &Path, meta: &DocMeta) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let path_s = path.to_string_lossy().into_owned();
         conn.execute(
-            "INSERT INTO books (path, title, authors, format, size, added_at, mtime,
+            "INSERT INTO books (id, path, title, authors, format, size, added_at, mtime,
                                 contributors, subjects, description, publisher, published,
                                 language, isbn, dctype, rights, series, series_position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+             VALUES ((SELECT max(high_water,coalesce((SELECT max(id) FROM books),0))+1 FROM book_id_clock WHERE singleton=1),
+                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(path) DO UPDATE SET
                format = excluded.format, size = excluded.size,
                mtime = excluded.mtime,
@@ -341,21 +376,21 @@ impl Store {
     /// 从 covers/ 读取封面，文件缺失返回 None；不从数据库读取或缓存封面字节。
     pub fn book_cover(&self, id: i64) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(String, Option<String>, Option<String>)> = conn
+        let row: Option<(String, Option<String>, Option<String>, String)> = conn
             .query_row(
-                "SELECT path, cover_hash, cover_mime FROM books WHERE id = ?1",
+                "SELECT path, cover_hash, cover_mime, managed_root FROM books WHERE id = ?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((path, hash, mime)) = row else {
+        let Some((path, hash, mime, managed_root)) = row else {
             return Ok(None);
         };
         let (Some(hash), Some(mime)) = (hash, mime) else {
             // 没有描述 = 这本书没有封面（Markdown / TXT，或 EPUB 里没声明）。
             return Ok(None);
         };
-        let root = book_root(Path::new(&path));
+        let root = asset_root(&managed_root, Path::new(&path));
         let Some(found) = crate::assets::cover::resolve(&root, &hash, &mime) else {
             // 描述在、文件不在：`covers/` 被清过，或库是别处拷来的（没有 `covers/`）。
             // 这一档**只记 debug**：它是「这本书现在没有封面」的正常状态，
@@ -519,7 +554,21 @@ impl Store {
             params![path, except_id],
             |r| r.get(0),
         )?;
-        Ok(n as usize)
+        let retained: i64 = conn.query_row(
+            "SELECT count(*) FROM book_revisions WHERE managed_path=?1 AND book_id<>?2",
+            params![path, except_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize + retained as usize + usize::from(self.book_has_leases(except_id)))
+    }
+
+    /// 书目删除后租约仍活到阅读/备份完成；此时调用方必须保留关联文件。
+    pub fn book_has_leases(&self, book_id: i64) -> bool {
+        self.revision_leases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .any(|(id, _)| *id == book_id)
     }
 
     /// 返回全部行的封面描述，包括已有哈希但文件可能丢失的行。
@@ -565,14 +614,14 @@ impl Store {
     /// 在删除书目行前取得封面路径，行删除后将无法再查询其哈希。
     pub fn orphan_cover_file(&self, id: i64) -> Result<Option<std::path::PathBuf>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(String, Option<String>, Option<String>)> = conn
+        let row: Option<(String, Option<String>, Option<String>, String)> = conn
             .query_row(
-                "SELECT path, cover_hash, cover_mime FROM books WHERE id = ?1",
+                "SELECT path, cover_hash, cover_mime, managed_root FROM books WHERE id = ?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((path, hash, mime)) = row else {
+        let Some((path, hash, mime, managed_root)) = row else {
             return Ok(None);
         };
         let (Some(hash), Some(mime)) = (hash, mime) else {
@@ -588,41 +637,20 @@ impl Store {
             return Ok(None);
         }
         Ok(Some(crate::assets::cover::cover_path(
-            &book_root(Path::new(&path)),
+            &asset_root(&managed_root, Path::new(&path)),
             &hash,
             &mime,
         )))
     }
 
+    /// 移除书目停止来源跟踪；外部文件不在此处删除，历史删除墓碑不改写归属。
     pub fn remove_book(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        // 书从库里消失不是「读者删了某条批注」：它的批注/书签随外键级删，
-        // 但不该给别的设备发删除墓碑（别的设备可能还留着这本书）。把这本书名下的
-        // 历史墓碑一并清掉，免得以后同名同哈希的书回来时被旧删除误伤。
-        let hash: Option<String> = conn
-            .query_row(
-                "SELECT content_hash FROM books WHERE id = ?1",
-                params![id],
-                |r| r.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten();
-        let rows = conn.execute("DELETE FROM books WHERE id = ?1", params![id])?;
-        if let Some(hash) = hash
-            && !hash.is_empty()
-        {
-            conn.execute(
-                "DELETE FROM sync_tombstones WHERE book_hash = ?1",
-                params![hash],
-            )?;
-        }
-        // 删掉 0 行只有两种可能：那本书本来就不在，或者调用方拿错了 id。
-        // 两种都表现为「界面上按了删除但书还在」，所以这里要说一句。
-        if rows == 0 {
-            tracing::warn!("store: 删第 {id} 本，但没有这一行");
-        } else {
-            tracing::debug!("store: 删第 {id} 本（连带 {rows} 行外键）");
-            // 一本的正文加章节行是几百 KB 级的删除，空页当场交回去。
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("INSERT OR REPLACE INTO suppressed_sources(locator,suppressed_at) SELECT locator,?2 FROM book_sources WHERE book_id=?1",params![id,now()])?;
+        let rows = tx.execute("DELETE FROM books WHERE id=?1", [id])?;
+        tx.commit()?;
+        if rows > 0 {
             Self::reclaim(&conn)?;
         }
         Ok(())
@@ -633,38 +661,6 @@ impl Store {
         conn.execute(
             "UPDATE books SET last_opened_at = ?2 WHERE id = ?1",
             params![id, now()],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_position(&self, book_id: i64, mode: &str, locator: &Locator) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let stamp = super::sync_order::next_version(
-            super::sync_order::position(&conn, book_id)?.map_or(0, |r| r.updated_at),
-            now(),
-        )?;
-        conn.execute("INSERT INTO positions (book_id,mode,locator_json,updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(book_id) DO UPDATE SET mode=excluded.mode,locator_json=excluded.locator_json,updated_at=excluded.updated_at", params![book_id,mode,locator.to_json(),stamp])?;
-        Ok(())
-    }
-
-    /// 写入进度，但用调用方给的时间戳。**只给同步用**：把远端那份原样搬进来时要保留
-    /// 它的时间，否则「本机刚应用了远端一条较早的进度」会被记成现在，下一次合并反过来
-    /// 压掉另一台设备更新的进度。
-    pub fn set_position_at(
-        &self,
-        book_id: i64,
-        mode: &str,
-        locator: &Locator,
-        updated_at: i64,
-    ) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "INSERT INTO positions (book_id, mode, locator_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(book_id) DO UPDATE SET
-               mode = excluded.mode, locator_json = excluded.locator_json,
-               updated_at = excluded.updated_at",
-            params![book_id, mode, locator.to_json(), updated_at],
         )?;
         Ok(())
     }
@@ -694,20 +690,6 @@ impl Store {
             .map(|(mode, json)| (mode, Locator::from_json(&json))))
     }
 
-    /// 记下「这一章读到过」。
-    ///
-    /// 与 [`Store::set_position`] 是两件事：那一行只说「现在在哪儿」，读者翻过去就
-    /// 覆盖；这一条说的是「来过」，所以只插不改（`INSERT OR IGNORE`）—— 第二次进同一章
-    /// 不该把第一次的时间冲掉，也不该多出一行。
-    pub fn mark_chapter_read(&self, book_id: i64, idx: usize) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "INSERT OR IGNORE INTO chapter_read (book_id, idx, read_at) VALUES (?1, ?2, ?3)",
-            params![book_id, idx as i64, now()],
-        )?;
-        Ok(())
-    }
-
     /// 某本书到过的章号集合。目录那一屏按它把「来过的」画成浅色。
     pub fn read_chapters(&self, book_id: i64) -> Result<HashSet<usize>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -719,17 +701,6 @@ impl Store {
             .map(|idx| idx as usize)
             .collect();
         Ok(out)
-    }
-
-    /// 抹掉某本书的「来过」痕迹。重新开读一本书时读者要的是那张白纸，
-    /// 而进度与标注都不在这一条里 —— 只清这一张表。
-    pub fn clear_chapter_read(&self, book_id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.execute(
-            "DELETE FROM chapter_read WHERE book_id = ?1",
-            params![book_id],
-        )?;
-        Ok(())
     }
 
     /// 书架分组：先按 `query` 过滤，再按 `by` 分。
@@ -1092,7 +1063,7 @@ impl Store {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
             // 封面缺失最后检查，不能盖过正文或索引错误。
             conn.query_row(
-                "SELECT path, format, size, mtime, index_version, cover_hash, cover_mime, rules_hash
+                "SELECT path, format, size, mtime, index_version, cover_hash, cover_mime, rules_hash, managed_root
                    FROM books WHERE id = ?1",
                 params![book_id],
                 |r| {
@@ -1105,6 +1076,7 @@ impl Store {
                         cover_hash: r.get(5)?,
                         cover_mime: r.get(6)?,
                         rules_hash: r.get(7)?,
+                        managed_root: r.get(8)?,
                     })
                 },
             )
@@ -1146,7 +1118,7 @@ impl Store {
             && !hash.is_empty()
             && !mime.is_empty()
         {
-            let root = book_root(Path::new(&row.path));
+            let root = asset_root(&row.managed_root, Path::new(&row.path));
             if crate::assets::cover::resolve(&root, hash, mime).is_none() {
                 return Ok(Some(StaleReason::MissingCover));
             }

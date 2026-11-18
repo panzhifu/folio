@@ -26,7 +26,8 @@ use super::resident;
 ///
 /// 界面线程在启动与监听相关配置改动时各调一次。阻塞发生在「停旧的」上 —— 最多等
 /// 监听线程一轮 tick（一秒），可接受；起的那一下只是建线程，不阻塞。
-pub fn sync_from_config(cx: &App) {
+pub fn sync_from_config(cx: &mut App) {
+    super::source_updates::start(cx);
     let library = ConfigHolder::library(cx);
     let store = super::app_store::handle(cx);
 

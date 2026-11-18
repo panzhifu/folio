@@ -79,11 +79,7 @@ const COVER_H: f32 = 72.0;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotesEvent {
     /// 点了一条：开那本书，落到那一处（章，章内偏移）。
-    Open {
-        book_id: i64,
-        /// 落点。定版式那一族的偏移会被会话那头忽略（它只有页），递进去没有害处。
-        jump: (usize, usize),
-    },
+    Open { book_id: i64, record: (bool, i64) },
 }
 
 /// 本屏自己的撤销槽：拔掉的书签整份抄着，窗口内按原行插回。
@@ -169,7 +165,8 @@ impl NotesView {
             return;
         };
         match notes::load_groups(&store) {
-            Ok(groups) => {
+            Ok(mut groups) => {
+                projection::apply(&store, &mut groups, cx);
                 self.store_missing = false;
                 self.covers = groups
                     .iter()
@@ -205,13 +202,13 @@ impl NotesView {
     }
 
     /// 点了一条：报给外壳（开书 + 落点都在它手里）。
-    fn open_entry(&mut self, book_id: i64, chapter: usize, offset: usize, cx: &mut Context<Self>) {
+    fn open_entry(&mut self, book_id: i64, is_bookmark: bool, id: i64, cx: &mut Context<Self>) {
         // 跳原文先把这一层收掉。阅读层是盖在整窗之上的，两层遮罩叠着的话，返回键与
         // 点击命中都要各判一次谁是顶 —— 规范那条「别把浮层叠起来」。
         self.sheet.update(cx, |sheet, cx| sheet.hide(cx));
         cx.emit(NotesEvent::Open {
             book_id,
-            jump: (chapter, offset),
+            record: (is_bookmark, id),
         });
     }
 
@@ -672,7 +669,7 @@ impl NotesView {
         let (quote, note) = row_text(entry, place.as_ref(), tr(cx, "reader.bookmark"));
         let view = cx.entity().clone();
         let delete_view = view.clone();
-        let (book_id, chapter, offset) = (group.book_id, entry.chapter, entry.offset);
+        let book_id = group.book_id;
         let (is_bookmark, id) = (entry.is_bookmark, entry.id);
         let delete_label = tr(cx, "shelf.book_delete");
         let date_line = h_flex()
@@ -720,7 +717,7 @@ impl NotesView {
                     .cursor_pointer()
                     .active(|style| style.opacity(0.7))
                     .on_click(move |_, _, cx| {
-                        view.update(cx, |this, cx| this.open_entry(book_id, chapter, offset, cx))
+                        view.update(cx, |this, cx| this.open_entry(book_id, is_bookmark, id, cx))
                     })
                     .child(
                         v_flex()
@@ -992,3 +989,5 @@ fn meta_line(icon: IconName, text: SharedString, cx: &App) -> AnyElement {
 
 #[cfg(test)]
 mod tests;
+
+mod projection;

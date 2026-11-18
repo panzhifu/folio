@@ -591,6 +591,21 @@ mod booted {
         boot_sized(cx, size(px(900.), px(600.)), desktop_host)
     }
 
+    fn import_book(store: &Store, source: &std::path::Path, root: &std::path::Path) -> i64 {
+        use folio_core::ingest::import::{Imported, import_from};
+
+        let outcomes = import_from(
+            &PathsSource::picked(vec![source.into()]),
+            root,
+            store,
+            &folio_core::StageCtx::detached(),
+        );
+        match outcomes.into_iter().next().unwrap().result.unwrap() {
+            Imported::Added(row) => row.book_id,
+            Imported::Duplicate { book_id } => book_id,
+        }
+    }
+
     /// 同一套壳，但视口由调用方给：导航栏让位只在 Compact / Medium 两档发生（`SizeClass::of`
     /// 把 840 宽以上判成 Expanded，那一档 `note_scroll` 直接返回），要验让位就得把窗口开窄。
     fn boot_sized(
@@ -2183,15 +2198,11 @@ mod booted {
     /// `None` 上下文上绑着）。
     #[gpui_kit::test]
     fn the_arrow_keys_turn_the_pages(cx: &mut TestAppContext) {
-        use folio_core::content::format::{ChapterLocator, ChapterText, DocMeta};
-        use folio_core::{Chapter, FlowDoc, Format};
-
         let (handle, shell) = boot(cx, false);
         let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
-        // 正文换成一段够长的合成语料 —— 夹具本身只有两百多字，一页就装完了，「翻得动」
-        // 那个断言就无从成立。位置写成 `Inline`（正文在手上）：`Markdown` 那一条位置
-        // 本来算的是 `Section`，而打开时回容器按序号取，取得的是夹具自己那两百多字。
-        let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
+        // 使用真实固定阅读版本；正文够长才有可翻的第二页。
+        let files = tempfile::tempdir().unwrap();
+        let fixture = files.path().join("book.md");
         let source = (0..80)
             .map(|i| {
                 format!(
@@ -2199,29 +2210,8 @@ mod booted {
                 )
             })
             .collect::<String>();
-        let flow = FlowDoc {
-            chapters: vec![Chapter {
-                title: "第一章".into(),
-                spine_href: String::new(),
-                text: ChapterText::At(ChapterLocator::Inline(source)),
-                char_len: None,
-                images: Vec::new(),
-            }],
-            ..Default::default()
-        };
-        let book = store
-            .add_book(
-                fixture,
-                &DocMeta {
-                    title: "测试书".into(),
-                    format: Format::Markdown,
-                    ..DocMeta::default()
-                },
-            )
-            .expect("合成书该入得了库");
-        store
-            .save_flow(book, &flow, Format::Markdown)
-            .expect("章节该存得进去");
+        std::fs::write(&fixture, format!("# 测试书\n\n{source}")).unwrap();
+        let book = import_book(&store, &fixture, &files.path().join("library"));
 
         shell.update(cx, |this, cx| this.open_reading(book, cx));
         // 排版在渲染帧里做：一帧只把恢复请求挂上，切页要再走一帧。
@@ -2287,53 +2277,19 @@ mod booted {
     /// 直接调 `open_reading`，所以漏掉整层 occlude 时它会真的把当前书换掉。
     #[gpui_kit::test]
     fn reading_layer_blocks_clicks_that_land_on_a_shelf_card(cx: &mut TestAppContext) {
-        use folio_core::{Chapter, ChapterText, DocMeta, FlowDoc, Format};
-
         let (handle, shell) = boot(cx, false);
         // 这条钉定住后的命中；把减动效打开，`Presence` 直接给 Present，不把转场时钟混进来。
         cx.update(|cx| cx.set_reduce_motion(true));
         let store = cx.update(|cx| crate::ui::services::app_store::handle(cx).unwrap());
-        let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
-        // 第二本用同一份夹具的临时副本：`add_book` 按路径认书，同一路径加两次
-        // 只会拿到同一个 id。`local/` 下的书不进 CI，不能用。
         let fixtures = tempfile::tempdir().expect("临时目录");
-        let other_fixture = fixtures.path().join("other.epub");
-        std::fs::copy(fixture, &other_fixture).expect("复制夹具");
+        let library = fixtures.path().join("library");
         let add = |title: &str, path: &std::path::Path| -> i64 {
-            store
-                .add_book(
-                    path,
-                    &DocMeta {
-                        title: title.into(),
-                        format: Format::Markdown,
-                        ..DocMeta::default()
-                    },
-                )
-                .expect("测试书该入得了库")
+            let text = "<p>于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。</p>".repeat(20);
+            std::fs::write(path, format!("# {title}\n\n{text}")).unwrap();
+            import_book(&store, path, &library)
         };
-        let opened = add("正在读", fixture);
-        let other = add("身后那本", &other_fixture);
-        let flow = FlowDoc {
-            chapters: vec![Chapter {
-                title: "第一章".into(),
-                spine_href: String::new(),
-                text: ChapterText::Inline(
-                    "<p>于是我们奋力向前，逆水行舟，被不断地向后推，推入过去。</p>".repeat(20),
-                ),
-                char_len: None,
-                images: Vec::new(),
-            }],
-            ..Default::default()
-        };
-        store
-            .save_flow(opened, &flow, Format::Markdown)
-            .expect("正文该存得进去");
-        // 身后那本也要有可读正文：只登记索引的话，`open_book` 会在
-        // `load_content` 那一步失败、保持当前书不变 —— 那正好会把「点击穿透」
-        // 测成通过。两本都能打开，换书才藏不住。
-        store
-            .save_flow(other, &flow, Format::Markdown)
-            .expect("身后那本的正文也该存得进去");
+        let opened = add("正在读", &fixtures.path().join("opened.md"));
+        let other = add("身后那本", &fixtures.path().join("other.md"));
         shell.update(cx, |this, cx| {
             this.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
         });
@@ -2928,11 +2884,7 @@ mod booted {
     /// 起点是架面**发那条事件**而不是它自己那颗删除按钮：删那一步要动硬盘上的副本文件，
     /// 而这条门钉的是外壳那一侧的分流。
     ///
-    /// 开着的那一本必须**真入过库**（索引也存进去），不是只登记一行：`open_book` 从库里取
-    /// 索引出来的章节，只有行的那本会走到「书库里读不出来」那条 error、停在原屏，那样的
-    /// `book_id()` 是 `None` —— 分流的两半就都在拿空值比空值。这三句的形状抄自
-    /// `ReaderSession` 那条内置样本路径（`open(path)` → `add_book` → `save_document`）。
-    /// 前置条件本身也钉了一条（那一层记下的 id 必须就是这一本）。
+    /// 开着的书走真实导入，必须有可读的固定版本；只登记行不再能打开。
     #[gpui_kit::test]
     fn deleting_the_opened_book_sends_the_layer_back(cx: &mut TestAppContext) {
         use crate::ui::features::shelf::ShelfEvent;
@@ -2944,12 +2896,8 @@ mod booted {
         // 宿主测试的工作目录是 crate 目录，所以仓库根的夹具在 `../../`。
         let fixture = std::path::Path::new("../../tests/fixtures/oss/minimal-zh.epub");
         let doc = folio_core::content::document::open(fixture).expect("仓库里那份合成书该打得开");
-        let opened = store
-            .add_book(fixture, doc.meta())
-            .expect("合成书该入得了库");
-        store
-            .save_document(opened, doc.as_ref())
-            .expect("那份索引该存得进去");
+        let files = tempfile::tempdir().unwrap();
+        let opened = import_book(&store, fixture, &files.path().join("library"));
         // 另一本不需要真文件：这一条只要 id 不同。
         let other = store
             .add_book(

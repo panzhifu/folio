@@ -1,102 +1,46 @@
-//! 开机那几趟维护：给还没身份的行认身份并改名、扫半成品，以及把丢掉的封面补回来。
-//!
-//! 前两趟只动库、不动来源，也不走 `ingest` / `index`（重扫那条在
-//! [`pipeline`](super::pipeline)）。**封面补齐是例外**：封面字节 v16 起只活在
-//! `covers/` 那个文件里，丢了的唯一来源就是书本身，所以那一趟必须回容器读一次。
+//! Legacy 维护与受控资产清理。未知旧身份只报告，不据当前字节改名或重标锚点。
+//! 封面补齐使用明确资产根；平铺孤儿清扫也核对全部登记版本的引用。
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
-use crate::content::format::Format;
 use crate::content::format::ParseBudget;
-use crate::error::IoResultExt as _;
+
 use crate::infra::paths;
 use crate::infra::task::StageCtx;
 use crate::ingest::identity;
-use crate::store::BookRow;
+
 use crate::store::CoverBackfillRow;
 use crate::store::Store;
-use crate::store::book_root;
-use folio_format::ext::FormatExt;
 
-/// 一趟补齐：给「还没有内容身份」的行算哈希，并把旧名字的副本改成哈希名。
-///
-/// 这是懒补的另一半（`plans/导入管线.md` §六 与 §一 步 5）。为什么不塞进迁移里：
-/// 几百本的一次性顺序读不该压在开库那一下（`plans/基础设施.md` §1.2 第 1 条），
-/// 可它又必须真的跑完 —— 不然「书库目录可以整目录 GC」「同名即同书」这些结论一直不成立。
-/// 所以它是 `Cleanup` 档的活（界面空闲才跑的那一档，见 [`crate::infra::task::Priority`]），
-/// 取消检查点落在书与书之间：**已经改过名的那些是真的**，剩下的一趟再来。
-///
-/// 四种情形分开处置，各自计数：
-///
-/// - **文件不在**（被删、没权限）→ 跳过。**不删行**：那条记录指向不存在的文件是
-///   [`Store::stale_reason`] 早就认得出的状态，而这里没有资格替读者决定丢书。
-/// - **副本躺在书库之外**（老的一就地登记那批，或读者中途改过书库位置）→ 只写身份列，
-///   不动文件：那个目录不是应用自己的，搬它是越界（判据与界面的 `owned_copy` 同一条）。
-/// - **目标名已经被占**（同哈希的另一行早就落过地）→ 不改名，把这一行改指那个在的位置。
-///   两行共用一个文件是允许的状态，删书时由 [`Store::rows_sharing_path`] 兜住。
-/// - 其余 → rename 成 `<哈希前缀>.<格式>`，回写位置与身份。
+/// 旧 API 的兼容报告。无可靠原建锚身份时不得据当前磁盘字节认领或改名。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BackfillReport {
-    /// 写进身份列的行数（含只写身份没搬文件的）。
     pub hashed: usize,
-    /// 真的改了名的行数。
     pub renamed: usize,
-    /// 因为目标名已在而改指别处的行数。
     pub retargeted: usize,
-    /// 读不到文件 / 算不出哈希 / rename 失败而跳过的行数。
     pub skipped: usize,
 }
 
-/// 跑一趟补齐：给 `content_hash IS NULL` 的行认身份，并把书库里的旧名字副本改成哈希名。
-///
-/// 情形怎么分、为什么单独一趟，写在 [`Backfill_copies 的类型文档`](`BackfillReport`) 里。
-/// 返回值只用于日志与测试断言 —— 这一趟没有「失败」一说：跳过的行留着 NULL，
-/// 下一趟还会再来（自愈档，`plans/基础设施.md` §3.1）。
-pub fn backfill_copies(store: &Store, book_dir: &Path, ctx: &StageCtx) -> BackfillReport {
-    let mut report = BackfillReport::default();
-    let rows = match store.rows_missing_hash() {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::warn!("import: 补齐问不到「哪些行还没身份」：{err:#}");
-            return report;
-        }
-    };
-    let total = rows.len() as u64;
-    for (done, row) in rows.iter().enumerate() {
-        if ctx.cancel().triggered() {
-            tracing::info!("import: 补齐被取消，已处理 {done} / {total} 行");
-            break;
-        }
-        ctx.item(done as u64, total);
-        match backfill_one(store, book_dir, row) {
-            Some((renamed, retargeted)) => {
-                report.hashed += 1;
-                if renamed {
-                    report.renamed += 1;
-                }
-                if retargeted {
-                    report.retargeted += 1;
-                }
+/// 已退役的自动认身份入口：只统计待验证行。使用 prepare_legacy_revision 捕获候选，
+/// 无法证明原内容身份时由用户确认；不更新哈希、不改路径、不移动字节。
+pub fn backfill_copies(store: &Store, _book_dir: &Path, ctx: &StageCtx) -> BackfillReport {
+    match store.rows_missing_hash() {
+        Ok(rows) => {
+            ctx.item(rows.len() as u64, rows.len() as u64);
+            BackfillReport {
+                skipped: rows.len(),
+                ..Default::default()
             }
-            None => report.skipped += 1,
+        }
+        Err(error) => {
+            tracing::warn!("无法统计待验证旧书目：{error}");
+            BackfillReport::default()
         }
     }
-    ctx.item(total, total);
-    if total > 0 {
-        tracing::info!(
-            "import: 补齐一趟 —— 认身份 {} 行（改名 {}、改指 {}），跳过 {}",
-            report.hashed,
-            report.renamed,
-            report.retargeted,
-            report.skipped
-        );
-    }
-    report
 }
-
 /// 这一版「封面补齐」的记号。改了补齐的判据或解析法就往上加，老机器下次开机再跑一趟。
 ///
 /// 存在库的 `prefs` 表里（v1 就在），不另建表、不进迁移清单 —— 迁移是「库长什么样」，
@@ -195,7 +139,10 @@ enum RestoreCover {
 }
 
 fn restore_cover(store: &Store, row: &CoverBackfillRow) -> RestoreCover {
-    let root = book_root(Path::new(&row.path));
+    let root = match store.book_asset_root(row.id) {
+        Ok(Some(root)) => root,
+        _ => return RestoreCover::Failed,
+    };
     // 两格都有、且拼出来的文件真的在 → 这一本没事。
     if let (Some(hash), Some(mime)) = (row.cover_hash.as_deref(), row.cover_mime.as_deref())
         && !hash.is_empty()
@@ -240,92 +187,6 @@ fn restore_cover(store: &Store, row: &CoverBackfillRow) -> RestoreCover {
     }
 }
 
-/// 一行。`Some((改过名没有, 改指过没有))` = 身份写进去了；`None` = 这一行跳过。
-fn backfill_one(store: &Store, book_dir: &Path, row: &BookRow) -> Option<(bool, bool)> {
-    let path = Path::new(&row.path);
-    let hash = match identity::sha256_of_path(path) {
-        Ok(hash) => hash,
-        Err(err) => {
-            tracing::debug!("import: 第 {} 本读不出内容（{path:?}）：{err}", row.id);
-            return None;
-        }
-    };
-    if let Err(err) = store.set_content_hash(row.id, &hash.to_hex(), identity::HASH_ALGO) {
-        tracing::warn!("import: 第 {} 本的身份没写进去：{err:#}", row.id);
-        return None;
-    }
-    // 书库之外的副本只写身份：搬它是越界。
-    if !path.starts_with(book_dir) {
-        return Some((false, false));
-    }
-    let dest = book_dir.join(hash.file_name(&extension_of(row, path)));
-    if dest == path {
-        return Some((false, false)); // 已经是哈希名了。
-    }
-    // 那个位置已经有行占着（`books.path` 上有 UNIQUE）：只认身份、不改名、不改指。
-    // 两条记录共用一个文件在当下是**造不出来**的状态，要等「内容变了但认得出是同一本」
-    // 那条更新路（§十一 已决第 2 条 + 待决第 3 条）落地才会出现；那时这一句改指才是正解，
-    // 现在硬改只会撞在 UNIQUE 上。留这一支而不直接 rename，是为了不把另一行的正文盖掉。
-    if dest.exists() {
-        // 这一问自己失败（库锁不住、语句出错）按「有人占着」处理：不改名是安全的一侧。
-        let occupied = match store.rows_sharing_path(&dest.to_string_lossy(), row.id) {
-            Ok(n) => n > 0,
-            Err(err) => {
-                tracing::warn!(
-                    "import: 第 {} 本问不出 {dest:?} 被谁占着，先不改名：{err:#}",
-                    row.id
-                );
-                true
-            }
-        };
-        if occupied {
-            tracing::info!(
-                "import: 第 {} 本的哈希名位置 {dest:?} 已被别的行占着，只认身份不改名",
-                row.id
-            );
-            return Some((false, false));
-        }
-        // 文件在而没有任何行认领（上一次崩溃留下的孤儿）：这一行改指过去，白丢一份 IO。
-        if let Err(err) = store.retarget_book_path(row.id, &dest) {
-            tracing::warn!("import: 第 {} 本改指 {dest:?} 失败：{err:#}", row.id);
-            return None;
-        }
-        return Some((false, true));
-    }
-    if let Err(err) = std::fs::rename(path, &dest).io_path(&dest) {
-        tracing::warn!(
-            "import: 第 {} 本的副本 {path:?} 没改成 {dest:?}：{err:#}",
-            row.id
-        );
-        return None;
-    }
-    if let Err(err) = store.retarget_book_path(row.id, &dest) {
-        // 名字已经改了而位置没写回：这条记录指向不存在的旧名。当场说清并把文件放回去，
-        // 比留下一本「点不开」的书好。
-        tracing::warn!(
-            "import: 第 {} 本改了名却写不回位置：{err:#}，把副本放回 {path:?}",
-            row.id
-        );
-        let _ = std::fs::rename(&dest, path);
-        return None;
-    }
-    Some((true, false))
-}
-
-/// 补齐时给副本用的扩展名：库里那一行 `format` 说是哪个格式就用哪个（那是当初判定过的
-/// 结论），认不出来就沿用现在这个文件的扩展名，什么都剩不下时留空（文件名就只有哈希）。
-/// 返回 `String` 而不是 `&str`：两条来源的生命周期不同（一条是 `'static` 的格式名、
-/// 一条借自路径），拼成一个拥有自己数据的串最省事，也最容易看清没有借错。
-fn extension_of(row: &BookRow, path: &Path) -> String {
-    match Format::parse(&row.format) {
-        Some(format) => format.copy_extension().to_string(),
-        None => path
-            .extension()
-            .map(|e| e.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-    }
-}
-
 /// 扫掉上一次留下的半成品。
 ///
 /// `.{名字}.part` 这种临时名在正常路径上要么被 rename 成正式副本，要么被 `abort` /
@@ -365,14 +226,28 @@ pub fn sweep_orphan_copies(store: &Store, book_dir: &Path) -> usize {
 
     // 问不出「哪些副本有人认领」就不动：少删一次永远比删错安全。
     let claimed: HashSet<String> = match store.list_books() {
-        Ok(books) => books
-            .into_iter()
-            .filter_map(|row| {
-                Path::new(&row.path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-            .collect(),
+        Ok(books) => {
+            let mut paths = Vec::new();
+            for row in books {
+                let revisions = match store.revisions(row.id) {
+                    Ok(revisions) => revisions,
+                    Err(error) => {
+                        tracing::warn!("无法核对历史版本引用，停止孤儿清理：{error}");
+                        return 0;
+                    }
+                };
+                paths.push(row.path);
+                paths.extend(revisions.into_iter().map(|r| r.managed_path));
+            }
+            paths
+                .into_iter()
+                .filter_map(|path| {
+                    Path::new(&path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .collect()
+        }
         Err(err) => {
             tracing::warn!("import: 问不出「哪些副本有人认领」，这一趟不清孤儿副本：{err:#}");
             return 0;

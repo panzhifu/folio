@@ -429,12 +429,7 @@ pub(crate) struct CompactSettings {
     /// （它的 `Drop` 直接调 `unsubscribe`），绑成局部变量等于没订阅 —— 少了它，后台扫完那一趟
     /// 永远不会让这一屏重画，读者看到的是一句「还没统计」。
     _storage_watch: Subscription,
-    /// 对「检查更新」状态实体的订阅，同上一条的理由：GitHub 那次往返在后台线程上结束，
-    /// 「正在检查…」要变成结果只能靠实体 `notify` 唤醒这一屏。手机上那一屏停住的样子
-    /// 与桌面完全一样，所以两条订阅一处都不能只写一半。
     _update_watch: Subscription,
-    /// 对「反馈日志」状态实体的订阅。同上一条：读盘与拼快照在后台线程上跑，
-    /// 那一格要从「正在整理日志…」变成结果，只能靠实体 notify 唤醒这一屏。
     _feedback_watch: Subscription,
     /// 对「WebDAV 同步」状态实体的订阅。同步那趟在后台线程上结束，状态与计数靠
     /// 实体 notify 才能出现在设置页上。
@@ -449,6 +444,7 @@ pub(crate) struct CompactSettings {
     _dictionary_watch: Subscription,
     /// 对「备份」状态实体的订阅：读目录与打包都在后台线程上结束，清单与结果句靠它唤醒。
     _backup_watch: Subscription,
+    _speech_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：与桌面那一屏同一个形状 —— 关于那一页的按钮拿的是
     /// 这一个句柄，挂的也是这一屏，所以两屏同时活着时各收各的（理由写在 `notes_sheet` 顶部）。
     notes: Entity<NotesSheet>,
@@ -492,6 +488,8 @@ impl CompactSettings {
         let dictionary_watch = cx.observe(&dictionary, |_, _, cx| cx.notify());
         let backup = crate::ui::services::backup::entity(cx);
         let backup_watch = cx.observe(&backup, |_, _, cx| cx.notify());
+        let speech = crate::ui::services::speech::entity(cx);
+        let speech_watch = cx.observe(&speech, |_, _, cx| cx.notify());
         Self {
             screen: Screen::Root,
             scroll: ScrollHandle::new(),
@@ -506,6 +504,7 @@ impl CompactSettings {
             _access_watch: question_watch,
             _dictionary_watch: dictionary_watch,
             _backup_watch: backup_watch,
+            _speech_watch: speech_watch,
             notes,
             search: None,
             query: SharedString::default(),

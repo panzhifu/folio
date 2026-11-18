@@ -1,31 +1,7 @@
-//! 书架：顶部一行命令（搜索 + 导入入口），下面一片按封面排的网格。
-//!
-//! 两端用的是同一份架面，只有顶部那一行和一行放几本按窗口档位换：手机上是一条
-//! 满幅的搜索框，桌面与平板上是定宽搜索框加一颗三点按钮 —— 三种导入方式收在
-//! 点开的那条菜单里（见 [`Self::more_button`]）。见 `toolbar` 与 [`columns_for`]。
-//!
-//! 搜索框查的是**书名与作者**（`Store::shelf`，一条 `LIKE`），不是正文。
-//! 正文的全文检索是另一件事（`Store::search`，trigram FTS，短于 3 个字命中不了）：
-//! 书架上这颗框在读者眼里是「找我那本书」，输入两个字就该立刻把书名对得上的那几本
-//! 列出来 —— 把两件事混在一个入口会让短查询静默返回空。
-//!
-//! 一片格子怎么排（几列、格间距、整片滚动）在 `grid`；一格长什么样在
-//! [`super::book_card`] —— 包括「没有封面的书也要照样占住一格」那一条。
-//!
-//! 组只有一个入口：架面那几张组卡。组卡与书排在**同一条流**上，尺只有一把 —— 谁最近被
-//! 翻开谁的卡就在先，所以点开分组里的书时顶到第 1 格的是那张组卡（那本书本身不在整架
-//! 那一片，见下）。并法在 [`grid::merge_cells`]。点下去是**在架面这条栈上压一整页**
-//! （`open_page`）：那一页用的是同一份架面，只是查的是另一片书（`ShelfScope`）。压成
-//! 「一页」买到的正是返回那一头 —— 系统返回键把它弹掉就回到书架，而身后那一片连滚动
-//! 位置都没动过。
-//!
-//! 组是**去处**也是**收纳**：一本书一旦挂进某个组，它就不在整架那一片出现了（`Store::shelf_ungrouped`），
-//! 只有走进那一组才看得见；那几张组卡就是它去的去处。「未分组」不是一条筛选、也不是
-//! 一个入口，它就是整架那一片本身。
-//!
-//! 顶部那颗搜索框是这一条的例外：词非空时查的是**全库**（`Store::shelf`）。某一组那一页
-//! 没有搜索行（顶栏是返回 + 组名），跟着一起筛掉的话，进过组的书在这台机器上就再也搜不
-//! 出来了 —— 而那在读者眼里是书丢了，不是收纳过。
+//! 书架的搜索、导入与书卡流，两端按窗口档位组合。
+//! 搜索只查书名/作者；词非空时查全库，分组页则显示该组。
+//! 组卡与未分组书卡按最近打开合成同一条流；点组卡在同一导航栈压页。
+//! 格子几何在grid，卡片与菜单在components，后台来源更新由服务通知失效。
 
 // 这一屏压出来的两页与它共用同一个实体：信息页（压导航栈的整屏）与整机扫描的候选清单。
 pub(in crate::ui::features::shelf) mod book_info;
@@ -33,6 +9,7 @@ pub(in crate::ui::features::shelf) mod grid;
 pub(in crate::ui::features::shelf) mod network_import;
 pub(in crate::ui::features::shelf) mod scan;
 pub(in crate::ui::features::shelf) mod sheets;
+mod source_details;
 pub(in crate::ui::features::shelf) mod status;
 pub(in crate::ui::features::shelf) mod toolbar;
 
@@ -345,6 +322,7 @@ pub struct ShelfView {
     pub(in crate::ui::features::shelf) _info_watch: Option<Subscription>,
     /// 上传进度观察随书架生命周期释放。
     _upload_watch: Option<Subscription>,
+    _source_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
     /// 对「没拿到所有文件访问」那一问的订阅：那一问摆不摆由服务那份实体说了算，它一
@@ -412,6 +390,19 @@ impl ShelfView {
         scope: ShelfScope,
     ) -> Self {
         let store = crate::ui::services::app_store::handle(cx);
+        let source_watch = crate::ui::services::source_updates::handle(cx).map(|updates| {
+            let mut epoch = updates.read(cx).epoch();
+            cx.observe(&updates, move |this, updates, cx| {
+                if crate::ui::services::source_updates::belongs_to_current_store(&updates, cx) {
+                    let next = updates.read(cx).epoch();
+                    if next != epoch {
+                        epoch = next;
+                        this.covers.clear();
+                        this.force_reload(cx);
+                    }
+                }
+            })
+        });
         if store.is_none() {
             tracing::error!("ShelfView: 书库没装，架面会是空的");
         }
@@ -530,6 +521,7 @@ impl ShelfView {
             _group_watch: None,
             _info_watch: None,
             _upload_watch: None,
+            _source_watch: source_watch,
             _pick: None,
             _access_watch: access_watch,
             pending_reload: false,
@@ -798,18 +790,8 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 打开系统文件选择器选书，把选中的文件交给**后端导入管线**（`folio_core::ingest::import`）。
-    ///
-    /// **先复制**不是多余的一步：选择器给的是它自己临时目录里的路径，系统随时会清，
-    /// 而 `books.path` 那一列是书的身份（同路径重复导入算更新，不算第二本书）。
-    /// 手机那两端的路径本来就是桥先拷出来的临时副本：导入读完由
-    /// [`PathsSource::picked_temporary`] 的 `Drop` 把 `gpui-import-<uuid>/` 连同文件清掉；
-    /// 桌面选择器给的是读者原文件，照旧不删。
-    ///
-    /// 拷贝、解析、落库都发生在 `folio_core::infra::task` 的工作线程上：解析一本 EPUB 是几十
-    /// 到几百毫秒，一次选十本串在界面线程上跑就是几秒的卡顿。界面线程只留两件本来
-    /// 就该它做的事 —— 读配置里的书库位置，以及按管线交回的结果刷新架面
-    /// （见 [`Self::finish_import`]）。
+    /// 选择文件并登记真实来源能力，持久URI与临时副本分别传入。
+    /// 捕获/解析/发布在后台，移动临时文件按所有权清理，外部原件不删除。
     fn open_picker(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -834,12 +816,24 @@ impl ShelfView {
                 return;
             }
             let _ = this.update(cx, |this, cx| {
-                let source: Box<dyn folio_core::ingest::import::Source> =
-                    if crate::ui::host::picked_files_are_temporary(cx) {
-                        Box::new(PathsSource::picked_temporary(paths))
-                    } else {
-                        Box::new(PathsSource::picked(paths))
-                    };
+                let temporary = crate::ui::host::picked_files_are_temporary(cx);
+                let links = paths
+                    .iter()
+                    .filter_map(|path| {
+                        crate::ui::platform::source_for_pick(path)
+                            .filter(|source| !source.display_name.trim().is_empty())
+                            .map(|source| {
+                                (
+                                    path.clone(),
+                                    folio_core::ingest::external_source::SourceLink {
+                                        kind: "android-document".into(),
+                                        locator: source.locator,
+                                    },
+                                )
+                            })
+                    })
+                    .collect();
+                let source = Box::new(PathsSource::with_links(paths, links, temporary));
                 this.dispatch_import(source, cx)
             });
         })
@@ -1029,6 +1023,7 @@ impl ShelfView {
     /// 落库已经在管线里做完了；这里只消费「哪几本的 id 变了」—— 封面可能跟着
     /// 这次导入换了，缓存里那条旧的要清掉。
     fn finish_import(&mut self, outcomes: Vec<ImportOutcome>, cx: &mut Context<Self>) {
+        crate::ui::services::source_updates::poll_now(cx);
         self.importing = None;
         self.import_cancel = None;
         for outcome in &outcomes {

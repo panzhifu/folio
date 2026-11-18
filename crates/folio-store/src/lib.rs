@@ -62,8 +62,12 @@ mod import_log;
 pub mod notes;
 mod passphrases;
 mod reading;
+mod record_revisions;
+mod record_writes;
 mod restore;
+mod revisions;
 mod schema;
+mod sources;
 pub mod stats;
 mod sync;
 mod sync_order;
@@ -77,7 +81,11 @@ mod tests;
 
 pub use books::book_root;
 pub use books::{CoverBackfillRow, SourceUnavailable, StaleReason, UnavailableSource};
+pub use folio_model::revision::{BookRevision, BookSource, RevisionFence};
 pub use import_log::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry};
+pub use revisions::{
+    AdoptResult, ImportRegistration, LeasedRevision, RevisionLease, RevisionReady, RevisionSnapshot,
+};
 pub use types::*;
 
 use schema::MIGRATIONS;
@@ -88,6 +96,7 @@ pub struct Store {
     reindex_queued: Mutex<HashSet<i64>>,
     /// 本进程内失败的作业不自动重投，下次启动允许重试。
     reindex_failed: Mutex<HashSet<i64>>,
+    revision_leases: std::sync::Arc<Mutex<std::collections::HashMap<(i64, RevisionFence), usize>>>,
 }
 
 // 编译期保证后台作业可共享书库句柄。
@@ -160,6 +169,7 @@ impl Store {
             conn: Mutex::new(conn),
             reindex_queued: Mutex::new(HashSet::new()),
             reindex_failed: Mutex::new(HashSet::new()),
+            revision_leases: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
     }
 

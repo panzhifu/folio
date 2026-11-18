@@ -40,9 +40,7 @@ fn added(outcomes: &[ImportOutcome]) -> super::Registered {
     }
 }
 
-/// 书库根目录（不含 `.staging` 那一层）里现在有哪些文件，按名字排。
-/// 断言比的是「副本集合」而不是某个写死的名字 —— 哈希名不由测试决定，
-/// 而「根上只有一份」是说得清的。
+/// 登记布局里的正文副本，包含 Legacy 平铺文件与版本清单指定的主文件。
 fn copies(lib: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(lib)
         .map(|entries| {
@@ -53,6 +51,36 @@ fn copies(lib: &Path) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default();
+    for book in std::fs::read_dir(lib.join("versions"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for revision in std::fs::read_dir(book.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let marker = revision.path().join(".folio-revision.json");
+            let value = std::fs::read(&marker)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+            if let Some(main) = value.as_ref().and_then(|v| v["main"].as_str()) {
+                if !revision.path().join(main).is_file() {
+                    continue;
+                }
+                names.push(
+                    revision
+                        .path()
+                        .join(main)
+                        .strip_prefix(lib)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
     names.sort();
     names
 }
@@ -152,11 +180,9 @@ fn url_import_streams_into_a_hash_named_copy_and_registers() {
     let outcomes = import_from(&source, &lib, &store, &StageCtx::detached());
     assert_eq!(outcomes.len(), 1);
     let registered = added(&outcomes);
-    assert_eq!(
-        registered.dest.parent(),
-        Some(lib.as_ref()),
-        "副本要在书库根上，实际 {:?}",
-        registered.dest
+    assert!(
+        registered.dest.starts_with(lib.join("versions")),
+        "新版必须落独立版本目录"
     );
     let name = registered
         .dest
@@ -171,12 +197,7 @@ fn url_import_streams_into_a_hash_named_copy_and_registers() {
         "txt",
         "扩展名来自注册表：{name}"
     );
-    assert_eq!(
-        name.split('.').next().unwrap().len(),
-        16,
-        "主名是哈希前缀那 16 个 base32 字符：{name}"
-    );
-    assert!(!name.contains('书'), "建议名不许混进最终文件名：{name}");
+    assert_eq!(name, "书.txt", "内部版本保留可读叶文件名");
     assert_eq!(store.shelf("").unwrap().len(), 1);
     assert_eq!(
         store.rows_missing_hash().unwrap().len(),
@@ -290,7 +311,7 @@ fn cloud_import_downloads_picks_into_a_hash_named_copy_and_registers() {
     assert_eq!(path, "books/书.txt");
     assert_eq!(*size, Some(10));
     let registered = added(&outcomes);
-    assert_eq!(registered.dest.parent(), Some(lib.as_ref()));
+    assert!(registered.dest.starts_with(lib.join("versions")));
     let name = registered
         .dest
         .file_name()
@@ -298,8 +319,7 @@ fn cloud_import_downloads_picks_into_a_hash_named_copy_and_registers() {
         .to_string_lossy()
         .into_owned();
     assert_eq!(name.rsplit_once('.').unwrap().1, "txt");
-    assert_eq!(name.split('.').next().unwrap().len(), 16);
-    assert!(!name.contains('书'), "建议名不许混进最终文件名：{name}");
+    assert_eq!(name, "书.txt");
     assert_eq!(store.shelf("").unwrap().len(), 1);
     assert!(
         staged(&lib).is_empty(),
@@ -765,7 +785,10 @@ fn a_duplicate_whose_copy_is_gone_heals_the_existing_row() {
         healed.book_id, first.book_id,
         "自愈不许新增一行 —— 同一份内容两行就是两套进度"
     );
-    assert_eq!(healed.dest, first.dest, "哈希名由内容定，落回原来那个位置");
+    assert_ne!(
+        healed.dest, first.dest,
+        "自愈发布独占新版本，不复用已丢失的旧目录项"
+    );
     assert!(
         Path::new(&healed.dest).exists(),
         "那一行要重新指着一个存在的文件：{}",
@@ -875,80 +898,71 @@ fn sweep_orphan_copies_takes_only_unclaimed_old_hash_copies() {
     assert!(dir_like.is_dir(), "目录不在这一趟的管辖里");
 }
 
-/// 老库那一批「旧名字副本 + 没有身份」的行：补齐一趟之后身份有了、副本改成哈希名、
-/// 位置回写，而**内容一个字节都没变**。
-///
-/// 这一条钉的是「懒补 + 一次性改名」那两条决定合起来的形状：迁移本身不读全库（行留着
-/// `content_hash IS NULL`），改名由 `Cleanup` 档这一趟做，做完记录仍然指得到正文。
+/// 未知旧身份不能由当前磁盘字节推断，旧锚点与原路径须保留供候选确认。
 #[test]
-fn backfill_gives_legacy_copies_an_identity_and_a_hash_name() {
+fn legacy_backfill_does_not_relabel_anchors_or_rename_unknown_content() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = tmp.path().join("books");
     std::fs::create_dir_all(&lib).unwrap();
-    // 旧形状留下的那一本：名字是建议名，库里那一行没有身份。
-    let legacy = lib.join("老名字.txt");
-    std::fs::write(&legacy, "老库里的正文\n").unwrap();
+    let legacy = write(&lib, "老名字.txt", "已经被外部修改的旧文件\n");
     let store = Store::in_memory().unwrap();
-    let meta = crate::content::format::DocMeta {
-        title: "老名字".into(),
-        authors: vec![],
-        format: crate::content::format::Format::Text,
-        size: 0,
-        ..crate::content::format::DocMeta::default()
+    let id = store
+        .add_book(
+            &legacy,
+            &crate::DocMeta {
+                title: "旧书".into(),
+                format: crate::Format::Text,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let anchor = crate::content::anchor::TextAnchor {
+        exact: "旧版本的原文".into(),
+        ..Default::default()
     };
-    let id = store.add_book(&legacy, &meta).unwrap();
-    assert_eq!(store.rows_missing_hash().unwrap().len(), 1, "起点是没身份");
-
-    let report = backfill_copies(&store, &lib, &StageCtx::detached());
+    store
+        .add_annotation(
+            id,
+            &anchor,
+            "旧笔记",
+            "amber",
+            crate::store::AnnotationStyle::Highlight,
+        )
+        .unwrap();
+    let before = store.annotations(id).unwrap();
+    for _ in 0..2 {
+        let report = backfill_copies(&store, &lib, &StageCtx::detached());
+        assert_eq!(
+            report,
+            BackfillReport {
+                skipped: 1,
+                ..Default::default()
+            }
+        );
+    }
     assert_eq!(
-        report,
-        BackfillReport {
-            hashed: 1,
-            renamed: 1,
-            retargeted: 0,
-            skipped: 0,
-        },
-        "该改一次名、认一次身份"
+        store.book(id).unwrap().unwrap().path,
+        legacy.to_string_lossy()
     );
-    let row = store.book(id).unwrap().unwrap();
-    assert_ne!(row.path, legacy.to_string_lossy(), "副本改成哈希名");
-    assert!(
-        row.path.ends_with(".txt"),
-        "扩展名跟着库里那一行的格式、并按注册表认得的那一个写：{}",
-        row.path
-    );
-    assert!(
-        !legacy.exists() && Path::new(&row.path).exists(),
-        "改完名之后旧位置不该还留着一份"
+    assert_eq!(store.rows_missing_hash().unwrap().len(), 1);
+    assert_eq!(store.annotations(id).unwrap(), before);
+    assert_eq!(
+        store
+            .record_origin("annotation", &before[0].uid)
+            .unwrap()
+            .unwrap()
+            .1,
+        ""
     );
     assert_eq!(
-        std::fs::read_to_string(&row.path).unwrap(),
-        "老库里的正文\n",
-        "改名只动位置不动内容"
-    );
-    assert!(
-        store.rows_missing_hash().unwrap().is_empty(),
-        "身份列补上了"
-    );
-
-    // 补齐过的行要能被判重认出来：再导一次同一份字节报已存在，而不是第二格。
-    let again = import_from(
-        &PathsSource::picked(vec![Path::new(&row.path).to_path_buf()]),
-        &lib,
-        &store,
-        &StageCtx::detached(),
-    );
-    assert!(
-        matches!(again[0].result, Ok(Imported::Duplicate { .. })),
-        "补齐过的行要能被判重认出来：{:?}",
-        again[0].result
+        std::fs::read_to_string(legacy).unwrap(),
+        "已经被外部修改的旧文件\n"
     );
 }
-
 /// 补齐不许越界：副本躺在书库之外（老的一就地登记那批，或读者中途改过书库位置）时
 /// **只写身份、不动文件**。
 #[test]
-fn backfill_fills_the_hash_without_moving_a_file_we_do_not_own() {
+fn legacy_backfill_preserves_external_files_and_missing_identity() {
     let tmp = tempfile::tempdir().unwrap();
     let lib = tmp.path().join("books");
     std::fs::create_dir_all(&lib).unwrap();
@@ -967,15 +981,15 @@ fn backfill_fills_the_hash_without_moving_a_file_we_do_not_own() {
     let report = backfill_copies(&store, &lib, &StageCtx::detached());
     assert_eq!(
         (report.hashed, report.renamed, report.skipped),
-        (1, 0, 0),
-        "认了身份而没搬文件"
+        (0, 0, 1),
+        "未知身份不能由当前字节自动补齐"
     );
     assert!(outside.exists(), "读者那一份一个字都不该动、更不该被搬走");
     assert_eq!(
         store.book(id).unwrap().unwrap().path,
         outside.to_string_lossy()
     );
-    assert!(store.rows_missing_hash().unwrap().is_empty());
+    assert_eq!(store.rows_missing_hash().unwrap().len(), 1);
 }
 
 /// 封面补齐：v15/v16 那次升级把 `books.cover` 删了、老行的 `cover_hash` 是 NULL，
@@ -1158,8 +1172,10 @@ fn a_landed_copy_is_still_recognisable_as_that_book() {
             crate::content::format::provider::provider_for(&path).is_some(),
             "副本 {name} 没有 provider 认领，打开就是「不支持的书籍格式」"
         );
-        // 名字的主名必须是那 16 个字符的哈希前缀，不是建议名。
-        assert_eq!(name.split('.').next().unwrap().len(), 16, "{name}");
+        assert!(
+            path.starts_with(lib.join("versions")),
+            "新版文件按稳定书目/版本目录隔离"
+        );
     }
 }
 
@@ -1870,7 +1886,7 @@ fn importing_a_comic_unpacks_it_exactly_once() {
         vec![
             registered
                 .dest
-                .file_name()
+                .strip_prefix(&lib)
                 .unwrap()
                 .to_string_lossy()
                 .into_owned()
@@ -2495,161 +2511,37 @@ fn parallel_import_of_same_named_books_keeps_each_copy_its_own_bytes() {
     );
 }
 
-/// §一 步 7 那句「库里有这一行就等于能打开」由 [`super::unwind_landing`] 兜住：落地之后
-/// 的四种失败形状各自该撤掉什么，都在这里直接喂值问一遍。
-///
-/// **这里钉住的是回滚本身，不是「`import_one` 在正确的三处调了它」**：那三处的触发条件
-/// 都是「库说失败」，而 `Store` 没有注错入口（`add_book` 在一个事务里，要么整行要么
-/// 没有行，所以从外面造不出半截状态）。要钉那一段就得给落库加一条 `#[cfg(test)]` 的假失败
-/// 开关 —— 值不值这一格由他定。
-#[test]
-fn unwinding_the_landing_step_takes_back_whichever_pieces_landed() {
-    let tmp = tempfile::tempdir().unwrap();
-    let lib = tmp.path().join("books");
-    let store = Store::in_memory().unwrap();
-    let first = added(&import_from(
-        &PathsSource::picked(vec![write(tmp.path(), "甲.txt", "甲这一本的正文\n")]),
-        &lib,
-        &store,
-        &StageCtx::detached(),
-    ));
-    let second = added(&import_from(
-        &PathsSource::picked(vec![write(tmp.path(), "乙.txt", "乙那一本的正文\n")]),
-        &lib,
-        &store,
-        &StageCtx::detached(),
-    ));
-    let second_row = store.book(second.book_id).unwrap().expect("行该在");
-
-    // 一、自增那一支：行是我们新加的，撤行 + 撤副本，两边都不留。
-    super::pipeline::unwind_landing(&store, None, Some(first.book_id), &first.dest);
-    assert!(
-        store.book(first.book_id).unwrap().is_none(),
-        "行该跟着撤掉（留着就是「库里有行而文件没了」）"
-    );
-    assert!(!first.dest.exists(), "副本该退掉");
-
-    // 二、自愈那一支：行是别人那一条，位置要退回动手之前那个**不存在**的旧名字。
-    let moved = lib.join("改指到新位置.txt");
-    std::fs::write(&moved, "乙那一本的正文\n").unwrap();
-    store.retarget_book_path(second_row.id, &moved).unwrap();
-    super::pipeline::unwind_landing(&store, Some(&second_row), Some(second_row.id), &moved);
-    assert_eq!(
-        store.book(second_row.id).unwrap().expect("行该还在").path,
-        second_row.path,
-        "位置该退回动手之前那一格"
-    );
-    assert!(!moved.exists(), "副本该退掉");
-
-    // 三、行根本没落地（`add_book` 与 `retarget_book_path` 自己失败）：只退副本，
-    // 不许去撤一条并不存在的行，也不许连带删掉别人那一本。
-    let stray = lib.join("没人认领.txt");
-    std::fs::write(&stray, "x").unwrap();
-    super::pipeline::unwind_landing(&store, None, None, &stray);
-    assert!(!stray.exists(), "副本该退掉");
-    assert_eq!(
-        store.shelf("").unwrap().len(),
-        1,
-        "只剩乙那一本：第三支不该带走任何行"
-    );
-}
-
-/// 落库那几句的假失败旗子（线程局部），出了作用域自动收回。
+/// 首次导入现在单事务登记身份与索引；查询或登记失败均不能留下书目/副本半套状态。
 struct FailHere;
-
 impl Drop for FailHere {
     fn drop(&mut self) {
         super::pipeline::fail_landing(None);
     }
 }
-
-/// 让落库的 `which` 那一句在下一次假失败。
-///
-/// 用它的测试都把并行度钉成 **1**：那时 [`Batch::run`] 就在调用线程上，而旗子是按线程放的。
 fn fail_at(which: &'static str) -> FailHere {
     super::pipeline::fail_landing(Some(which));
     FailHere
 }
 
-/// §一 步 7 那句「库里有这一行就等于能打开」，逐条钉在**管线真的调了回滚**上：
-/// 落库那五句各自假失败一次，看退回去的到底是不是只有已经落好的那几样。
-///
-/// 前四档都该「一本书没进来，而书库根与暂存区都干干净净」；最后一档正好相反 ——
-/// 身份列写不进去**不算这本没进来**（行与副本都在，只是哈希空着，交给补齐）。
 #[test]
 fn each_landing_failure_takes_back_just_the_pieces_that_landed() {
-    let good = |n: u32| format!("第 {n} 本的正文，内容各不相同。\n");
-
-    // 一、判重那一问失败：字节还没换名、没进根、没落库，退掉 `.part` 就该完事。
-    {
+    for failure in ["book_by_hash", "register_import"] {
         let tmp = tempfile::tempdir().unwrap();
         let lib = tmp.path().join("books");
         let store = Store::in_memory().unwrap();
-        let source = PathsSource::picked(vec![write(tmp.path(), "一问.txt", &good(1))]);
-        let _guard = fail_at("book_by_hash");
+        let source = PathsSource::picked(vec![write(tmp.path(), "事务.txt", "事务登记的正文\n")]);
+        let guard = fail_at(failure);
         let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
-        drop(_guard);
-        assert!(outcomes[0].result.is_err(), "库问不出就该拒这一本");
-        assert_eq!(copies(&lib), Vec::<String>::new(), "书库根上不许有东西");
-        assert!(staged(&lib).is_empty(), "暂存区那一份要退掉");
-        assert!(store.shelf("").unwrap().is_empty(), "库里没有那一行");
-    }
-
-    // 二、新增那一行失败：副本已经 rename 进根了，得跟着退掉 —— 这正是原来漏掉的那个洞
-    // （根上的半成品**没有** `sweep_partials` 兜底，它只认 `.{名字}.part` 那种名字）。
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let lib = tmp.path().join("books");
-        let store = Store::in_memory().unwrap();
-        let source = PathsSource::picked(vec![write(tmp.path(), "新增.txt", &good(2))]);
-        let _guard = fail_at("add_book");
-        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
-        drop(_guard);
-        assert!(outcomes[0].result.is_err());
-        assert_eq!(copies(&lib), Vec::<String>::new(), "没人认领的副本要退掉");
-        assert!(staged(&lib).is_empty());
-        assert!(store.shelf("").unwrap().is_empty());
-    }
-
-    // 三、`save_document` 失败：行已经插进去了，得连着撤掉（留一行指向没内容的东西最坏）。
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let lib = tmp.path().join("books");
-        let store = Store::in_memory().unwrap();
-        let source = PathsSource::picked(vec![write(tmp.path(), "章表.txt", &good(3))]);
-        let _guard = fail_at("save_document");
-        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
-        drop(_guard);
-        assert!(outcomes[0].result.is_err());
-        assert_eq!(copies(&lib), Vec::<String>::new(), "副本要退掉");
+        drop(guard);
+        assert!(outcomes[0].result.is_err(), "{failure} 应拒绝本次操作");
+        assert!(copies(&lib).is_empty(), "失败只回收本次发布物");
+        assert!(staged(&lib).is_empty(), "失败不能遗留暂存");
         assert!(
             store.shelf("").unwrap().is_empty(),
-            "刚插的那一行要跟着撤掉"
-        );
-        assert!(staged(&lib).is_empty());
-    }
-
-    // 四、身份列写不进去：**这本照样进来**。行与章节都在、书能打开，只是哈希还空着。
-    {
-        let tmp = tempfile::tempdir().unwrap();
-        let lib = tmp.path().join("books");
-        let store = Store::in_memory().unwrap();
-        let source = PathsSource::picked(vec![write(tmp.path(), "身份.txt", &good(4))]);
-        let _guard = fail_at("set_content_hash");
-        let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
-        drop(_guard);
-        let registered = added(&outcomes);
-        assert!(registered.dest.exists(), "副本留着，书能打开");
-        assert_eq!(copies(&lib).len(), 1, "根上就那一份");
-        assert_eq!(store.shelf("").unwrap().len(), 1, "那一行也留着");
-        assert_eq!(
-            store.rows_missing_hash().unwrap().len(),
-            1,
-            "哈希空着是懒补允许的状态，补齐作业会重算它"
+            "书目与身份/章节整批失败"
         );
     }
 }
-
 /// 自愈那一支（命中的行还在、副本文件没了）在 `retarget_book_path` 失败时不许把行改指
 /// 到一份没人认领的副本上：位置退回原来那个不存在的文件，新来的那份字节退掉。
 #[test]
@@ -2669,7 +2561,7 @@ fn a_failed_heal_leaves_the_row_pointing_where_it_started() {
 
     let second_file = write(&tmp.path().join("第二次"), "第二次.txt", body);
     let source = PathsSource::picked(vec![second_file]);
-    let _guard = fail_at("retarget_book_path");
+    let _guard = fail_at("ready_revision");
     let outcomes = import_parallel(&source, &lib, &store, &StageCtx::detached(), 1);
     drop(_guard);
 
@@ -2706,7 +2598,7 @@ fn a_failed_rescan_touches_neither_the_row_nor_the_copy() {
     ));
     let before = copies(&lib);
 
-    let _guard = fail_at("add_book");
+    let _guard = fail_at("ready_revision");
     let err = super::reindex(&store, landed.book_id).expect_err("落库那句假失败，重扫要报失败");
     drop(_guard);
 

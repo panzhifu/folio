@@ -12,8 +12,11 @@
 //! [`crate::store`] 里的那些行。阅读路径上不再有「按格式分支」这回事
 //! （见 [`crate::content`]）。
 
+pub mod external_source;
 pub mod import;
 pub mod scan;
+pub mod source_monitor;
+pub mod updates;
 pub mod watch;
 
 pub use crate::infra::identity;

@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+test-support = ["folio-speech/test-support"]
+
 # 本 crate 不依赖 GPUI；格式、排版与存储机制分别由独立 crate 提供。
 [dependencies]
 folio-base.workspace = true

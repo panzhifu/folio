@@ -31,7 +31,11 @@ impl Store {
     /// 整本替换章节、CSS、目录、封面与图片，一个事务保证不留半本。
     pub fn save_flow(&self, book_id: i64, doc: &FlowDoc, format: Format) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        Self::save_flow_in(&conn, book_id, doc, format)
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE books SET fixed_json='' WHERE id=?1", [book_id])?;
+        Self::save_flow_in(&tx, book_id, doc, format)?;
+        tx.commit()?;
+        Self::reclaim(&conn)
     }
 
     /// `save_flow` 的不上锁版本；只由已经持了锁的一方调用（公开方法与 `save_document`）。
@@ -43,7 +47,7 @@ impl Store {
     /// 输入那份 `doc.chapter_locators` 在写的时候**不看**：位置由格式现算，
     /// 免得「provider 交上来的空表」和「读回来的表」两种来源各写一遍。
     fn save_flow_in(conn: &Connection, book_id: i64, doc: &FlowDoc, format: Format) -> Result<()> {
-        let tx = conn.unchecked_transaction()?;
+        let tx = conn;
         tx.execute("DELETE FROM chapters WHERE book_id = ?1", params![book_id])?;
         tx.execute("DELETE FROM images WHERE book_id = ?1", params![book_id])?;
         for (idx, ch) in doc.chapters.iter().enumerate() {
@@ -130,7 +134,6 @@ impl Store {
                 serde_json::to_string(&doc.font_charset)?,
             ],
         )?;
-        tx.commit()?;
         tracing::debug!(
             "store: 第 {book_id} 本落库 {} 章、{} 张图、css {} 字节、目录 {} 项",
             doc.chapters.len(),
@@ -138,9 +141,6 @@ impl Store {
             doc.css.len(),
             doc.toc.len()
         );
-        // 重导入是一删一插：旧正文与旧图片元数据刚变成空页，当场还给系统。
-        // 不在事务里调的理由见 [`Store::reclaim`]。
-        Self::reclaim(conn)?;
         Ok(())
     }
 
@@ -150,7 +150,7 @@ impl Store {
     }
 
     /// `load_flow` 的不上锁版本；只由已经持了锁的一方调用（公开方法与 `load_content`）。
-    fn load_flow_in(conn: &Connection, book_id: i64) -> Result<Option<FlowDoc>> {
+    pub(crate) fn load_flow_in(conn: &Connection, book_id: i64) -> Result<Option<FlowDoc>> {
         // `char_len` 可空：NULL = 这一章的字数还没算过（旧库升上来的行、
         // 或 provider 那一趟只读了清单）。读取端要把 NULL 与 0 分开 ——
         // 合成一个就会让进度条把「没算过」当成「这一章是空的」。
@@ -301,7 +301,12 @@ impl Store {
     /// 存一本定版式文档。与 [`Store::save_flow`] 对称：封面与目录跟着一起写。
     pub fn save_fixed(&self, book_id: i64, doc: &FixedDoc) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        Self::save_fixed_in(&conn, book_id, doc)
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM chapters WHERE book_id=?1", [book_id])?;
+        tx.execute("DELETE FROM images WHERE book_id=?1", [book_id])?;
+        Self::save_fixed_in(&tx, book_id, doc)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// 读一本定版式文档。没存过、或存的是可重排时返回 `None`。
@@ -316,9 +321,28 @@ impl Store {
     /// 按内容家族存。界面拿到 [`Content`] 直接丢进来，不必自己分流。
     pub fn save_content(&self, book_id: i64, content: &Content, format: Format) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let tx = conn.unchecked_transaction()?;
+        Self::save_content_in(&tx, book_id, content, format)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn save_content_in(
+        conn: &Connection,
+        book_id: i64,
+        content: &Content,
+        format: Format,
+    ) -> Result<()> {
         match content {
-            Content::Reflow(flow) => Self::save_flow_in(&conn, book_id, flow, format),
-            Content::Fixed(fixed) => Self::save_fixed_in(&conn, book_id, fixed),
+            Content::Reflow(flow) => {
+                conn.execute("UPDATE books SET fixed_json='' WHERE id=?1", [book_id])?;
+                Self::save_flow_in(conn, book_id, flow, format)
+            }
+            Content::Fixed(fixed) => {
+                conn.execute("DELETE FROM chapters WHERE book_id=?1", [book_id])?;
+                conn.execute("DELETE FROM images WHERE book_id=?1", [book_id])?;
+                Self::save_fixed_in(conn, book_id, fixed)
+            }
         }
     }
 
@@ -332,25 +356,25 @@ impl Store {
         book_id: i64,
         doc: &dyn folio_format::document::Document,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        match doc.content() {
-            folio_format::document::ContentRef::Reflow(flow) => {
-                Self::save_flow_in(&conn, book_id, flow, doc.format())
-            }
-            folio_format::document::ContentRef::Fixed(fixed) => {
-                Self::save_fixed_in(&conn, book_id, fixed)
-            }
-        }
+        let content = match doc.content() {
+            folio_format::document::ContentRef::Reflow(flow) => Content::Reflow(flow.clone()),
+            folio_format::document::ContentRef::Fixed(fixed) => Content::Fixed(fixed.clone()),
+        };
+        self.save_content(book_id, &content, doc.format())
     }
 
     /// 读一本已入库的书。先试可重排、再试定版式 —— 两边的「有没有」互斥
     /// （有章节的必定是可重排），不会歧义。
     pub fn load_content(&self, book_id: i64) -> Result<Option<Content>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(flow) = Self::load_flow_in(&conn, book_id)? {
+        Self::load_content_in(&conn, book_id)
+    }
+
+    pub(crate) fn load_content_in(conn: &Connection, book_id: i64) -> Result<Option<Content>> {
+        if let Some(flow) = Self::load_flow_in(conn, book_id)? {
             return Ok(Some(Content::Reflow(flow)));
         }
-        Ok(Self::load_fixed_in(&conn, book_id)?.map(Content::Fixed))
+        Ok(Self::load_fixed_in(conn, book_id)?.map(Content::Fixed))
     }
 
     /// 一本书的章标题，按章号对齐成一份可按 `[chapter]` 下标取用的表。

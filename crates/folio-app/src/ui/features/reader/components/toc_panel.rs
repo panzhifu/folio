@@ -1,22 +1,6 @@
-//! 目录那一屏：整棵目录树 —— 书头、「已读 N / M」那一行、搜索、列表 —— 装在同一份状态里。
-//! 手机档用底部弹层升起它；平板与 PC 档用一张压在正文左边、底下垫遮罩的抽屉。
-//!
-//! 顶上那两格在「目录」与「全文」之间来回摆（`Screen`）：目录那一格摆的是这本书的目录树，
-//! 全文那一格摆的是正文里搜到的那几处。两格共用同一个容器、同一块书头、同一份行高与刻度，
-//! 换的是列表本体与顶上那一句读数 —— 换的从来不该是形状。
-//!
-//! 从 `page.rs` 搬出来独立成一个实体，是因为这一屏要跨帧持有的状态一大把（整棵树与它的
-//! 折叠集、搜索词与那颗输入框、弹层开合与停在哪一档、虚拟列表的尺寸表与滚动句柄、书头查回来的
-//! 那一行书目），而它们与阅读页自己的那几样（浮层开合、三条滑条、图片查看器）改的从来不是
-//! 同一件事。搬完之后 `page.rs` 只剩一个句柄：`toc`。
-//!
-//! 分工照 `reader` 这一层一贯的样子：**判断**在 [`crate::ui::features::reader::model::toc_tree`]（摊平、折叠、当前行、
-//! 搜索，纯函数，宿主的 `cargo test` 直接跑），**会话那一侧**的跳转命令在
-//! `modules/toc.rs`，这一文件只管「这一屏摆成什么、点了哪一行要做什么」。正文里找那几个字
-//! 本身不在这里 —— 在 [`folio_core::search`]，这一屏只把它的读数摆出来、把落点交给会话。
-//!
-//! 它向外只报两件事（[`TocEvent`]）：跳到了某一章（顶栏底栏与排版面板都在阅读页手里，
-//! 收干净得由它来），以及「目录样式」那一下（设置那一屏要压进导航栈，栈也在阅读页手里）。
+//! 目录、全文检索与当前阅读版本的批注列表。
+//! 手机用底部弹层，宽屏用抽屉；状态由本实体持有。
+//! 阅读坐标代变化时取消搜索、清除旧行表，迟到结果不得跳到新版本。
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -102,23 +86,12 @@ const TOC_BOTTOM_SPACE: f32 = 24.0;
 /// 而这两屏在同一块面板里上下滚 —— 同一个面板里两屏两种行距，滚动时那条对齐脊线就断了。
 /// 从前这一格写的是 52，注释自己承认没量过：它比目录那一档高出一截，两屏之间像换了尺子。
 const SEARCH_ROW: f32 = 46.0;
-/// 全文那一格打完字之后等多久才真的扫。
-///
-/// **按时间，不按帧**：按帧那一条只在有人 notify 时才走，而读者打完最后一个字之后
-/// 屏上可能什么都不动（没有动画、输入框的闪烁只通知它自己），于是「安静满 8 帧」
-/// 永远等不到 —— 第一行要等到下一次重画才出现。手机上读起来就是「敲完字没反应」。
-///
-/// 120 ms 比书架那颗（15 帧 ≈ 250 ms）短一档：这边读的是手里这本书、找的是同一份字，
-/// 读者最在意的是「多久看见结果」；250 ms 那一档是给整库查询 + 逐本解封面的。
+/// 全文输入按时间去抖；没有其它notify时，按帧计数不会推进。
+/// 120 ms针对当前书搜索，短于书架整库查询的250 ms。
 const FULLTEXT_SETTLE: std::time::Duration = std::time::Duration::from_millis(120);
 
-/// 一批摆多少处命中。续扫那一档（[`super::super::super::core::search::Options::max_hits`]）
-/// 就是它：列表滑到尾巴附近再要下一批，而不是一开始就把全书的命中都搬进这一屏。
-///
-/// 24 是「一屏半」那一档（手机一屏约 12 行）：这批数直接决定**第一屏要等多久** ——
-/// 常见字（「你」那种）得一章一章折可见文本，凑到 60 处要折的地方差不多是凑 24 处的
-/// 两倍半。而它只是「先摆多少」，读者往下滑时下一批已经在路上了，这里省下的时间
-/// 换到的正是「敲完字多久看见结果」。
+/// 首批24处约一屏半（手机一屏约12行），先交首批以缩短等待。
+/// 续扫沿用同一上限，滑近尾部时再要下一批。
 const SEARCH_PAGE: usize = 24;
 /// 离列表尾巴还剩几行就提前去要下一批。留一行都不到的话，读者会在最后那一行上
 /// 看见一次「等结果」的空档 —— 提前几行正是为了让下一批在他到得了之前已经进来。
@@ -348,17 +321,10 @@ pub(in crate::ui::features::reader) struct TocPanel {
     /// 书头那几行。与目录树同一次打开一起建（见 [`TocPanel::toggle`]）。
     header: Option<BookHeader>,
     _watches: Vec<Subscription>,
+    coordinate_generation: Option<(i64, folio_core::store::RevisionFence)>,
 }
 
-/// 一屏虚拟列表 + 它自己那条滚动条。
-///
-/// `v_virtual_list` 自己就是滚动容器，却没有挂轴的口子（`VirtualList` 不是
-/// `InteractiveElement`，`.vertical_scrollbar` 够不着）。所以轴挂在这层与它**同框**的
-/// `div` 上：`inset_0` 量到的是这块滚动区，不是整张弹层；轴贴着面板右边那一列留白，
-/// 不会浮到内容中间（设计规范那条「scrollbar belongs to the region that scrolls」）。
-///
-/// 底部那截呼吸位（[`TOC_BOTTOM_SPACE`]）写在列表自己身上而不是外层：它属于内容，
-/// 不属于视口。写在外面会把轨道拉长 24，拇指滑到底时停在离屏底一截的地方。
+/// 虚拟列表与滚动条共用同框；滚动句柄由面板持有，尾部留白属于列表。
 fn scroll_list(list: VirtualList, handle: &VirtualListScrollHandle) -> AnyElement {
     div()
         .relative()
@@ -377,7 +343,28 @@ impl TocPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let sheet = cx.new(BottomSheetState::closed);
-        let watches = vec![cx.observe(&sheet, |_, _, cx| cx.notify())];
+        let coordinate_generation = reader
+            .read(cx)
+            .book_id()
+            .zip(reader.read(cx).coordinate_fence());
+        let watches = vec![
+            cx.observe(&sheet, |_, _, cx| cx.notify()),
+            cx.observe(&reader, |this, reader, cx| {
+                let fence = reader
+                    .read(cx)
+                    .book_id()
+                    .zip(reader.read(cx).coordinate_fence());
+                if this.coordinate_generation != fence {
+                    this.coordinate_generation = fence;
+                    this.search.reset();
+                    this.settle_seq = this.settle_seq.wrapping_add(1);
+                    this.tree = None;
+                    this.marks.clear();
+                    this.header = None;
+                    cx.notify();
+                }
+            }),
+        ];
         Self {
             reader,
             sheet,
@@ -397,6 +384,7 @@ impl TocPanel {
             more_open: false,
             header: None,
             _watches: watches,
+            coordinate_generation,
         }
     }
 
@@ -684,6 +672,7 @@ impl TocPanel {
     /// `[range.start, range.end)` 那几行：左侧颜色点或书签图标，原文/笔记一行，
     /// 出处与提醒一行，行尾一颗删除。
     fn mark_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let generation = self.coordinate_generation;
         let end = range.end.min(self.marks.len());
         let palette = Palette::of(cx.theme());
         let (foreground, muted) = (cx.theme().foreground, cx.theme().muted_foreground);
@@ -770,12 +759,19 @@ impl TocPanel {
                             .small()
                             .icon(IconName::Trash)
                             .on_click(move |_, _, cx| {
-                                panel_delete
-                                    .update(cx, |this, cx| this.remove_mark(is_bookmark, id, cx))
+                                panel_delete.update(cx, |this, cx| {
+                                    if this.coordinate_generation == generation {
+                                        this.remove_mark(is_bookmark, id, cx);
+                                    }
+                                })
                             }),
                     )
                     .on_click(move |_, _, cx| {
-                        panel_jump.update(cx, |this, cx| this.jump_to_hit(chapter, offset, cx))
+                        panel_jump.update(cx, |this, cx| {
+                            if this.coordinate_generation == generation {
+                                this.jump_to_hit(chapter, offset, cx);
+                            }
+                        })
                     })
                     .into_any_element(),
             );
@@ -1351,6 +1347,7 @@ impl TocPanel {
     /// `[range.start, range.end)` 那几处命中：上面一行章名，下面一行那句上下文，
     /// 命中的那几个字单独着色。
     fn hit_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let generation = self.coordinate_generation;
         // 滑到离尾巴不到 [`SEARCH_LOOKAHEAD`] 行就接着数下一批。这一一手放在**构造行的这一层**
         // 而不是 `render` 里：只有这里知道当帧真的看到了第几行，而 `render` 只知道整屏。
         // 重入由 `load_more` 里「在跑的那一批没落地就不再提交」那一格挡着，所以每帧都问
@@ -1462,7 +1459,11 @@ impl TocPanel {
                     )
                     .child(div().flex_none().text_xs().text_color(muted).child(place))
                     .on_click(move |_, _, cx| {
-                        panel_jump.update(cx, |this, cx| this.jump_to_hit(chapter, at, cx))
+                        panel_jump.update(cx, |this, cx| {
+                            if this.coordinate_generation == generation {
+                                this.jump_to_hit(chapter, at, cx);
+                            }
+                        })
                     })
                     .into_any_element()
             })
@@ -1539,15 +1540,7 @@ impl TocPanel {
         self.sweep_now(cursor, cx);
     }
 
-    /// 提交一趟扫描。**同一时刻只允许一趟在跑**：新的查询先作废上一趟，而不是排队。
-    ///
-    /// 判据与 `plans/阅读管线.md` §10.3 合并那一档同一条：读者连打五个字会产出五趟请求，
-    /// 排队的结果是列表停在第一个字的那两百处上，而那早已不是他要看的了。让在跑的那趟自己
-    /// 看见旗标收手（协作式取消，不在半章中间打断），列表由回来的那一趟整个换掉。
-    ///
-    /// `resume` 是上一批的落点：`None` 从这本书开头扫（新词那一批），`Some` 从那一处往后接
-    /// （续扫那一批）。两批走的是同一条链，区别只在 `batch_base`：新词那一批从 0 起算，
-    /// 续扫那一批接在已经摆出来的那几行后面（见 [`Search::absorb`]）。
+    /// 同时只跑一批；换词或坐标代时取消旧扫描。resume为空从头扫，否则续接上一批。
     fn sweep_now(&mut self, resume: Option<Cursor>, cx: &mut Context<Self>) {
         let (Some(query), Some(doc)) = (
             Query::parse(&self.search.word),
@@ -1718,8 +1711,7 @@ impl TocPanel {
 
     /// `[range.start, range.end)` 这几行目录。
     ///
-    /// 三个信号各管各的，不互相顶：当前行 = 底色 + 左边那条标记；来过 = 文字变灰
-    /// （设置里可以关掉）；对不上正文的条目 = 灰到底且**没有**点击回调。
+    /// 当前、已读和不可跳转行各自呈现；回调不跨坐标代。
     fn rows(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(toc) = &self.tree else {
             return Vec::new();
@@ -1741,6 +1733,7 @@ impl TocPanel {
         );
         let transparent = hsla(0.0, 0.0, 0.0, 0.0);
         let panel = cx.entity().clone();
+        let generation = self.coordinate_generation;
         rows[range.start..end]
             .iter()
             .map(|row| {
@@ -1769,11 +1762,12 @@ impl TocPanel {
                             IconName::ChevronDown
                         })
                         .on_click(move |_, _, cx| {
-                            // 不拦的话这一击会接着冒到整行上：读者点的是「展开」，
-                            // 结果书也跳了、面板也收了，看起来像这颗箭头是坏的。
+                            // 展开不冒泡到整行跳转。
                             cx.stop_propagation();
                             panel_toggle.update(cx, |this, cx| {
-                                if let Some(toc) = &mut this.tree {
+                                if this.coordinate_generation == generation
+                                    && let Some(toc) = &mut this.tree
+                                {
                                     toc.toggle(ix);
                                 }
                                 cx.notify();
@@ -1784,8 +1778,7 @@ impl TocPanel {
                     // 叶子占同样一格，标题才不会因为有没有下级而左右跳。
                     div().w(px(TOC_CHEVRON)).flex_none().into_any_element()
                 };
-                // 三段：一点空隙 → 标记条 → 底色带。带子从标记条右边起、铺到屏幕右沿，
-                // 标题落在 `TOC_TEXT_LEFT` 那一列上（chevron 那一格在它左边）。
+                // 标记与底色分开，标题守同一列。
                 let mut row_el = div()
                     .id(ElementId::named_usize("reader-toc-row", ix))
                     .w_full()
@@ -1828,7 +1821,9 @@ impl TocPanel {
                     let panel_jump = panel.clone();
                     row_el = row_el.on_click(move |_, _, cx| {
                         panel_jump.update(cx, |this, cx| {
-                            this.jump_to_entry(chapter, fragment.clone(), cx)
+                            if this.coordinate_generation == generation {
+                                this.jump_to_entry(chapter, fragment.clone(), cx)
+                            }
                         })
                     });
                 }

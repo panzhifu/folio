@@ -22,6 +22,7 @@ fn android_main(app: android_activity::AndroidApp) {
     jni::install_panic_hook();
     log::info!("android_main: entered");
     let _platform = jni::init_platform(&app);
+    super::android_speech::install();
     log::info!("android_main: platform initialised");
     // 应用专属内部目录（`/data/user/0/<包名>/files`）：属主是本应用，
     match app.internal_data_path() {
@@ -85,6 +86,7 @@ fn android_main(app: android_activity::AndroidApp) {
 
     // `run` 返回 = activity 即将结束、`App` 已 drop（它的 `AppStore` 句柄也放了）。
     // 这时按 §1.3/§5.6 的有序收尾：停监听/传书 → 关作业池 → 放掉最后一个书库句柄。
+    folio_core::speech::shutdown();
     crate::ui::services::resident::shutdown();
 
     tracing::info!("android_main: Application::run returned — activity will finish");

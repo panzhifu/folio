@@ -1,21 +1,6 @@
-//! 阅读页：正文 + 干净态的两行小字 + 点正文中间浮出的顶栏与底栏。
-//!
-//! 形态照 Reeden 的阅读界面量出来（1080×2400 @3.0）：干净态只剩左上角一行章名与底部
-//! 一行进度；点正文中间才浮出顶栏（返回 + 书名）与底栏（进度条 + 一排入口）。
-//! 那一排入口里带档位的两块 —— 目录与阅读设置 —— 各是盖住整屏的底部弹层，自己的状态住在
-//! 自己的实体里（见 [`TocPanel`] 与 [`ReadingSheet`]）：底栏常驻只有那三行，不跟着
-//! 展开的内容一起长高。
-//!
-//! 这一屏两端**共用一份**：桌面上原来的工具条 + 状态栏那套常驻 chrome 换成了这个形态，
-//! 因为「以手机那一版为准」不只是挑一套皮肤 —— 两套 chrome 意味着每个新功能要落两次地，
-//! 而其中一端一定会漏。桌面多出来的那一格是「双页」，它按宽度自己退档（见
-//! [`chrome::PageMode::effective`]），所以这一格在窄窗口里就是分页，不需要 `cfg`。
-//!
-//! 顶栏与底栏**压在正文之上**，不推动正文重排：读者点一下屏幕，字不该跳走。
-//! 正文只让出干净态那两条带的高度，那两个数住在 [`chrome`] 里，布局与视口算法共用它。
-//!
-//! 点击分区、浮层开合、模式退档都在 [`chrome`] 里判：那里是纯函数，宿主的 `cargo test`
-//! 直接跑，这一屏只把结果落成动作。
+//! 阅读页组合正文、顶栏/底栏与弹层，两端共用。
+//! 顶栏与底栏覆盖正文，不推动重排；干净态读数带的几何由chrome统一给出。
+//! 点击分区、浮层开合和模式退档在chrome判定，跨帧状态属于各自实体。
 
 use std::time::{Duration, Instant};
 
@@ -411,6 +396,7 @@ impl ReadingPage {
             // 位置与时长是同一次离席要结的两笔账：漏掉后一笔，这一段就只能靠
             // 那条时钟在五分钟之内结掉，而读者往往在五分钟之内就再没回来过。
             reader.end_reading();
+            reader.release_content_lease();
         });
     }
 
@@ -427,6 +413,9 @@ impl ReadingPage {
 
     /// 应用生命周期（只有移动平台会发）：后台按离开这一刻结账并停钟，前台续段。
     pub fn on_app_lifecycle(&mut self, phase: AppLifecyclePhase, cx: &mut Context<Self>) {
+        if matches!(phase, AppLifecyclePhase::Active) {
+            crate::ui::services::source_updates::poll_now(cx);
+        }
         self.reader.update(cx, |reader, cx| match phase {
             AppLifecyclePhase::Background => reader.suspend_reading(),
             AppLifecyclePhase::Active => reader.resume_reading(cx),
@@ -440,7 +429,8 @@ impl ReadingPage {
     }
 
     pub fn book_id(&self, cx: &App) -> Option<i64> {
-        self.reader.read(cx).book_id()
+        let reader = self.reader.read(cx);
+        reader.content_version.opening.or(reader.book_id())
     }
 
     pub fn set_reserve(&mut self, reserve: Reserve, cx: &mut Context<Self>) {
@@ -882,8 +872,7 @@ impl ReadingPage {
             .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
     }
 
-    /// 书头三样查一次：书名 / 作者 / 封面。查询走与目录书头同一条（`store.book` +
-    /// `store.book_cover`），结果缓存在这一屏 —— 听书屏开着的时候不每帧摸 SQLite。
+    /// 缓存书封面和标题，随阅读页释放。
     fn ensure_listen_book(&mut self, cx: &App) {
         if self.listen_book.is_some() {
             return;
@@ -926,15 +915,7 @@ impl ReadingPage {
         }));
     }
 
-    /// 当前章的文稿行表。**换章或换宽才重建**：一章几千字，逐帧重排是白付。
-    ///
-    /// 与 `model::speech` 同一个尺：`split_sentences` 给出的字符区间就是引擎那一条
-    /// utterance 的范围，点哪一格就从它那一句念。每一句按**真实排版**切成若干行
-    /// （见 [`build_listen_script`]）：整章拼成一段连续文本，书页一样自然折行。
-    /// 换宽（转屏 / 平板）要重建，不然折点会落到屏幕外面。
-    ///
-    /// 返回「这一帧是不是重建了」。重建那一帧弹簧要当场落定（换章可能差出几屏），
-    /// 让它当场落定 —— 换章演成一段长途滚动是假的：读者的确跳到了别处，但那不是滑行。
+    /// 按章、字形度量与列宽缓存文稿和字符映射。
     fn ensure_listen_script(
         &mut self,
         chapter: usize,
@@ -1011,13 +992,6 @@ impl ReadingPage {
         true
     }
 
-    /// 听书那一屏。两面共用同一条顶栏与同一条控制排，中间那块换。
-    ///
-    /// 文字那一面是一张书页：整章连续排版、自然折行，字号统一；正在念的那一句换上实色，
-    /// 其余沉在次要色里，读到哪儿由一根弹簧把那一行滑到屏的正中。读者手动划过文稿的那
-    /// 几秒不抢。点哪一句就从哪一句念。从前这一面是 Apple Music 歌词流（逐行缩放调透明），
-    /// 读者读到的是「满屏只有一行」—— 明暗的邻居看不清，长句还常被折行预算吃掉；
-    /// 2026-11-07 换成书页（读者要的「文稿要看得到上下文」）。
     fn listen_overlay(
         &mut self,
         window: &mut Window,
@@ -1408,14 +1382,25 @@ impl ReadingPage {
             .as_ref()
             .zip(active)
             .is_some_and(|(script, ix)| ix + 1 < script.sentences.len());
-        // 引擎现状：点圆钮那一刻才起的探测，几秒内见分晓。两格没就绪都要在屏上说清
-        // ——「按下去什么都不发生的按钮，读者读到的是坏了」。
         let engine_ready = self.reader.read(cx).speech_available();
         let engine_note = match engine_ready {
-            Some(true) => None,
-            Some(false) => Some(tr(cx, "listen.engine_unavailable")),
-            None => Some(tr(cx, "listen.engine_preparing")),
+            Some(true) => self
+                .reader
+                .read(cx)
+                .speech_error()
+                .map(|reason| tf(cx, "listen.playback_failed", &[("reason", &reason)])),
+            Some(false) => Some(tr(cx, "listen.engine_unavailable").to_string()),
+            None => Some(tr(cx, "listen.engine_preparing").to_string()),
         };
+        let reader_retry = self.reader.clone();
+        let retry = (engine_ready == Some(false)).then(|| {
+            Button::new("listen-retry")
+                .ghost()
+                .label(tr(cx, "listen.retry"))
+                .on_click(move |_, _, cx| {
+                    reader_retry.update(cx, |reader, cx| reader.arm_speech(cx));
+                })
+        });
         let prev_label = tr(cx, "listen.prev");
         let next_label = tr(cx, "listen.next");
         let controls = h_flex()
@@ -1464,11 +1449,7 @@ impl ReadingPage {
                     }),
             );
 
-        // 播放键上方那一条：**这一章**念到哪儿 + 快进。
-        //
-        // 比例按**字符**算，不按句数：同一章里句子的长短差得远，按「第几句 / 共几句」
-        // 画会在长句章里走得像卡住。分母是文稿字符数（`sentence_char_positions`），
-        // 逐帧只查一个数，不重扫整章。
+        // 章进度按字符数计算，避免长短句产生跳变。
         let chapter_progress = self
             .listen_script
             .as_ref()
@@ -1479,8 +1460,6 @@ impl ReadingPage {
                 (done as f32 / script.chars as f32 * 100.0).clamp(0.0, 100.0)
             })
             .unwrap_or(0.0);
-        // 快进：与「下一句」同一个方向，只是按秒走（[`LISTEN_SKIP_SECONDS`]，秒数
-        // 折成句级落点见 [`skip_target`]）。条上已经在章末时就禁用 —— 没有可跳的。
         let skip_label = tf(
             cx,
             "listen.forward",
@@ -1535,22 +1514,18 @@ impl ReadingPage {
                         .text_color(muted)
                         .child(note)
                 }))
+                .children(retry)
                 .child(chapter_row)
                 .child(controls)
                 .into_any_element(),
         )
     }
 
-    /// 书签那一下：钉 / 拔当前位置。状态机在会话里（`model/bookmarks.rs`），
-    /// 这一屏只把那一击递过去 —— 顶栏那颗开关的选中态由会话答。
     pub(in crate::ui::features::reader) fn toggle_bookmark(&mut self, cx: &mut Context<Self>) {
         self.reader
             .update(cx, |reader, cx| reader.toggle_bookmark(cx));
     }
 
-    /// 跳到某一章的第几个字。「笔记」目的地跳批注 / 书签的那条路：外壳开完书把落点
-    /// 递过来，会话那句 `goto_offset` 自己处理「目标章还没排版」（挂恢复请求，
-    /// 排版做完那一帧落地）。
     pub fn goto(&mut self, chapter: usize, offset: usize, cx: &mut Context<Self>) {
         self.reader
             .update(cx, |reader, cx| reader.goto_offset(chapter, offset, cx));
@@ -2352,6 +2327,7 @@ impl Render for ReadingPage {
         // 撤销胶囊压在脚注之上：它是「刚删了什么」的回执，比一条注文更要紧；
         // 图片查看器照旧最上面。
         root = root.children(self.undo_pill(cx));
+        root = root.children(self.content_update_notice(cx));
         // 「回原处」那一格压在撤销之后：两块同时在场时它自己抬到撤销那条之上（见
         // [`ReadingPage::jump_back_pill`]）。
         root = root.children(self.jump_back_pill(cx));

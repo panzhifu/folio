@@ -136,6 +136,7 @@ public class GpuiActivity extends GpuiInputActivity {
 
     @Override
     protected void onDestroy() {
+        FolioSpeech.shutdownAll();
         // Release media session when activity is destroyed.
         GpuiMediaSession.release();
         super.onDestroy();

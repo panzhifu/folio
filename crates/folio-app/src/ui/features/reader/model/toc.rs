@@ -44,6 +44,13 @@ impl ReaderSession {
     /// 那几行灰字是读者自己翻出来的痕迹，他要一次清干净、重新看一遍读到哪儿了。
     /// 只清这一份内存里的集合，不动落库的位置 —— 回到这本书仍然落在原来那一章。
     pub fn clear_read_marks(&mut self, cx: &mut Context<Self>) {
+        if let (Some(store), Some(book_id), Some(fence)) =
+            (&self.store, self.book_id, self.coordinate_fence())
+            && let Err(error) = store.clear_chapter_read_checked(book_id, fence)
+        {
+            tracing::warn!(%error, "阅读版本已变化，未清除其它版本的已读记录");
+            return;
+        }
         self.read.clear();
         cx.notify();
     }

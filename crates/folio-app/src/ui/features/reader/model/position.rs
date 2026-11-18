@@ -122,7 +122,12 @@ impl ReaderSession {
         };
         // ── 临时探针：写库这一趟的耗时，含抢那条全库连接互斥锁的等待（量完摘）──
         let __write = std::time::Instant::now();
-        let written = store.set_position(id, &mode, &locator);
+        let written = store.set_position_checked(
+            id,
+            self.coordinate_fence().unwrap_or_default(),
+            &mode,
+            &locator,
+        );
         crate::ui::features::reader::model::perf::scroll_note_write(
             __write.elapsed().as_micros() as u64
         );
@@ -143,7 +148,11 @@ impl ReaderSession {
             return;
         };
         if self.read.insert(chapter as usize)
-            && let Err(err) = store.mark_chapter_read(id, chapter as usize)
+            && let Err(err) = store.mark_chapter_read_checked(
+                id,
+                self.coordinate_fence().unwrap_or_default(),
+                chapter as usize,
+            )
         {
             tracing::warn!(
                 book_id = id,

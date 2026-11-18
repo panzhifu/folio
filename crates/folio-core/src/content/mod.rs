@@ -24,6 +24,7 @@
 
 pub mod anchor;
 pub mod annotation;
+pub mod version_document;
 // 书库资产的落盘约定已随 store 搬去 folio-store（2026-11-12 阶段四）——它本来就是
 // 「封面写到哪儿、缩略图挂在哪」的书库规则；这里 re-export 沿旧路径（ingest 与 app）。
 pub use folio_format as format;

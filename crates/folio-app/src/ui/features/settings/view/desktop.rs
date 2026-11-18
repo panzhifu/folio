@@ -50,6 +50,7 @@ pub struct SettingsView {
     _dictionary_watch: Subscription,
     /// 对「备份」状态实体的订阅：读目录与打包在后台跑完要靠它唤醒这一屏。
     _backup_watch: Subscription,
+    _speech_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：关于那一页的按钮拿的是这一个句柄，挂的也是这一屏，
     /// 所以从阅读页压进来的那一屏关掉卡片时，不会把底下那一屏的退场动画一起接管过去。
     notes: Entity<NotesSheet>,
@@ -84,6 +85,8 @@ impl SettingsView {
         let dictionary_watch = cx.observe(&dictionary, |_, _, cx| cx.notify());
         let backup = crate::ui::services::backup::entity(cx);
         let backup_watch = cx.observe(&backup, |_, _, cx| cx.notify());
+        let speech = crate::ui::services::speech::entity(cx);
+        let speech_watch = cx.observe(&speech, |_, _, cx| cx.notify());
         Self {
             _storage_watch: watch,
             _update_watch: update_watch,
@@ -93,6 +96,7 @@ impl SettingsView {
             _access_watch: question_watch,
             _dictionary_watch: dictionary_watch,
             _backup_watch: backup_watch,
+            _speech_watch: speech_watch,
             notes,
             initial: Some(page.index()),
         }

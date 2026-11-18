@@ -88,27 +88,12 @@ impl VolumeKey {
     }
 }
 
-/// 系统级那一层要不要沉浸。**有一本书挂着就沉浸**，不分档位：桌面上是窗口真全屏，Android 上
-/// 是把状态栏与导航栏都交给系统藏起来。退场那一段也算挂着 —— 读者按完返回，动画还在书面上走，
-/// 中途把系统栏抬起来会当场挤一次容器。
-///
-/// 应用内那条导航栏**不再跟着书**：阅读层盖在它之上（见 [`ReadingLayer`]），藏着露着对读者是
-/// 同一件事，而收起它会挤动架面的盒子 —— 少一处挤，就少一处可跳的地方。双页对开要的那 260
-/// 也照样拿到手：层是不透明的整屏，本来就把侧栏盖住了。
-///
-/// 抽成自由函数是因为宿主测试进不到 Compact 档 —— [`SizeClass::of`] 在桌面把窄窗口
-/// 夹到 `Medium`，只有真机能长出底栏。
+/// 阅读层挂载期间保持沉浸，包含退场动画。
 pub fn immersive_nav(_size: SizeClass, reading_mounted: bool) -> bool {
     reading_mounted
 }
 
-/// 「界面亮度」这一帧该递给平台的是哪一格：**只有书挂着的时候才接管**，书收了就交还系统。
-///
-/// 为什么这一格归外壳而不是阅读页：阅读页不知道自己盖在谁上面，也不知道自己正在退场（那是
-/// [`ReadingLayer`] 的 `closing`），而「读完一本书出去，屏幕不该还带着那一层的暗」正是
-/// 这条判据要钉住的事。桌面上同一个数还决定压暗层盖不盖（`reader::chrome::dim_alpha`）。
-///
-/// 抽成自由函数与 [`immersive_nav`] 同一条理由：宿主测试进不到那一屏，判据摆在这里才红得起来。
+/// 只有阅读层挂载时接管亮度，其余交还系统。
 pub fn reading_brightness(reading_mounted: bool, prefs: Option<f32>) -> Option<f32> {
     reading_mounted.then_some(prefs).flatten()
 }
@@ -408,6 +393,9 @@ pub struct AppShell {
 
 impl AppShell {
     pub fn boot(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        window.on_next_frame(|window, _| {
+            window.on_next_frame(|_, cx| crate::ui::services::speech::prewarm(cx));
+        });
         // 系统返回 → `Back`，由本视图的 `on_action` 处理。
         cx.bind_keys([KeyBinding::new("escape", Back, None)]);
         // 音量键 → 这两个动作。归谁管在 `volume_key` 里判（阅读页翻页，别处调系统音量），
@@ -430,9 +418,7 @@ impl AppShell {
             KeyBinding::new("down", ArrowDown, None),
         ]);
 
-        // 系统深浅翻面（Android 的 `Configuration.uiMode`、桌面的门户设置）由平台推给 gpui，
-        // gpui 刷新这一窗口的缓存 —— 剩下的「那一下要重画」归这里，因为缓存自己不会让一屏
-        // 静止的文字重新渲染。判据不在这条回调里做：只递一次 `notify`，比较留在渲染那一处。
+        // 系统外观变化使当前窗口刷新。
         let _appearance_watch = cx.observe_window_appearance(window, |_, _, cx| cx.notify());
 
         // 移动端生命周期与内存告警：事件只有移动平台会发（桌面平台是空实现，永远不会响）。
@@ -486,13 +472,12 @@ impl AppShell {
         // 点了一条 = 开那本书、落到那一处。落点递进阅读页那句 `goto`：目标章多半还没
         // 排过版，会话挂恢复请求，排版做完那一帧落地 —— 与目录跳转同一条路。
         let _notes_watch = cx.subscribe(&notes, |this, _, event: &NotesEvent, cx| {
-            let NotesEvent::Open { book_id, jump } = event;
+            let NotesEvent::Open { book_id, record } = event;
             this.open_reading(*book_id, cx);
-            let (chapter, offset) = *jump;
             if let Some(layer) = this.reading.as_ref() {
                 layer
                     .page
-                    .update(cx, |page, cx| page.goto(chapter, offset, cx));
+                    .update(cx, |page, cx| page.goto_record(record.0, record.1, cx));
             }
         });
         // 「我的」这一格两端画的不一样：桌面直接画整页字段（[`SettingsView`]，
@@ -593,7 +578,6 @@ impl AppShell {
             _ => {}
         });
 
-        // 配置改一次就落盘并重画这一屏（重涂主题在渲染那一帧做）。
         let _config_watch = cx.observe(&ConfigHolder::handle(cx), |this, _, cx| {
             // 落盘**去抖**（§2.5）：拖滑条会产出几十次改动，攒一攒再写一次盘。
             this.schedule_save(cx);
@@ -618,6 +602,7 @@ impl AppShell {
         // `on_app_quit` 的回调在 `App` 的全局 drop **之前**跑，两次同步写远在它的预算内。
         cx.on_app_quit(|this, cx| {
             ConfigHolder::save(cx);
+            folio_core::speech::shutdown();
             // 退出没有动画可走：直接把那一层拿来落库，不等退场走完。
             if let Some(layer) = this.reading.take() {
                 layer.page.update(cx, |page, cx| page.close(cx));

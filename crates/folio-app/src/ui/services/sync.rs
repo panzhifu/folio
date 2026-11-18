@@ -238,7 +238,10 @@ pub fn sync_now(cx: &mut App) {
     let weak = state.downgrade();
     cx.spawn(async move |cx| {
         let outcome = work.await;
-        let _ = weak.update(cx, |state, cx| state.settle(outcome, cx));
+        let _ = weak.update(cx, |state, cx| {
+            super::source_updates::records_changed(cx);
+            state.settle(outcome, cx);
+        });
     })
     .detach();
 }

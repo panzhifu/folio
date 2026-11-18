@@ -19,6 +19,23 @@ use crate::text::{PlainFamily, read_with, section_source};
 
 pub struct MarkdownAdapter;
 
+/// 按裸文本编码规则枚举原文件的图片引用。
+pub fn resource_hrefs_bytes(bytes: &[u8]) -> Option<Vec<String>> {
+    resource_hrefs(&crate::charset::decode_detected(bytes))
+}
+
+/// 原始 Markdown 的图片资源引用；只枚举，不读取文件，也不改变图片降级为 alt 的渲染契约。
+pub fn resource_hrefs(source: &str) -> Option<Vec<String>> {
+    let html = markdown::to_html_with_options(source, &options()).ok()?;
+    let dom = crate::dom::Dom::parse(html.as_bytes());
+    Some(
+        dom.elements()
+            .filter(|(id, _)| dom.tag_name(*id) == Some("img"))
+            .filter_map(|(id, _)| dom.attr(id, "src").map(str::to_owned))
+            .collect(),
+    )
+}
+
 impl DocumentProvider for MarkdownAdapter {
     fn format(&self) -> Format {
         Format::Markdown

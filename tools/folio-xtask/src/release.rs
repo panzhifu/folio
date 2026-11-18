@@ -44,7 +44,8 @@ pub fn check(root: &Path, base: Option<&str>, artifacts: Option<&Path>) -> Resul
         "THIRD-PARTY-NOTICES.txt",
         "packaging/icons/folio.png",
         "packaging/icons/folio.ico",
-        "crates/folio-app/android/app/src/main/java/rs/tts/Bridge.java",
+        "crates/folio-app/android/app/src/main/java/dev/gpui/mobile/FolioSpeech.java",
+        "crates/folio-app/android/app/src/main/java/dev/gpui/mobile/FolioSourceAccess.java",
     ] {
         let metadata = std::fs::metadata(root.join(file))
             .map_err(|error| format!("发布资产不可用：{file}：{error}"))?;
@@ -54,8 +55,16 @@ pub fn check(root: &Path, base: Option<&str>, artifacts: Option<&Path>) -> Resul
     }
     let proguard =
         std::fs::read_to_string(root.join("crates/folio-app/android/app/proguard-rules.pro"))?;
-    if !keeps_tts_bridge(&proguard) {
-        return Err("缺少 TTS Bridge R8 keep".into());
+    if !keeps_speech_bridge(&proguard) {
+        return Err("缺少 FolioSpeech R8 keep".into());
+    }
+    let source_keep: String = proguard
+        .lines()
+        .filter_map(|l| l.split('#').next())
+        .flat_map(str::split_whitespace)
+        .collect();
+    if !source_keep.contains("-keepclassdev.gpui.mobile.FolioSourceAccess{*;}") {
+        return Err("缺少持久原件访问桥的 R8 keep".into());
     }
     if let Some(dir) = artifacts {
         verify_artifacts(dir)?;
@@ -80,13 +89,13 @@ fn assignment<'a>(source: &'a str, key: &str) -> Option<&'a str> {
     values.next().is_none().then_some(value)
 }
 
-fn keeps_tts_bridge(source: &str) -> bool {
+fn keeps_speech_bridge(source: &str) -> bool {
     let rules: String = source
         .lines()
         .filter_map(|line| line.split('#').next())
         .flat_map(str::split_whitespace)
         .collect();
-    ["-keepclassrs.tts.Bridge{*;}", "-keepclassrs.tts.**{*;}"]
+    ["-keepclassdev.gpui.mobile.FolioSpeech{*;}"]
         .iter()
         .any(|rule| rules.contains(rule))
 }
@@ -181,12 +190,16 @@ mod tests {
             ("packaging/icons/folio.png", "png"),
             ("packaging/icons/folio.ico", "ico"),
             (
-                "crates/folio-app/android/app/src/main/java/rs/tts/Bridge.java",
+                "crates/folio-app/android/app/src/main/java/dev/gpui/mobile/FolioSpeech.java",
                 "bridge",
             ),
             (
+                "crates/folio-app/android/app/src/main/java/dev/gpui/mobile/FolioSourceAccess.java",
+                "source bridge",
+            ),
+            (
                 "crates/folio-app/android/app/proguard-rules.pro",
-                "-keep class rs.tts.** { *; }",
+                "-keep class dev.gpui.mobile.FolioSpeech { *; }\n-keep class dev.gpui.mobile.FolioSourceAccess { *; }",
             ),
         ] {
             let target = root.join(path);
@@ -194,6 +207,23 @@ mod tests {
             std::fs::write(target, content).unwrap();
         }
         check(root, None, None).unwrap();
+        let proguard = root.join("crates/folio-app/android/app/proguard-rules.pro");
+        std::fs::write(
+            &proguard,
+            "-keep class dev.gpui.mobile.FolioSpeech { *; }\n# -keep class dev.gpui.mobile.FolioSourceAccess { *; }",
+        )
+        .unwrap();
+        assert!(
+            check(root, None, None)
+                .unwrap_err()
+                .to_string()
+                .contains("原件访问桥")
+        );
+        std::fs::write(
+            &proguard,
+            "-keep class dev.gpui.mobile.FolioSpeech { *; }\n-keep class dev.gpui.mobile.FolioSourceAccess { *; }",
+        )
+        .unwrap();
         std::fs::remove_file(root.join("LICENSE")).unwrap();
         assert!(
             check(root, None, None)
@@ -220,7 +250,7 @@ mod tests {
         )
         .unwrap();
         let proguard = root.join("crates/folio-app/android/app/proguard-rules.pro");
-        std::fs::write(&proguard, "# -keep class rs.tts.Bridge { *; }\n-keepclassmembers class rs.tts.Bridge { native <methods>; }").unwrap();
+        std::fs::write(&proguard, "# -keep class dev.gpui.mobile.FolioSpeech { *; }\n-keepclassmembers class dev.gpui.mobile.FolioSpeech { native <methods>; }").unwrap();
         assert!(
             check(root, None, None)
                 .unwrap_err()
@@ -232,7 +262,7 @@ mod tests {
             gradle.replace("minSdk = 26", "minSdk = 25"),
         )
         .unwrap();
-        std::fs::write(proguard, "-keep class rs.tts.Bridge { *; }").unwrap();
+        std::fs::write(proguard, "-keep class dev.gpui.mobile.FolioSpeech { *; }").unwrap();
         assert!(
             check(root, None, None)
                 .unwrap_err()

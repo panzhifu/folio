@@ -21,7 +21,9 @@ impl Global for AppStore {}
 
 /// 装书库连接。每个入口（`super::super::platform`）在开窗前调一次；测试装 `in_memory()`。
 pub fn install(store: Store, cx: &mut App) {
-    cx.set_global(AppStore(Arc::new(store)));
+    let store = Arc::new(store);
+    super::source_updates::reset(store.clone(), cx);
+    cx.set_global(AppStore(store));
 }
 
 /// 取一份书库句柄。没装时 `None` —— 界面说「读不到书库」而不是崩。

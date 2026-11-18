@@ -15,53 +15,10 @@ use crate::Result;
 use folio_model::TextAnchor;
 
 impl Store {
-    /// 钉一枚书签。`anchor` 是调用方从可见文本坐标建好的（见 `folio_model::anchor`），
-    /// 存储层不参与坐标换算 —— 与 [`Store::add_annotation`] 同一条分工。
-    pub fn add_bookmark(&self, book_id: i64, anchor: &TextAnchor) -> Result<i64> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let stamp = super::sync_order::next_version(0, now())?;
-        conn.execute(
-            "INSERT INTO bookmarks (uid, book_id, anchor_json, created_at, updated_at)
-             VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?3)",
-            params![book_id, anchor.to_json(), stamp],
-        )?;
-        Ok(conn.last_insert_rowid())
-    }
-
     /// 一本书的全部书签，按钉下的顺序。
     pub fn bookmarks(&self, book_id: i64) -> Result<Vec<Bookmark>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT id, uid, book_id, anchor_json, created_at, updated_at
-             FROM bookmarks WHERE book_id = ?1 ORDER BY created_at, id",
-        )?;
-        let rows = stmt.query_map(params![book_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, i64>(5)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, uid, book_id, json, created_at, updated_at) = row?;
-            let Some(anchor) = TextAnchor::from_json(&json) else {
-                continue;
-            };
-            out.push(Bookmark {
-                id,
-                uid: uid.unwrap_or_default(),
-                book_id,
-                chapter: anchor.chapter,
-                anchor,
-                created_at,
-                updated_at,
-            });
-        }
-        Ok(out)
+        crate::record_revisions::bookmarks_in(&conn, book_id, None)
     }
 
     /// 全书库的书签，跨书带书名，按钉下时间倒序 —— 「笔记」那一屏最上面该是最近的。
@@ -110,8 +67,9 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let row: Option<(Option<String>, Option<String>, i64)> = conn
             .query_row(
-                "SELECT s.uid, b.content_hash, s.updated_at
+                "SELECT s.uid, CASE WHEN o.uid IS NULL THEN b.content_hash ELSE o.content_hash END, s.updated_at
                  FROM bookmarks s JOIN books b ON b.id = s.book_id
+                 LEFT JOIN record_origins o ON o.kind='bookmark' AND o.uid=s.uid
                  WHERE s.id = ?1",
                 params![id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -151,6 +109,13 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 同 [`Store::restore_annotation`]：插回与撤墓碑一笔事务。
         let tx = conn.unchecked_transaction()?;
+        crate::record_revisions::check_restore_identity_in(
+            &tx,
+            "bookmark",
+            row.id,
+            &row.uid,
+            row.book_id,
+        )?;
         let stamp =
             super::sync_order::next_mark_version(&tx, "bookmark", &row.uid, row.updated_at, now())?;
         tx.execute(
@@ -165,6 +130,7 @@ impl Store {
                 stamp
             ],
         )?;
+        crate::record_revisions::restore_origin_in(&tx, "bookmark", &row.uid, row.book_id)?;
         tx.execute(
             "DELETE FROM sync_tombstones WHERE kind = 'bookmark' AND uid = ?1",
             params![row.uid],

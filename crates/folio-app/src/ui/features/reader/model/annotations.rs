@@ -67,7 +67,9 @@ impl ReaderSession {
     /// 颜色规范化都是存储层算的，界面自己拼一份迟早和库里对不上。
     pub(in crate::ui::features::reader) fn load_annotations(&mut self) {
         let read = match (self.book_id, self.store.as_ref()) {
-            (Some(book_id), Some(store)) => store.annotations(book_id),
+            (Some(book_id), Some(store)) => {
+                store.annotations_for_revision(book_id, self.coordinate_fence().unwrap_or_default())
+            }
             _ => Ok(Vec::new()),
         };
         match read {
@@ -151,7 +153,14 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        match store.add_annotation(book_id, &anchor, "", color, style) {
+        match store.add_annotation_checked(
+            book_id,
+            self.coordinate_fence().unwrap_or_default(),
+            &anchor,
+            "",
+            color,
+            style,
+        ) {
             Ok(id) => {
                 tracing::info!(
                     book_id,
@@ -547,11 +556,11 @@ impl ReaderSession {
             cx.notify();
             return;
         };
-        if let Some(row) = editor.annotation {
+        if let Some(row) = editor.annotation.as_ref() {
             let id = row.id;
             let Some(store) = self.store.clone() else {
                 tracing::warn!(annotation_id = id, "笔记: 书库没装，这一条改不了");
-                self.selection_menu_open = true;
+                self.note_editor = Some(editor);
                 cx.notify();
                 return;
             };
@@ -566,7 +575,8 @@ impl ReaderSession {
                 }
                 Err(err) => {
                     tracing::error!(annotation_id = id, error = %err, "笔记: 写库失败");
-                    self.selection_menu_open = true;
+                    self.content_version.failure = Some(err.to_string());
+                    self.note_editor = Some(editor);
                 }
             }
             cx.notify();
@@ -598,7 +608,14 @@ impl ReaderSession {
             return;
         };
         let style = self.pending_style(cx);
-        match store.add_annotation(book_id, &anchor, &text, DEFAULT_COLOR, style) {
+        match store.add_annotation_checked(
+            book_id,
+            self.coordinate_fence().unwrap_or_default(),
+            &anchor,
+            &text,
+            DEFAULT_COLOR,
+            style,
+        ) {
             Ok(id) => {
                 tracing::info!(
                     book_id,
@@ -618,7 +635,8 @@ impl ReaderSession {
                     error = %err,
                     "笔记: 写库失败"
                 );
-                self.selection_menu_open = true;
+                self.content_version.failure = Some(err.to_string());
+                self.note_editor = Some(editor);
             }
         }
         cx.notify();

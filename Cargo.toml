@@ -157,14 +157,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 log = "0.4"
 tracing-log = "0.2"
 
-# 后端仅在 Linux（非 OHOS）和 Android 启用，见 folio-speech。
-# Linux 构建需要 libclang 与 libspeechd 头文件。
-# Android JNI_OnLoad 要求 APK 带 rs/tts/Bridge；Bridge.java、R8 keep、
-# manifest queries 和 libtts*.so 的打包排除规则须随依赖一起维护。
-# 此版本 Android onDone/onError 与 Linux 的回调含义不同，且 onStop 签名不覆盖 SDK。
-# 语速/音高由 folio-speech 转换语义值；升级必须复核回调、能力位与平台测试。
-tts = "=0.26.3"
-
 # Cargo 只应用 workspace 根的 patch，桌面与移动端共用这组渲染器。
 [patch.crates-io]
 # 移动平台沿用的补丁；确认上游已不再需要并完成验证后可撤除。

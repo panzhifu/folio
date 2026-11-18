@@ -106,11 +106,11 @@ pub fn run_desktop() {
             // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。
             crate::ui::services::library::sweep_partials(cx);
             // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
-            crate::ui::services::library::schedule_backfill(cx);
             // 封面补齐：升级把 books.cover 那个 BLOB 删了之后，老行的封面得从书文件里重抽一次。
             crate::ui::services::library::schedule_cover_backfill(cx);
             // 监听是后台能力：配置开着就随启动起，活过任何一屏。
             crate::ui::services::watch::sync_from_config(cx);
+            crate::ui::services::source_updates::start(cx);
 
             // 阅读字体是否已由 fontconfig 解析到，决定「字体随包」的优先级。
             let probe = Font {

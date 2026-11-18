@@ -23,6 +23,8 @@ pub mod lansync;
 pub mod library;
 pub mod motion;
 pub mod resident;
+pub mod source_updates;
+pub mod speech;
 pub mod storage;
 pub mod sync;
 pub mod transfer;

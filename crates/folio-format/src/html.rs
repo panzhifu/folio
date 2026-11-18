@@ -18,6 +18,11 @@ use crate::dom::{Dom, NodeId};
 
 pub struct HtmlAdapter;
 
+/// 资源枚举与正文使用相同的 BOM/文档编码声明，避免非 UTF-8 相对文件名被改坏。
+pub fn decode_resource_markup(bytes: &[u8]) -> String {
+    crate::charset::decode(bytes, None)
+}
+
 impl DocumentProvider for HtmlAdapter {
     fn format(&self) -> Format {
         Format::Html

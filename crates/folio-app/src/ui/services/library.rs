@@ -311,38 +311,9 @@ pub fn suggested_watch_dir() -> PathBuf {
     folio_core::infra::paths::inbox_dir()
 }
 
-/// 启动时投一趟「补齐」的后台作业：给没有内容身份的行算哈希，并把书库里的旧名字
-/// 副本改成哈希名。
-///
-/// 这一趟存在的理由是两条决定凑在一起的样子（`plans/导入管线.md` §六 + §一 步 5）：
-/// 哈希列是**懒补**的（迁移不许读全库，否则开库那一下要等几百本的顺序读），
-/// 而副本改名又必须真的做完（不然「书库目录可以整目录 GC」一直不成立）。
-/// 所以它不能放在开库路径上，也不能放在界面线程上 —— 它落在作业池的
-/// [`Cleanup`](folio_core::Priority) 档：界面空闲才跑的那一档，也是 `plans/基础设施.md`
-/// §1.1 那张表里此前**唯一一个没有作业**的档。
-///
-/// 位置没确认过、书库没装上时什么都不投（没有目录可搬）。取消没人按：这一趟是
-/// 自愈档，做完为止；退出时由 `Services::shutdown` 排干队列（§1.3）。
-pub fn schedule_backfill(cx: &App) {
-    let Some(dir) = target_dir(&ConfigHolder::library(cx)) else {
-        return;
-    };
-    let Some(store) = super::app_store::handle(cx) else {
-        tracing::debug!("library: 书库没装上，补齐这一趟不投");
-        return;
-    };
-    // 句柄直接丢：这一趟没有界面读数（它不改书目内容，只改文件名与身份列）。
-    // 作业照跑，跑完自己结束 —— 池在关停时会等它把已排的做完（`plans/基础设施.md` §1.3）。
-    let for_log = dir.clone();
-    let _report = super::resident::pool().submit_with(folio_core::Priority::Cleanup, move |ctx| {
-        Ok(folio_core::backfill_copies(&store, &dir, ctx))
-    });
-    tracing::info!("library: 补齐这一趟已投进 Cleanup 档（{for_log:?}）");
-}
-
 /// 封面补齐：把升级 / 清缓存 / 备份恢复弄丢的封面从书文件里重新抽一次。
 ///
-/// 与 [`schedule_backfill`] 同一档、同一副形状，但**不需要书库目录**：每本的根从它自己
+/// 后台按需重建，不改书文件身份或路径；每本的根从它自己
 /// 那行 `books.path` 反推（`folio_core::store::book_root`）。整机只跑一次，记号在库里的
 /// `prefs` 表，所以书库没确认过也照投 —— 老库升级的用户往往正卡在「还没确认目录」。
 pub fn schedule_cover_backfill(cx: &App) {
@@ -366,8 +337,8 @@ pub fn schedule_cover_backfill(cx: &App) {
 /// 顺序是有意的：文件先删而库没删成，会留下一条指向不存在文件的记录，界面上就是
 /// 一本点不开的书；库先删成而文件没删掉，只是多占一点空间，读者看不见任何异常。
 pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> Result<()> {
-    let path = match store.book(id) {
-        Ok(row) => row.map(|row| row.path),
+    let row = match store.book(id) {
+        Ok(row) => row,
         Err(err) => {
             // 查路径是尽力而为：查不到只是不认领那份副本，不该拦住删行 ——
             // 删行才是「删除」的本体，剩下的只是一个占地方的文件。
@@ -375,15 +346,30 @@ pub fn delete_book(store: &Store, id: i64, staged_dir: Option<&Path>) -> Result<
             None
         }
     };
-    // 封面文件必须在删行**之前**问出来：`cover_hash` 跟着那一行走，删完就问不到了。
-    // 它内部会看一眼「还有没有别人指着同一份字节」，所以共用封面不会被带走。
-    delete_cover_file(store, id);
+    // 只预取路径；移除记录失败时连封面也必须保全。
+    let cover = store.orphan_cover_file(id).ok().flatten();
+    let cover_hash = store
+        .book_cover_ref(id)
+        .ok()
+        .flatten()
+        .map(|cover| cover.hash);
     store
         .remove_book(id)
         .with_context(|| format!("删掉第 {id} 本的库内记录"))?;
-    let copy = path
-        .as_deref()
-        .and_then(|path| staged_dir.and_then(|dir| owned_copy(path, dir)));
+    // 移除行与租约登记共用Store协调点；删行后不会再授予本书的新租约。
+    if store.book_has_leases(id) {
+        return Ok(());
+    }
+    if let Some(file) = cover
+        && let Some(hash) = cover_hash
+        && store.rows_sharing_cover(&hash, id).unwrap_or(1) == 0
+        && let Err(error) = std::fs::remove_file(&file)
+    {
+        tracing::warn!("delete_book: 封面 {file:?} 没删掉：{error}");
+    }
+    let copy = row
+        .as_ref()
+        .and_then(|row| staged_dir.and_then(|dir| owned_copy(&row.path, dir)));
     let Some(copy) = copy else { return Ok(()) };
     // 内容寻址之后「两条记录共用一个副本」是允许的状态（自愈会把一条记录接到一份已存在的
     // 文件上），所以删之前问一句：还有别人指着它就不删 —— 删了的代价是另一本的正文与
@@ -554,6 +540,49 @@ mod tests {
 
         assert!(store.book(id).unwrap().is_none(), "从书库里移掉……");
         assert!(original.exists(), "……不等于把读者的原文件删了");
+    }
+
+    #[test]
+    fn source_revision_deletion_keeps_copy_and_cover_while_a_reader_or_backup_has_a_lease() {
+        use folio_core::StageCtx;
+        use folio_core::ingest::import::{PathsSource, import_from};
+        use folio_core::ingest::updates::open_revision_document;
+
+        let dir = tempfile::tempdir().unwrap();
+        let books = dir.path().join("library");
+        let original = dir.path().join("original.md");
+        std::fs::write(&original, "# Book\n\nPreserved paragraph.").unwrap();
+        let store = Store::in_memory().unwrap();
+        let outcomes = import_from(
+            &PathsSource::picked(vec![original.clone()]),
+            &books,
+            &store,
+            &StageCtx::detached(),
+        );
+        assert!(outcomes[0].result.is_ok());
+        let book = store.list_books().unwrap().remove(0);
+        store
+            .set_cover_ref(book.id, &"c".repeat(64), "image/png")
+            .unwrap();
+        let cover = store.orphan_cover_file(book.id).unwrap().unwrap();
+        std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+        std::fs::write(&cover, b"preserved cover").unwrap();
+        let leased = store.acquire_revision(book.id).unwrap();
+
+        delete_book(&store, book.id, Some(&books)).unwrap();
+
+        assert!(store.book(book.id).unwrap().is_none());
+        assert!(Path::new(&book.path).is_file());
+        assert_eq!(std::fs::read(&cover).unwrap(), b"preserved cover");
+        assert!(original.is_file());
+        assert!(
+            open_revision_document(leased.snapshot, None)
+                .unwrap()
+                .chapter_source(0)
+                .unwrap()
+                .contains("Preserved paragraph")
+        );
+        drop(leased.lease);
     }
 }
 

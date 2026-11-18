@@ -111,6 +111,7 @@ public final class GpuiPathPicker extends Activity {
             intent.setType("*/*");
             intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, request.multiple);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         }
         int code = request.directory ? PICK_FOLDER : PICK_FILES;
         try {
@@ -166,7 +167,11 @@ public final class GpuiPathPicker extends Activity {
         new Thread(() -> {
             ArrayList<File> imported = new ArrayList<>();
             try {
-                for (Uri uri : uris) imported.add(importFile(uri));
+                for (Uri uri : uris) {
+                    File copied = importFile(uri);
+                    imported.add(copied);
+                    FolioSourceAccess.rememberPick(this, uri, copied, data.getFlags());
+                }
                 String[] paths = new String[imported.size()];
                 for (int i = 0; i < paths.length; i++) paths[i] = imported.get(i).getAbsolutePath();
                 request.complete(paths, null);

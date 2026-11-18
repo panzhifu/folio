@@ -56,6 +56,39 @@ impl Store {
                 params![id, path],
             )?;
         }
+        let revisions: Vec<(i64, i64, i64, String)> = {
+            let mut stmt=tx.prepare("SELECT book_id,rev_no,index_generation,managed_path FROM book_revisions WHERE managed_path<>''")?;
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (book, rev, generation, path) in revisions {
+            let normalized = path.replace('\\', "/");
+            let relative = normalized
+                .strip_prefix(&prefix)
+                .ok_or_else(|| Error::Integrity("版本路径不属于备份书库根".into()))?;
+            if relative.is_empty()
+                || relative
+                    .split('/')
+                    .any(|p| p.is_empty() || p == "." || p == ".." || p.contains(':'))
+            {
+                return Err(Error::Integrity("备份版本路径非法".into()));
+            }
+            tx.execute("UPDATE book_revisions SET managed_path=?4,library_root=?5 WHERE book_id=?1 AND rev_no=?2 AND index_generation=?3",params![book,rev,generation,new_root.join(relative).to_string_lossy(),new_root.to_string_lossy()])?;
+        }
+        tx.execute(
+            "UPDATE books SET managed_root=?1",
+            [new_root.to_string_lossy().as_ref()],
+        )?;
+        // 原机器的路径/URI描述可以保留，但恢复不自动重用其访问能力。
+        tx.execute(
+            "UPDATE book_sources SET state='relink-required',generation=generation+1",
+            [],
+        )?;
+        tx.execute("DELETE FROM revision_operations", [])?;
+        tx.execute(
+            "UPDATE book_revisions SET state='failed' WHERE state='preparing'",
+            [],
+        )?;
         tx.commit()?;
         Ok(translated.len())
     }

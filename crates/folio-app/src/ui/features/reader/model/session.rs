@@ -19,7 +19,7 @@ use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::format::PageText;
 use folio_core::content::format::css::PageMargins;
 use folio_core::store::{Annotation, Bookmark, Store};
-use folio_core::{BookSettings, DocMeta, Format, Locator, PageTurn, Reader};
+use folio_core::{BookSettings, Locator, PageTurn, Reader};
 use gpui_kit::base::SelectionEdge;
 use gpui_kit::{App, AppContext as _, Bounds, Context, Entity, Pixels, Point, SharedString, Task};
 
@@ -205,6 +205,7 @@ pub(in crate::ui::features::reader) struct ReadingBgKey {
 
 pub struct ReaderSession {
     pub(in crate::ui::features::reader) source: Source,
+    pub(in crate::ui::features::reader) content_version: super::content_update::ContentVersion,
     /// 上一次同步下来的读者偏好。与 [`ConfigHolder`] 里的不一致就推给排版状态。
     pub(in crate::ui::features::reader) prefs: Reader,
     /// 排版实际用的正文家族：偏好里那个在设备上解析不出来时换成设备有的那个。
@@ -730,6 +731,7 @@ impl ReaderSession {
         effective.font_family = family.clone();
         Self {
             source: Source::Empty,
+            content_version: super::content_update::ContentVersion::default(),
             wanted_family: prefs.font_family.clone(),
             book_settings_rev: ConfigHolder::book_rev(cx),
             settings_pending: None,
@@ -927,8 +929,11 @@ impl ReaderSession {
         );
         let book = Book::new(doc, effective.clone(), locator);
         let book_fonts_rev = book.fonts_revision();
+        let content_version =
+            super::content_update::ContentVersion::for_book(store.as_ref(), book_id);
         let mut session = Self {
             source: Source::Book(Box::new(book)),
+            content_version,
             wanted_family: prefs.font_family.clone(),
             book_settings_rev: ConfigHolder::book_rev(cx),
             settings_pending: None,
@@ -1053,191 +1058,6 @@ impl ReaderSession {
         session
     }
 
-    /// 从书库打开一本书。
-    ///
-    /// 按主键读库而不是拿 `books.path` 重新解析一遍：库里存的是**索引**
-    /// （章表 + 每章在容器里的位置、CSS、目录、封面、图片元数据），正文本身按位置
-    /// 回容器现取（见 `plans/text-out-of-db.md`）。这样开书不必等一次全量解析，
-    /// 而库也不会与书的内容同量级。
-    ///
-    /// 源文件不在了的表现是「这一章取不到」而不是「书没了」：条目、进度、作者与
-    /// 封面都还在，读者能看见是哪一本出了问题。
-    ///
-    /// 读不到的一切情况都只写日志、不动当前那一屏：读者正在读的书不该因为点错一本
-    /// 坏记录而变成空白页。
-    pub fn open_book(&mut self, book_id: i64, cx: &mut Context<Self>) {
-        // 换书先清掉上一本的整页底色：下面任何一条早退路径都不该让旧书色串过来。
-        crate::ui::foundation::reading_theme::set_page_bg(None);
-        // 过期索引交后台重扫，本次仍使用已有索引，保留 book_id、进度和批注。
-        // 文件不可读可能只是权限或挂载问题；重扫失败会被抑制，开书和启动检查都不删记录。
-        if let Some(store) = self.store.clone() {
-            match store.stale_reason(book_id) {
-                Ok(Some(reason)) => {
-                    tracing::info!(book_id, reason = ?reason, "ReaderSession: 索引要重扫，已交后台");
-                    let pool = crate::ui::services::resident::pool();
-                    // 不等：重扫必然把整本书重读一遍（要读完全书才知道的数全在导入那趟算），
-                    // 而旧索引只是粗一点、不是打不开 —— 三处兜底见 `folio_core::schedule_reindex`
-                    // 的文档。新索引下次开书才生效，正看着的这一屏不重建。
-                    if folio_core::schedule_reindex(&pool, store, book_id).is_none() {
-                        // 号没领到：这本的重扫正在飞，或今天这个进程里试过且失败了。
-                        tracing::debug!(book_id, "ReaderSession: 重扫已在飞或已抑制，这一趟不再投");
-                    }
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(book_id, error = %err, "ReaderSession: 查文件状态失败")
-                }
-            }
-        }
-        let opened = self.store.as_ref().and_then(|store| {
-            let row = store.book(book_id).ok().flatten()?;
-            let content = store.load_content(book_id).ok().flatten()?;
-            let format = Format::parse(&row.format)?;
-            let _ = store.touch_opened(book_id);
-            let (mode, locator) = store
-                .position(book_id)
-                .ok()
-                .flatten()
-                .unwrap_or((String::new(), Locator::start()));
-            // 库里替读者记住的那份口令：带口令的 PDF 少了它，正文与取页都回空。
-            let passphrase = store.passphrase_for_book(book_id).ok().flatten();
-            Some((
-                DocMeta {
-                    title: row.title,
-                    authors: row.authors,
-                    format,
-                    size: row.size,
-                    ..DocMeta::default()
-                },
-                content,
-                row.path,
-                mode,
-                locator,
-                passphrase,
-            ))
-        });
-        let Some((meta, content, path, mode, locator, passphrase)) = opened else {
-            tracing::error!(
-                book_id,
-                "ReaderSession: 书库里读不出来（章节没入库或格式不认识）"
-            );
-            return;
-        };
-        // 书自己声明的整页底色：`books.css` 那一列在开书时已经在手，同步扫一遍
-        // 根规则，让 `reading_theme::resolve` 的每一个消费点（根底 / 版心 / 捕获
-        // 清屏色 / 读数带）**首帧**就是书色。从前要等异步排版把 `<body
-        // background-color>` 折成装饰块才从半路盖上来，读者先看见自己选的纸色、
-        // 再跳成书里那一档 —— 那个两段跳变就是这一刀要拆掉的。
-        crate::ui::foundation::reading_theme::set_page_bg(
-            content
-                .as_flow()
-                .and_then(|flow| folio_core::content::format::css::page_background_color(&flow.css))
-                .map(crate::ui::foundation::reading_theme::to_hsla),
-        );
-        // 库里只有章节位置，正文按位置回容器取；图片与内嵌字体同样不入库，也现取。
-        let doc: std::sync::Arc<dyn OpenedDocument> =
-            std::sync::Arc::from(folio_core::content::document::with_container(
-                meta,
-                content,
-                Path::new(&path),
-                passphrase,
-            ));
-        // 后台先把这一本的解析句柄备好（PDF 要读整本，手机上要一两秒）。它与首帧的
-        // 取页并行跑，首图不必再把那一趟算进去；别的格式 `warm` 是空的。
-        let warm = doc.clone();
-        cx.background_spawn(async move { warm.warm() }).detach();
-        // 上一本还在念的话先停掉：听书的会话跟着「那一屏」走，不跟着进程走，
-        // 换书就是换了一屏。位置按停那一刻的段落落库（`stop_speech`）。
-        self.stop_speech();
-        // 这一本自己的阅读设置先叠上（连排版输入一起重算），理由见 [`Self::apply_book_settings`]。
-        self.apply_book_settings(book_id, cx);
-        // 定版式（CBZ / 逐页 SVG 漫画）与可重排走两条完全不同的阅读链：前者没有章、
-        // 没有排版，页是既定的（见 `content::format::Content` 的两族划分）。
-        self.source = if doc.is_fixed() {
-            Source::Fixed(Box::new(FixedBook::new(doc, locator)))
-        } else {
-            // `self.prefs` 里的家族已经是这台设备解析得出来的那个，不再挑一遍。
-            // `Book::new` 只造空 faces，字体由首趟排版作业注册；字体表变宽那一刻
-            // `render` 会 reset `font_cache`（见 `book_fonts_rev`）。
-            let book = Book::new(doc, self.prefs.clone(), locator);
-            Source::Book(Box::new(book))
-        };
-        let fonts_rev = self.book().map(|book| book.fonts_revision()).unwrap_or(0);
-        // 上一本读过的图整份放掉：`source` 是原地换的，会话实体还活着，所以
-        // `observe_release` 那一条不会替我们做这件事。
-        self.atlas.update(cx, |atlas, cx| atlas.clear(cx));
-        self.font_cache.reset(cx.text_system().all_font_names());
-        self.book_fonts_rev = fonts_rev;
-        // 换了坐标系（章内字符偏移是按章算的）：旧选中指向的是上一章的字，必须丢。
-        self.clear_selection();
-        // 换书那一刻屏上不该还浮着上一本的脚注。
-        self.footnote = None;
-        // 同理：上一本的「回原处」指的是上一本的坐标系，留着它落点会跳进这一本的某一章。
-        self.jump_back = None;
-        // 上次是以哪一档读的，这次还用那一档：进度存的是「第几个字」，与模式无关，
-        // 但读者认得的是那**一张纸**的样子。没存过就当读者还没选，
-        // 交给渲染帧按窗口宽定默认档。
-        self.mode = PageMode::from_storage_name(&mode);
-        self.mode_undecided = mode.is_empty();
-        // 换书就是换参照系：上一本放大到哪儿与这一本毫无关系。
-        self.reset_fixed_zoom();
-        // 上一本烘好的捕获纹理与这一本没有任何关系。`captured_page` 的键是 (章, 页)，
-        // 两本书恰好都停在第 0 页时它就「对得上」—— 不清的话新书会拿上一本的纹理去卷，
-        // 屏上是一片别的书。清到与刚构造时同一个状态。
-        self.capture_dirty = true;
-        self.captured_page = None;
-        self.captured_size = None;
-        self.captured_back = None;
-        self.captured_incoming = None;
-        self.capture_box_dirty = true;
-        self.capture_committed.set(None);
-        self.capture_back_committed.set(None);
-        self.capture_incoming_committed.set(None);
-        self.curl_bake_origin.set(None);
-        self.incoming_bake_origin.set(None);
-        // 上一本那一段必须先结账：`settle_reading` 按 `self.book_id` 归属，
-        // 顺序写反了就会把上一本读的时间记到这一本头上（两本的账一起错）。
-        self.settle_reading();
-        self.book_id = Some(book_id);
-        // 从这一刻起为这一本计时。
-        self.begin_reading(cx);
-        // 换了一本书，屏上的划线也得跟着换：批注是按 `book_id` 存的。
-        self.load_annotations();
-        self.load_bookmarks();
-        // 换书那一刻，上一本的撤销胶囊跟着过期：那一槽攥的是上一本书库里的行，
-        // 挂在这本书的屏上只会指向别的东西。
-        self.undo = None;
-        // 译文弹层同理：锚点是上一本屏上的像素，答案跟的也是上一本里选中的字。
-        self.translation = None;
-        // 问 AI 那一层同一条理由，一并收掉。
-        self.ai = None;
-        // 查词典那一层也收：锚点是上一本屏上的像素，词也来自上一本。
-        self.dictionary = None;
-        // 分章草案那一层也收：那张卡攥的是**上一本**的样本与章数，挂在这本书的屏上
-        // 说的是别的事，而「用上」会写一份对两本都生效的配置。
-        self.rules_draft = None;
-        // 换书时那一层若还开着，先关掉：查看器手里带的是**上一本**折出来的那一列，
-        // 留着它就能继续左右滑到上一本的图上去 —— 计数、分享、定位原文全指着别人的书。
-        self.close_image_viewer(cx);
-        // 图的那一列也按新的那一本重折一次（兜底那一行没有列，折成空）。
-        self.rebuild_image_sequence();
-        // 换书就是换了参照系：上一本没走完的切图动画不该挂在这一本上。
-        self.stack_motion = None;
-        self.scroll_y = 0.0;
-        self.page = 0;
-        self.wheel_accum = 0.0;
-        self.content_height = 0.0;
-        self.saved_chapter = locator.chapter as usize;
-        self.saved_offset = locator.offset;
-        // 章内偏移还是要等第一帧排版做完才能落地。连续模式哪怕偏移是 0 也挂请求：
-        // 落点是全局 y，章首未必拼在 0 的位置。
-        self.pend_restore((self.mode.is_continuous() || locator.offset > 0).then_some(locator));
-        // 听书引擎**不在这里碰**：开书路径不为 TTS 付一分钱（Android 上那是一根 JNI
-        // 线程 + 至多 500 ms 的服务绑定）。点开听书那一屏（`arm_speech`）才是它该
-        // 出场的时候。
-        cx.notify();
-    }
-
     /// 挂（或作废）一趟还没落地的恢复请求，并清掉还没落地的锚点。
     ///
     /// 除了带锚点的那一跳（`modules::toc::ReaderSession::restore_to_entry`，它俩必须
@@ -1302,7 +1122,7 @@ impl ReaderSession {
     /// 外壳用它守住「没有书就不构造阅读页」：`Source::Empty` 只允许存在于
     /// 构造与 `open_book` 之间那一小段，不能变成一屏。
     pub fn has_book(&self) -> bool {
-        !matches!(self.source, Source::Empty)
+        !matches!(self.source, Source::Empty) || self.content_version.opening.is_some()
     }
 
     /// 当前那本书的只读借用；兜底那一行与定版式书都没有「可重排的书」，返回 `None`。
@@ -2311,7 +2131,15 @@ fn read_at_open(book_id: Option<i64>, store: Option<&Arc<Store>>) -> HashSet<usi
     let (Some(id), Some(store)) = (book_id, store) else {
         return HashSet::new();
     };
-    store.read_chapters(id).unwrap_or_default()
+    let fence = store
+        .active_revision(id)
+        .ok()
+        .flatten()
+        .map(|revision| revision.fence)
+        .unwrap_or_default();
+    store
+        .read_chapters_for_revision(id, fence)
+        .unwrap_or_default()
 }
 
 /// 把目录那一跳带来的章内锚点 `id` 换算成章内偏移。

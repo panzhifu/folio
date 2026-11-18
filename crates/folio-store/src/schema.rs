@@ -628,4 +628,6 @@ CREATE TABLE book_tags (
 
 CREATE INDEX idx_book_tags_tag ON book_tags(tag);
 "#,
+    // v32：稳定书目、来源和不可变阅读版本；迁移只复制数据库事实，不读取书文件。
+    include_str!("revisions/schema.sql"),
 ];

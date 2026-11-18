@@ -1,67 +1,6 @@
-//! 导入管线：把「一本书的出处」抽象成 [`Source`]，一条管线通吃所有来源。
-//!
-//! 抽象边界只圈一件事：**候选 → 书库里那一份按内容命名的副本**。写暂存、算哈希、
-//! 判格式、判重、落地、解析、落库都是管线自己的事，在后台线程上逐本完成 ——
-//! [`crate::store::Store`] 现在是 `Send + Sync` 的（连接锁在内部 `Mutex` 上），落库
-//! 不必再回界面线程。锁纪律见 `store` 的模块文档：**stage / hash / parse 绝不持锁**，
-//! 只有 register 那一小段持，后台导一本书时界面最多等几十毫秒。
-//!
-//! 顺序照 `plans/导入管线.md` 第一节那七步，**ingest / index 的分界在判完重之后**：
-//!
-//! ```text
-//! 1 来源分派      candidates() —— 列目录 / PROPFIND 都在这一步，是整批的慢
-//! 2 写暂存        stage() → <书库>/.staging/.<名>.<序号>.part
-//! 3 算哈希 + 判定   对那份本地 .part：sha256 → 三层格式判定（否掉排在落地之前）
-//! 4 判重          按完整哈希；命中要先 stat 旧副本，不在就走自愈
-//! ────────────────── ingest 与 index 的分界 ──────────────────
-//! 5 定名落地      先在暂存区里**属于这一本自己的那间小屋**换成「建议名 + 判定出的
-//!                 扩展名」去解析，成功后 rename → <书库>/<哈希前缀>.<格式>
-//!                 （同分区、原子，不进根的没有半成品；小屋防的是同名候选互相盖）
-//! 6 解析          document::open → 章节表 / 资源表 / 目录 / 封面（实际排在 5 后半之前）
-//! 7 落库          add_book + set_content_hash + save_document，库里从此有这一行
-//! ```
-//!
-//! 前四步与格式无关、失败就删该删的那一份；后三步完全依赖格式。**两步之间唯一的磁盘
-//! 动作是一次 rename**，所以崩溃时书库里只可能出现两种半成品：暂存区里没人认领的
-//! `.part`（[`sweep_partials`] 清），以及「改名已落地、行还没写」的哈希名副本
-//! （[`sweep_orphan_copies`] 清）。反方向的「库里有行而文件不在」由
-//! 启动时只报告并保留记录，重新导入可修复副本。
-//!
-//! 八种来源的差别只剩 `candidates` 与 `stage` 两个方法，管线只有 [`import_from`] 一写。
-//! 共同的那半件事（写进暂存）现在**契约上**仍归来源，但只能落在 `.staging` 里：
-//!
-//! | 来源 | candidates | stage |
-//! | --- | --- | --- |
-//! | 选择文件 `Picked` | 选择器交回的路径 | 分块拷进 `.staging`，报字节数 |
-//! | 批量路径 `Paths` | 调用方给的一批（清单勾选 / 传书落盘） | 同上 |
-//! | 整机扫描 `Scan` | 走目录只收认识的扩展名 | 同上 |
-//! | 文件夹监听 `Watch` | inotify 事件攒出的新文件 | 同上 |
-//! | Wi-Fi 传书 `Transfer` | 传书服务器收到的每份上传 | 同上 |
-//! | 链接下载 `Url` | 一条 URL | 流式 GET 写进 `.staging` |
-//! | 网盘取书 `Cloud` | 浏览界面上勾下的条目 | 经 [`crate::net::cloud::Drive`] 流式下载写进 `.staging` |
-//!
-//! **与文档的偏离一处**（第七节差额表第 4 行剩下的那半）：文档要求来源只交
-//! `stream: Box<dyn Read>`、写盘完全归管线。那一步要先给 `remote` 加一个返回流的方法
-//! （网络那半边现在是 `Sink` 驱动的），留到下一轮。现在这个形状已经买到文档要的全部
-//! **效果**：判定排在落地之前、身份算在自己写下的字节上、副本名由内容决定。
-//!
-//! 监听、传书、网盘浏览自己都不是管线的一部分 —— 它们是往队列塞活的**驱动者**
-//! （见 `crate::ingest::watch`），把 [`Source`] 交给 [`submit_import`] 就行。
-
-//! **这一区现在分四个文件**（`import/`）：
-//!
-//! - `pipeline` —— 管线本体：线程预算、批次引擎、判重占号、`ingest` / `index`
-//!   那两步、暂存区的小屋与失败回滚，以及 `reindex` / `schedule_reindex`（它们走的正是
-//!   同一个 `index`）。
-//! - `sources` —— 七个来源里「把字节送到」那一半：本地分块拷贝、URL 下载落盘、
-//!   临时名与洗名。
-//! - `maintenance` —— 补齐（给还没身份的行认身份、把旧名字的副本改成哈希名）
-//!   与启动时扫半成品这两趟维护。
-//! - 这一份（`mod.rs`）—— `Source` 契约与结果的**类型**，加上 [`submit_import`] / [`forward`]
-//!   这一对作业胶水。类型住在这里是因为七个来源之外（`scan` / `watch` / 界面）也都认它们。
-//!
-//! 分界只有一条：**这一趟会不会碰那份字节**。会碰的在 `pipeline` 与 `sources`，只动库的在
-//! `maintenance`。
+//! 导入契约与作业胶水：来源捕获、格式解析、独占版本发布和同书更新。
+//! 首次导入与更新共用 versioned；文件/哈希/解析在库锁外，身份与索引由 Store 单事务登记。
+//! 来源绑定与内容 hash 分离；Legacy 清理必须保留所有登记版本的字节引用。
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -77,9 +16,24 @@ use crate::infra::task::TaskHandle;
 use crate::infra::task::TaskManager;
 use crate::store::Store;
 
+mod capture;
+mod indexing;
 mod maintenance;
 mod pipeline;
+mod projections;
+mod publication;
+pub use projections::refresh_anchor_projections;
+mod reclamation;
+mod snapshot;
+pub use reclamation::prune_revision_history;
 mod sources;
+mod versioned;
+pub use versioned::reconcile_source_ids;
+pub use versioned::{
+    SourceUpdate, SourceUpdateState, prepare_legacy_revision, reconcile_sources_once,
+    relink_source, update_from_path,
+};
+pub use versioned::{reconcile_source_ids_with_access, update_from_link};
 
 pub use maintenance::BackfillReport;
 pub use maintenance::CoverBackfillReport;
@@ -180,6 +134,39 @@ pub trait Source: Send + Sync + 'static {
     ///
     /// 字节级读数从这里报（拷贝与下载都是）。
     fn stage(&self, candidate: &Candidate, staging_dir: &Path, ctx: &StageCtx) -> Result<PathBuf>;
+
+    /// 本地实现可在复制时计算哈希；默认保留既有来源的 stage 契约。
+    fn stage_with_hash(
+        &self,
+        candidate: &Candidate,
+        staging_dir: &Path,
+        ctx: &StageCtx,
+    ) -> Result<(PathBuf, Option<String>)> {
+        self.stage(candidate, staging_dir, ctx)
+            .map(|path| (path, None))
+    }
+
+    /// 可以持续访问的本地原件；临时选择器副本与传书文件不得登记为长期来源。
+    fn persistent_local(&self, candidate: &Candidate) -> Option<PathBuf> {
+        match (&candidate.origin, self.kind()) {
+            (
+                Origin::Local(path),
+                ImportKind::Picked | ImportKind::Paths | ImportKind::Scan | ImportKind::Watch,
+            ) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    fn source_link(
+        &self,
+        candidate: &Candidate,
+    ) -> Option<crate::ingest::external_source::SourceLink> {
+        self.persistent_local(candidate)
+            .map(|path| crate::ingest::external_source::SourceLink {
+                kind: "local".into(),
+                locator: path.to_string_lossy().into_owned(),
+            })
+    }
 }
 
 /// 落库成功的一条结果。界面拿 `book_id` 清封面缓存、重查架面；

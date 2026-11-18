@@ -90,6 +90,7 @@ pub struct BookInfoView {
     /// 两格的订阅：值变了要重画一次（那颗「保存」按不按得动是比出来的），Enter 要提交。
     /// `Subscription` 一 drop 就退订，所以跟着这一页一起活、一起没。
     _watch: (Subscription, Subscription),
+    _source_watch: Option<Subscription>,
 }
 
 impl ShelfView {
@@ -194,6 +195,8 @@ impl BookInfoView {
             }),
         );
         let book_id = meta.id;
+        let source_watch = crate::ui::services::source_updates::handle(cx)
+            .map(|updates| cx.observe(&updates, |_, _, cx| cx.notify()));
         Self {
             stack,
             book_id,
@@ -205,6 +208,7 @@ impl BookInfoView {
             saved_authors: authors_line,
             meta,
             _watch,
+            _source_watch: source_watch,
         }
     }
 
@@ -425,7 +429,8 @@ impl Render for BookInfoView {
                             // 与「有值才摆那一行」同一条口径。
                             .children(description_section(&self.meta, cx))
                             .children(publication_section(&self.meta, cx))
-                            .child(file_section(&self.meta, cx)),
+                            .child(file_section(&self.meta, cx))
+                            .child(super::source_details::section(self.book_id, cx)),
                     ),
             )
             // 那颗提交钉在底下，不跟着内容滚走：改完手就在下面那一格上。

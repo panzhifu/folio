@@ -1,8 +1,5 @@
-//! 八个来源共用的那半边：把候选的字节**送到**暂存区。
-//!
-//! 这里没有哈希、没有格式判定、没有数据库（§二 不变量三）——只有「拷贝 / 下载 / 起临时名 /
-//! 洗名」这四件对所有来源完全一样的事。契约（[`Source`]）在上一级，批次引擎在
-//! [`pipeline`](super::pipeline)。
+//! 本地/远端来源与暂存落地。持久来源描述和一次性 cache 路径分开。
+//! 本地捕获复用取消、容量、稳定性检查及同流哈希；网络来源沿用 Transport 的 Sink。
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -24,12 +21,7 @@ use super::ImportKind;
 use super::Origin;
 use super::Source;
 
-/// 本地来源共用的 `stage`：把候选那份文件**分块拷进暂存区**，交回那份 `.part`。
-///
-/// 自己写循环而不用 `fs::copy`，为的是字节级读数（`ctx.bytes`）：一本几十 MB 的书拷多久
-/// 界面要报得出来，而 `fs::copy` 中间什么都看不见。**循环里不看取消旗** ——
-/// `plans/基础设施.md` §1.2 第 5 条要求检查点落在单元之间而不是函数调用中间：一次拷贝
-/// 是一个单元，半途停下来的结果是「谁也没认领、但确实写了一半」的那个文件。
+/// 本地来源分块捕获到暂存；失败和取消只清理本次 create_new 拥有的半成品。
 pub(crate) fn stage_local(
     candidate: &Candidate,
     staging_dir: &Path,
@@ -43,29 +35,8 @@ pub(crate) fn stage_local(
     };
     std::fs::create_dir_all(staging_dir).io_path(staging_dir)?;
     let dest = staging_dir.join(staged_name(&candidate.name));
-    let total = candidate.size.unwrap_or(0);
-    copy_into(source_path, &dest, &candidate.name, total, ctx)
-}
-
-/// 分块拷贝并报字节数。交回的是暂存区里那份 `.part` 的路径；改成哈希名是管线第 5 步的事。
-fn copy_into(from: &Path, to: &Path, display: &str, total: u64, ctx: &StageCtx) -> Result<PathBuf> {
-    use std::io::{Read as _, Write as _};
-    let mut reader = std::fs::File::open(from).io_path(from)?;
-    let mut file = std::fs::File::create(to).io_path(to)?;
-    const CHUNK: usize = 64 * 1024;
-    let mut buf = vec![0u8; CHUNK];
-    let mut done = 0u64;
-    loop {
-        let read = reader.read(&mut buf).io_path(from)?;
-        if read == 0 {
-            break;
-        }
-        file.write_all(&buf[..read]).io_path(to)?;
-        done += read as u64;
-        // 总数拿不到就报 `None`：界面画不定进度，而不是编一个会后退的数。
-        ctx.bytes(done, (total > 0).then_some(total), display);
-    }
-    Ok(to.to_path_buf())
+    super::capture::copy_hash(source_path, &dest, ctx)?;
+    Ok(dest)
 }
 
 /// 暂存区里的临时名：`.<建议名前 40 字>.<序号>.part`。
@@ -94,6 +65,7 @@ pub(crate) fn staged_name(display_name: &str) -> String {
 /// 「重名怎么办」这一问；在不在库里由哈希判重定，所以没有「要不要跳过」这一问。
 /// 来源之间剩下的唯一差别只有「日志里这是哪一类」。
 pub struct PathsSource {
+    links: std::collections::HashMap<PathBuf, crate::ingest::external_source::SourceLink>,
     paths: Vec<PathBuf>,
     kind: ImportKind,
     /// 这些路径是不是**用完即弃的临时副本**。
@@ -112,6 +84,7 @@ impl PathsSource {
     /// 选择器选的文件。路径指向读者自己的原件 —— 导入只拷贝，Drop 时不许删。
     pub fn picked(paths: Vec<PathBuf>) -> Self {
         Self {
+            links: Default::default(),
             paths,
             kind: ImportKind::Picked,
             remove_on_drop: false,
@@ -125,6 +98,7 @@ impl PathsSource {
     /// 扫描 / 传书 / 监听那几路仍走 [`Self::picked`] / [`Self::new`]。
     pub fn picked_temporary(paths: Vec<PathBuf>) -> Self {
         Self {
+            links: Default::default(),
             paths,
             kind: ImportKind::Picked,
             remove_on_drop: true,
@@ -134,6 +108,7 @@ impl PathsSource {
     /// 调用方直接给的一批路径，`kind` 说清这是谁交的（扫描 / 监听 / 传书各报各自的名）。
     pub fn new(paths: Vec<PathBuf>, kind: ImportKind) -> Self {
         Self {
+            links: Default::default(),
             paths,
             kind,
             remove_on_drop: false,
@@ -154,6 +129,19 @@ impl PathsSource {
             })
             .collect()
     }
+
+    pub fn with_links(
+        paths: Vec<PathBuf>,
+        links: Vec<(PathBuf, crate::ingest::external_source::SourceLink)>,
+        temporary: bool,
+    ) -> Self {
+        Self {
+            paths,
+            links: links.into_iter().collect(),
+            kind: ImportKind::Picked,
+            remove_on_drop: temporary,
+        }
+    }
 }
 
 impl Source for PathsSource {
@@ -167,6 +155,52 @@ impl Source for PathsSource {
 
     fn stage(&self, candidate: &Candidate, staging_dir: &Path, ctx: &StageCtx) -> Result<PathBuf> {
         stage_local(candidate, staging_dir, ctx)
+    }
+
+    fn stage_with_hash(
+        &self,
+        candidate: &Candidate,
+        staging_dir: &Path,
+        ctx: &StageCtx,
+    ) -> Result<(PathBuf, Option<String>)> {
+        let Origin::Local(path) = &candidate.origin else {
+            return self.stage(candidate, staging_dir, ctx).map(|p| (p, None));
+        };
+        std::fs::create_dir_all(staging_dir).io_path(staging_dir)?;
+        let dest = staging_dir.join(staged_name(&candidate.name));
+        let hash = super::capture::copy_hash(path, &dest, ctx)?;
+        Ok((dest, Some(hash)))
+    }
+
+    fn persistent_local(&self, candidate: &Candidate) -> Option<PathBuf> {
+        if self.remove_on_drop
+            || !matches!(
+                self.kind,
+                ImportKind::Picked | ImportKind::Paths | ImportKind::Scan | ImportKind::Watch
+            )
+        {
+            return None;
+        }
+        match &candidate.origin {
+            Origin::Local(path) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    fn source_link(
+        &self,
+        candidate: &Candidate,
+    ) -> Option<crate::ingest::external_source::SourceLink> {
+        if let Origin::Local(path) = &candidate.origin
+            && let Some(link) = self.links.get(path)
+        {
+            return Some(link.clone());
+        }
+        self.persistent_local(candidate)
+            .map(|path| crate::ingest::external_source::SourceLink {
+                kind: "local".into(),
+                locator: path.to_string_lossy().into_owned(),
+            })
     }
 }
 

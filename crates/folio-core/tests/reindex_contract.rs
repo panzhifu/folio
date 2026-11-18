@@ -1,7 +1,6 @@
 //! 重扫（reindex）与书库的**集成契约**：编排住在 core 的 ingest，store 在 folio-store
 //! ——两边的配合在这里验（原 store/tests.rs 的两条，2026-11-12 阶段四随拆分搬来；
-//! 单侧留半份会削弱门）。五问：重读来源、不改文件名、不新增记录、章表跟着新内容走、
-//! 读者的批注还在。
+//! 单侧留半份会削弱门）。验证重读来源、可读叶名、原文件保全、单书目身份与批注保留。
 //!
 //! 背景：reindex 的 SQL 曾经写成「删光这本书的章行再重插」—— 于是**每重扫一次就
 //! 清空一次批注**，界面上那句「位置与批注都还在」是一句谎话。触发它的路是日常的：
@@ -87,10 +86,20 @@ fn a_reindex_recovers_trust_and_keeps_reader_data() {
         1,
         "重扫不该清掉读者的批注（历史批注一条都不漂）"
     );
+    let managed = std::path::PathBuf::from(store.book(id).unwrap().unwrap().path);
     assert_eq!(
-        store.book(id).unwrap().unwrap().path,
-        path.to_string_lossy(),
-        "文件名不许改"
+        managed.file_name(),
+        path.file_name(),
+        "版本副本保留可读文件名"
+    );
+    assert_ne!(managed, path, "重扫发布独立版本，不能就地改写来源");
+    assert_eq!(
+        std::fs::read(&managed).unwrap(),
+        std::fs::read(&path).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "# 一\n\n正文\n\n# 二\n\n又一章\n"
     );
     assert_eq!(store.list_books().unwrap().len(), 1, "重扫不许新增记录");
 }

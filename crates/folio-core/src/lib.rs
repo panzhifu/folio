@@ -73,8 +73,9 @@ pub use infra::config::{
     Account, Ai, AliyunDrive, Appearance, Backup, BaiduDrive, CONFIG_VERSION, Cloud, Config,
     Dictionary, DictionaryEntry, Env, FontEntry, Fonts, IGNORE_CONFIG_ENV, ImageScale, LOG_OFF_ENV,
     Language, Layer, Library, Logging, Membership, MembershipTier, Mode, Novel, Opds, OpdsCatalog,
-    PageTurn, Provenance, Reader, Resolved, Speech, Sync, SyncProvider, TextDirection, TocDensity,
-    Translation, TranslationEngine, Vendor, WebDavDrive, host_of, new_vendor_id, resolve_vendor,
+    PageTurn, Provenance, Reader, Resolved, Speech, SpeechRole, Sync, SyncProvider, TextDirection,
+    TocDensity, Translation, TranslationEngine, Vendor, WebDavDrive, host_of, new_vendor_id,
+    resolve_vendor,
 };
 pub use infra::i18n::Locale;
 pub use infra::paths::{

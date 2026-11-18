@@ -276,6 +276,8 @@ impl Local {
         self.store
             .apply_sync(&merged.plan)
             .map_err(|err| format!("写回本机失败：{err}"))?;
+        sync::refresh_projections(&self.store, &merged.plan);
+        super::source_updates::signal_records_changed(&self.store);
         Ok(Applied {
             json: sync::snapshot_to_json(&merged.snapshot).map_err(|err| err.to_string())?,
             positions: merged.stats.positions,

@@ -175,15 +175,12 @@ pub fn create(
 ) -> Result<Created> {
     std::fs::create_dir_all(&roots.backups).io_path(&roots.backups)?;
 
-    // 库先落成一份一致的单文件副本。临时名带进程号与时刻：同一秒里两次备份
-    // （测试里会这样）也不会互相覆盖。
-    let db_temp = roots.backups.join(format!(
-        ".folio-db-{}-{}.tmp",
-        std::process::id(),
-        time::now()
-    ));
+    let db_temp = roots
+        .backups
+        .join(format!(".folio-db-{}.tmp", crate::sync::new_device_id()));
     let _guard = TempFile::new(db_temp.clone());
-    store.backup_to(&db_temp)?;
+    // SQLite快照与版本文件租约一起取得，持有到收包结束。
+    let _revision_files = store.backup_to_pinned(&db_temp)?;
 
     let (files, skipped) = collect_files(options.include_files, roots);
     let manifest = Manifest {

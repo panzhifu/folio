@@ -86,6 +86,9 @@ public class GpuiPickerActivity extends Activity {
         ArrayList<String> uris = null;
         if (requestCode == REQUEST_CODE && resultCode == RESULT_OK && data != null) {
             uris = extractUris(data);
+            for (String locator : uris) {
+                FolioSourceAccess.persistSelection(this, Uri.parse(locator), data.getFlags());
+            }
         }
 
         deliverResult(uris);

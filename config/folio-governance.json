@@ -15,6 +15,8 @@
     "doc/渲染.md": "architecture",
     "doc/网络.md": "architecture",
     "doc/翻译.md": "architecture",
+    "doc/计划/2026-11-18-听书预热多音色与内容笔记互通.md": "plan",
+    "doc/计划/2026-11-18-导入与原件自动更新重设计.md": "plan",
     "doc/计划/2026-11-18-排版编译档位基准.md": "progress",
     "doc/计划/2026-11-18-整体完善与AI开发治理.md": "plan",
     "doc/软件架构.md": "architecture"

@@ -52,6 +52,7 @@ pub mod group;
 pub mod novel;
 pub mod position;
 pub mod reading;
+pub mod revision;
 pub mod sync;
 pub mod types;
 

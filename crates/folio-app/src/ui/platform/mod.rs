@@ -31,8 +31,12 @@ pub mod system_fonts;
 
 // 读者自装字体（下载 / 导入）的重注册：boot 时照配置清单把字节灌回文本系统，
 // 会话内装完一份也走这一脚。与 system_fonts 同一条不分档的理由。
+mod android_sources;
+#[cfg(any(target_os = "android", test))]
+mod android_speech;
 mod restore;
 pub mod user_fonts;
+pub(crate) use android_sources::{source_access, source_for_pick};
 pub(crate) use restore::CAN_QUIT_FOR_RESTORE;
 
 // ── 移动三端共用的启动 ────────────────────────────────────────────────────────
@@ -558,7 +562,6 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
     // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。
     crate::ui::services::library::sweep_partials(cx);
     // 老副本改名的那一趟：投进 Cleanup 档，不等它、也不在界面线程上算哈希。
-    crate::ui::services::library::schedule_backfill(cx);
     // 封面补齐：升级把 books.cover 那个 BLOB 删了之后，老行的封面得从书文件里重抽一次。
     crate::ui::services::library::schedule_cover_backfill(cx);
 
@@ -568,6 +571,7 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
 
     // 监听是后台能力：配置开着就随启动起，活过任何一屏。
     crate::ui::services::watch::sync_from_config(cx);
+    crate::ui::services::source_updates::start(cx);
 
     open_main_window(cx);
     cx.activate(true);

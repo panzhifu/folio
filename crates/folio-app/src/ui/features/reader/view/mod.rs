@@ -6,6 +6,7 @@
 
 pub(in crate::ui::features::reader) mod bands;
 pub(in crate::ui::features::reader) mod body;
+pub(in crate::ui::features::reader) mod content_update;
 pub(in crate::ui::features::reader) mod paint;
 pub(in crate::ui::features::reader) mod reading_page;
 pub(in crate::ui::features::reader) mod regions;

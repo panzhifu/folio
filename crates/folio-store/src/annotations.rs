@@ -24,79 +24,13 @@ type AnnotationRow = (
 );
 
 impl Store {
-    /// 存储调用方已换算好的可见文本锚点，未知颜色回落默认值以避免丢失批注。
-    /// 章号只存在 `anchor_json` 中，不依赖章表行；重扫章表不得级联删除批注（schema v13）。
-    pub fn add_annotation(
-        &self,
-        book_id: i64,
-        anchor: &TextAnchor,
-        note: &str,
-        color: &str,
-        style: AnnotationStyle,
-    ) -> Result<i64> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let stamp = super::sync_order::next_version(0, now())?;
-        conn.execute(
-            "INSERT INTO annotations
-             (uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
-             VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
-            params![
-                book_id,
-                anchor.to_json(),
-                note,
-                color_of(color),
-                style.as_str(),
-                stamp
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
-    }
-
     /// 一本书的全部标注，按创建顺序。
     ///
     /// **解不出锚点的行会被跳过**而不是让整个列表读失败：这一列可能来自旧版本或
     /// 别的机器，为一块坏 JSON 让读者看不到他所有的批注，是最糟的失败方式。
     pub fn annotations(&self, book_id: i64) -> Result<Vec<Annotation>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt = conn.prepare(
-            "SELECT id, uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at
-             FROM annotations WHERE book_id = ?1 ORDER BY created_at, id",
-        )?;
-        let rows = stmt.query_map(params![book_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, i64>(7)? != 0,
-                r.get::<_, i64>(8)?,
-                r.get::<_, i64>(9)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, uid, book, json, note, color, style, stale, created_at, updated_at) = row?;
-            let Some(anchor) = TextAnchor::from_json(&json) else {
-                continue;
-            };
-            out.push(Annotation {
-                id,
-                uid: uid.unwrap_or_default(),
-                book_id: book,
-                chapter: anchor.chapter,
-                anchor,
-                note,
-                color,
-                style: AnnotationStyle::parse(&style),
-                stale,
-                created_at,
-                updated_at,
-            });
-        }
-        Ok(out)
+        crate::record_revisions::annotations_in(&conn, book_id, None)
     }
 
     pub fn annotation(&self, id: i64) -> Result<Option<Annotation>> {
@@ -201,8 +135,9 @@ impl Store {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let row: Option<(Option<String>, Option<String>, i64)> = conn
             .query_row(
-                "SELECT a.uid, b.content_hash, a.updated_at
+                "SELECT a.uid, CASE WHEN o.uid IS NULL THEN b.content_hash ELSE o.content_hash END, a.updated_at
                  FROM annotations a JOIN books b ON b.id = a.book_id
+                 LEFT JOIN record_origins o ON o.kind='annotation' AND o.uid=a.uid
                  WHERE a.id = ?1",
                 params![id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -308,15 +243,18 @@ impl Store {
     /// 在合并里赢过那次删除。`created_at` 仍不动，列表里的位置和「什么时候划的」不受影响。
     ///
     /// 同一条语句里把对应墓碑清掉 —— 否则本机下一次导出的快照里仍带着「已删」。
-    ///
-    /// `INSERT OR REPLACE` 兜的是那个几乎不会发生的边角：删掉最大 id 的行之后立刻新划
-    /// 一条，SQLite 的 rowid 可能复用被删的那个号 —— 那一刻「恢复原行」压过「占住新行」
-    /// 是正确的小败。
     pub fn restore_annotation(&self, row: &Annotation) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 「把行插回」与「把墓碑撤掉」是一笔：中间被杀就留下「行回来了但本机仍报已删」
         // 那一半，下一次同步又把它删走（与 [`Self::delete_annotation`] 同一条两写一账）。
         let tx = conn.unchecked_transaction()?;
+        crate::record_revisions::check_restore_identity_in(
+            &tx,
+            "annotation",
+            row.id,
+            &row.uid,
+            row.book_id,
+        )?;
         let stamp = super::sync_order::next_mark_version(
             &tx,
             "annotation",
@@ -341,6 +279,7 @@ impl Store {
                 stamp
             ],
         )?;
+        crate::record_revisions::restore_origin_in(&tx, "annotation", &row.uid, row.book_id)?;
         tx.execute(
             "DELETE FROM sync_tombstones WHERE kind = 'annotation' AND uid = ?1",
             params![row.uid],
