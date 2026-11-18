@@ -30,8 +30,6 @@ use folio_core::infra::logging;
 use gpui_kit::{App, AppContext as _, Entity, Global, SharedString};
 
 use crate::ui::host;
-// 只有桌面那条分支要 `open_url`；移动端递的是分享面板，不碰这个模块。
-#[cfg(not(mobile))]
 use crate::ui::platform;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::tr;
@@ -145,14 +143,10 @@ pub fn send(cx: &mut App) {
 
 /// 快照到手之后怎么递出去 —— 两端的分支只有这一处。
 fn deliver(holder: Entity<FeedbackState>, name: String, bytes: Vec<u8>, cx: &mut App) {
-    #[cfg(mobile)]
-    {
-        let _ = &name;
+    if host::uses_share_sheet() {
         host::share_file(&bytes, "text/plain", &name, cx);
         holder.update(cx, |state, app| state.set(FeedbackStatus::Shared, app));
-    }
-    #[cfg(not(mobile))]
-    {
+    } else {
         let Some(path) = host::save_copy(&bytes, &name) else {
             holder.update(cx, |state, app| {
                 state.set(FeedbackStatus::Failed(format!("写 {name} 失败")), app)

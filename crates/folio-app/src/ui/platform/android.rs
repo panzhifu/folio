@@ -44,6 +44,9 @@ fn android_main(app: android_activity::AndroidApp) {
     // 这是预期的：一个进程只有一个 subscriber。
     // 读配置 + 装日志一步到位（§5.6 配置 → 日志），配置留着传给 `boot` ——
     // **只读一次**（§2.3）：以前这里读一次、`boot` 里又读一次。
+    if !super::restore::activate() {
+        return;
+    }
     let (resolved, log_err) = folio_core::infra::logging::init_from_config(logcat_layer());
     // 配置到手，logcat 那层的 target 过滤也就有了它要的那一档：folio 自己的按
     // `logging.level` 放行，依赖库固定 WARN 以上（判据收在 core 的 `is_own_target` /

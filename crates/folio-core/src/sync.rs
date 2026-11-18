@@ -1,25 +1,12 @@
-//! 跨设备同步：合并规则与一次往返。快照与各记录的 **serde 形状**住 folio-model
-//! （`folio_model::sync`，2026-11-12 阶段二下沉），这里 re-export 沿旧路径。
-//!
-//! **每台设备写自己的一份**：远端的 `<dir>/<device_id>.json`。同步时读全部设备的文件 +
-//! 本机快照，按每条记录的时间戳合并，把结果写回本机，再覆盖自己那一份。没有用
-//! `If-Match` / CAS：一台设备只写自己的文件，两台同时同步也不会互相覆盖。
-//!
-//! 合并口径是**每条记录最新一次写入胜**：
-//!
-//! - 进度的 `updated_at`、批注的 `updated_at`、书签的 `updated_at`；
-//! - 删除在 `sync_tombstones` 里留一条 `deleted_at`，同样参加比较 —— 没有墓碑的话，
-//!   一台设备删了、另一台设备下一次上传又会把它带回来；
-//! - 时间相同时本机优先；本机与远端都不是本机时，删除优先（不让同秒的删除被复活）。
-//!
-//! 只同步**本机已有的书**：远端那本如果这台设备还没导入，记录留在远端，等书到了
-//! 下一次同步再落。书本身不在这里传（那是导入管线的事，见 `doc/readers-vs-folio.md`）。
+//! 跨设备同步：记录版本优先，同版本按删除/规范载荷建立确定性全序。
+//! 每台设备只写自己的快照；合并不依赖接收方或转发设备身份。
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::net::remote::{self, RemoteStore};
 use crate::store::Store;
+use folio_model::sync::SyncOrder;
 
 // 快照与各记录的 **serde 形状**已下沉 folio-model（2026-11-12 阶段二，「换 crate 不换
 // 形状」）：它们是多消费方的纯数据（store 收快照、lansync 传清单、app 读 Report 都认
@@ -31,17 +18,7 @@ pub use folio_model::sync::{
     SettingsRecord, Snapshot, Tombstone, TombstoneKind,
 };
 
-/// 把**别人写的那一份**搬到本机钟面上，另给一份新的。
-///
-/// 合并的判据是「谁的记录时间更晚」，而两台设备的钟本来就对不上，所以读回来的那一份
-/// 必须先搬一次再进 [`merge`] —— 搬晚了或忘了搬，「谁改得新」就成了「谁的钟快」。
-/// 搬的是 [`Snapshot::shift_clock`]（数据随类型住 folio-model），这一句只定**方向**。
-///
-/// `peer_clock` 是**对面**写下这些时间那一刻它自己的 UTC 秒，来源按那一条路能给的东西而定：
-/// 局域网的 `/hello` 回包里有当场量的 `now`；`PUT /snapshot` 那一侧只拿得出快照自己带的
-/// `exported_at`（那是导出方的读数）。两个都是「对面那一头的钟」，所以同一句公式走得通。
-///
-/// 内容与先后顺序一条都不动，动的只是时间读数。
+/// 对齐导出时间，仅供握手展示；记录冲突版本不随时钟平移。
 pub fn retimed(snapshot: &Snapshot, peer_clock: i64, now: i64) -> Snapshot {
     let mut copy = snapshot.clone();
     copy.shift_clock(now.saturating_sub(peer_clock));
@@ -86,12 +63,6 @@ impl<T> Event<T> {
         }
     }
 
-    fn source(&self) -> Source {
-        match self {
-            Self::Active { source, .. } | Self::Deleted { source, .. } => *source,
-        }
-    }
-
     fn deleted(&self) -> bool {
         matches!(self, Self::Deleted { .. })
     }
@@ -99,18 +70,25 @@ impl<T> Event<T> {
 
 /// 同一条 uid 只留下最新那次事件。
 ///
-/// 时间相同：本机优先；两边都不是本机时删除优先。后一条是为了避免「同一秒里一台设备
-/// 删、另一台设备还没收到」时把记录复活 —— 删除比复活更难逆转。
-fn keep_event<T>(events: &mut HashMap<String, Event<T>>, uid: String, event: Event<T>) {
+/// 同版本删除优先，其余按规范载荷排序，避免接收方各自保留自己的值。
+fn keep_event<T: SyncOrder>(events: &mut HashMap<String, Event<T>>, uid: String, event: Event<T>) {
     let replace = match events.get(&uid) {
         None => true,
         Some(old) => {
             if event.at() != old.at() {
                 event.at() > old.at()
-            } else if event.source().is_local() != old.source().is_local() {
-                event.source().is_local()
+            } else if event.deleted() != old.deleted() {
+                event.deleted()
+            } else if let (
+                Event::Active { record: next, .. },
+                Event::Active {
+                    record: previous, ..
+                },
+            ) = (&event, old)
+            {
+                next.sync_cmp(previous).is_gt()
             } else {
-                event.deleted() && !old.deleted()
+                false
             }
         }
     };
@@ -133,7 +111,7 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
 
         let mut out_book = BookSnapshot::default();
 
-        // 进度：新的赢；同时间本机优先。
+        // 同版本按内容排序，避免两个接收方各自留下不同进度。
         let mut best_position = local_book.position.clone().map(|p| (p, Source::Local));
         for remote in &remote_books {
             let Some(candidate) = &remote.position else {
@@ -141,7 +119,7 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
             };
             let replace = match &best_position {
                 None => true,
-                Some((current, _)) => candidate.updated_at > current.updated_at,
+                Some((current, _)) => candidate.sync_cmp(current).is_gt(),
             };
             if replace {
                 best_position = Some((candidate.clone(), Source::Remote));
@@ -151,7 +129,7 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
             let changed = local_book
                 .position
                 .as_ref()
-                .is_none_or(|local| local.mode != winner.mode || local.locator != winner.locator);
+                .is_none_or(|local| local != winner);
             if !source.is_local() && changed {
                 plan.positions.push((hash.clone(), winner.clone()));
                 stats.positions += 1;
@@ -159,7 +137,7 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
             out_book.position = Some(winner.clone());
         }
 
-        // 阅读设置：**整本差量**比时间，新的赢；同时间本机优先（与进度那一条同一口径）。
+        // 阅读设置按整份差量取确定性胜者。
         // 不做逐格合并 —— 差量里每一格没有自己的钟，要逐格就得先给每一格配一个时间，
         // 那一层这一轮不买。
         let mut best_settings = local_book.settings.clone().map(|s| (s, Source::Local));
@@ -169,7 +147,7 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
             };
             let replace = match &best_settings {
                 None => true,
-                Some((current, _)) => candidate.updated_at > current.updated_at,
+                Some((current, _)) => candidate.sync_cmp(current).is_gt(),
             };
             if replace {
                 best_settings = Some((candidate.clone(), Source::Remote));
@@ -179,7 +157,7 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
             let changed = local_book
                 .settings
                 .as_ref()
-                .is_none_or(|local| local.settings != winner.settings);
+                .is_none_or(|local| local != winner);
             if !source.is_local() && changed {
                 plan.settings.push((hash.clone(), winner.clone()));
                 stats.settings += 1;
@@ -256,13 +234,18 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
                     tombstone, source, ..
                 } => {
                     let existed_locally = local_annotation_uids.contains(&uid);
-                    if !source.is_local() && existed_locally {
+                    let known = local_book.tombstones.iter().any(|t| {
+                        t.kind == TombstoneKind::Annotation
+                            && t.uid == uid
+                            && t.deleted_at >= tombstone.deleted_at
+                    });
+                    if !source.is_local() && (existed_locally || !known) {
                         plan.annotation_deletes.push(DeleteRecord {
                             book_hash: hash.clone(),
                             uid: uid.clone(),
                             deleted_at: tombstone.deleted_at,
                         });
-                        stats.annotations_deleted += 1;
+                        stats.annotations_deleted += usize::from(existed_locally);
                     }
                     out_book.tombstones.push(tombstone);
                 }
@@ -339,13 +322,18 @@ pub fn merge(local: &Snapshot, remotes: &[Snapshot], now: i64) -> Merged {
                     tombstone, source, ..
                 } => {
                     let existed_locally = local_bookmark_uids.contains(&uid);
-                    if !source.is_local() && existed_locally {
+                    let known = local_book.tombstones.iter().any(|t| {
+                        t.kind == TombstoneKind::Bookmark
+                            && t.uid == uid
+                            && t.deleted_at >= tombstone.deleted_at
+                    });
+                    if !source.is_local() && (existed_locally || !known) {
                         plan.bookmark_deletes.push(DeleteRecord {
                             book_hash: hash.clone(),
                             uid: uid.clone(),
                             deleted_at: tombstone.deleted_at,
                         });
-                        stats.bookmarks_deleted += 1;
+                        stats.bookmarks_deleted += usize::from(existed_locally);
                     }
                     out_book.tombstones.push(tombstone);
                 }
@@ -570,836 +558,6 @@ pub fn test_connection(remote: &dyn RemoteStore, remote_dir: &str) -> Result<(),
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use crate::content::anchor::TextAnchor;
-    use crate::position::Locator;
-    use crate::sync::{
-        AnnotationRecord, BookSnapshot, BookmarkRecord, SettingsRecord, Snapshot, Tombstone,
-        TombstoneKind, merge, new_device_id, normalize_remote_dir, retimed, valid_device_id,
-    };
-    use crate::{BookSettings, BookSettingsExt, Reader};
-
-    fn annotation(uid: &str, at: i64) -> AnnotationRecord {
-        AnnotationRecord {
-            uid: uid.into(),
-            anchor: TextAnchor::default(),
-            note: "笔记".into(),
-            color: "amber".into(),
-            style: "highlight".into(),
-            created_at: at,
-            updated_at: at,
-        }
-    }
-
-    fn bookmark(uid: &str, at: i64) -> BookmarkRecord {
-        BookmarkRecord {
-            uid: uid.into(),
-            anchor: TextAnchor::default(),
-            created_at: at,
-            updated_at: at,
-        }
-    }
-
-    fn tombstone(kind: TombstoneKind, uid: &str, at: i64) -> Tombstone {
-        Tombstone {
-            kind,
-            uid: uid.into(),
-            deleted_at: at,
-        }
-    }
-
-    /// 一份只盖了字号的差量，连同「这台设备什么时候写的」。
-    ///
-    /// 用真的 `record_reader` 造而不是手抄 JSON：同步带的是整本差量，样件走的就是
-    /// 生产那一条换算，差量算法改坏时这里跟着红。
-    fn settings(at: i64, font_size: f32) -> SettingsRecord {
-        let base = Reader::default();
-        let mut wanted = base.clone();
-        wanted.font_size = font_size;
-        let mut patch = BookSettings::default();
-        patch.record_reader(&base, &wanted);
-        SettingsRecord {
-            updated_at: at,
-            settings: patch,
-        }
-    }
-
-    /// 一份「已经清干净」的差量（`Some(空)`，不是 `None`）。
-    fn cleared(at: i64) -> SettingsRecord {
-        SettingsRecord {
-            updated_at: at,
-            settings: BookSettings::default(),
-        }
-    }
-
-    fn with_book(mut snapshot: Snapshot, hash: &str, book: BookSnapshot) -> Snapshot {
-        snapshot.books.insert(hash.into(), book);
-        snapshot
-    }
-
-    fn position(offset: usize, at: i64) -> crate::sync::PositionRecord {
-        crate::sync::PositionRecord {
-            mode: "paged".into(),
-            locator: Locator { chapter: 0, offset },
-            updated_at: at,
-        }
-    }
-
-    /// 远端更新的一页进度与一条批注会写回本机；本机更旧的那份不覆盖远端。
-    #[test]
-    fn newer_remote_records_win_and_are_planned_locally() {
-        let local = with_book(
-            Snapshot::new("dev-local", 10),
-            "hash",
-            BookSnapshot {
-                position: Some(position(10, 10)),
-                annotations: vec![annotation("a", 10)],
-                ..BookSnapshot::default()
-            },
-        );
-        let remote = with_book(
-            Snapshot::new("dev-remote", 20),
-            "hash",
-            BookSnapshot {
-                position: Some(position(20, 20)),
-                annotations: vec![annotation("a", 20), annotation("b", 20)],
-                ..BookSnapshot::default()
-            },
-        );
-
-        let merged = merge(&local, &[remote], 30);
-        assert_eq!(merged.stats.positions, 1);
-        assert_eq!(merged.stats.annotations, 2);
-        assert_eq!(
-            merged.snapshot.books["hash"]
-                .position
-                .as_ref()
-                .unwrap()
-                .locator
-                .offset,
-            20
-        );
-        assert_eq!(merged.snapshot.books["hash"].annotations.len(), 2);
-        assert_eq!(merged.plan.positions.len(), 1);
-        assert_eq!(merged.plan.annotation_upserts.len(), 2);
-        assert!(merged.plan.annotation_deletes.is_empty());
-    }
-
-    /// 远端墓碑比本机记录新：本机那条要被删掉，且墓碑继续往别的设备传。
-    #[test]
-    fn a_newer_tombstone_deletes_the_local_row() {
-        let local = with_book(
-            Snapshot::new("dev-local", 10),
-            "hash",
-            BookSnapshot {
-                annotations: vec![annotation("a", 10)],
-                ..BookSnapshot::default()
-            },
-        );
-        let remote = with_book(
-            Snapshot::new("dev-remote", 20),
-            "hash",
-            BookSnapshot {
-                tombstones: vec![tombstone(TombstoneKind::Annotation, "a", 20)],
-                ..BookSnapshot::default()
-            },
-        );
-
-        let merged = merge(&local, &[remote], 30);
-        assert_eq!(merged.stats.annotations_deleted, 1);
-        assert_eq!(merged.plan.annotation_deletes.len(), 1);
-        assert_eq!(merged.plan.annotation_deletes[0].uid, "a");
-        assert!(merged.snapshot.books["hash"].annotations.is_empty());
-        assert_eq!(merged.snapshot.books["hash"].tombstones.len(), 1);
-    }
-
-    /// 撤销删除把 updated_at 抬到删除之后，于是本机记录压过远端旧墓碑，不会被再删一次。
-    #[test]
-    fn a_restored_row_beats_an_older_tombstone() {
-        let local = with_book(
-            Snapshot::new("dev-local", 40),
-            "hash",
-            BookSnapshot {
-                annotations: vec![annotation("a", 40)],
-                ..BookSnapshot::default()
-            },
-        );
-        let remote = with_book(
-            Snapshot::new("dev-remote", 20),
-            "hash",
-            BookSnapshot {
-                tombstones: vec![tombstone(TombstoneKind::Annotation, "a", 20)],
-                ..BookSnapshot::default()
-            },
-        );
-
-        let merged = merge(&local, &[remote], 50);
-        assert!(merged.plan.annotation_deletes.is_empty());
-        assert_eq!(merged.snapshot.books["hash"].annotations.len(), 1);
-        assert!(merged.snapshot.books["hash"].tombstones.is_empty());
-    }
-
-    /// 书签按 updated_at 合并；撤销拔除同样压过旧墓碑。
-    #[test]
-    fn bookmarks_merge_on_updated_at_and_follow_tombstones() {
-        let local = with_book(
-            Snapshot::new("dev-local", 10),
-            "hash",
-            BookSnapshot {
-                bookmarks: vec![bookmark("left", 10), bookmark("restored", 40)],
-                ..BookSnapshot::default()
-            },
-        );
-        let remote = with_book(
-            Snapshot::new("dev-remote", 20),
-            "hash",
-            BookSnapshot {
-                bookmarks: vec![bookmark("right", 20)],
-                tombstones: vec![
-                    tombstone(TombstoneKind::Bookmark, "left", 20),
-                    tombstone(TombstoneKind::Bookmark, "restored", 20),
-                ],
-                ..BookSnapshot::default()
-            },
-        );
-
-        let merged = merge(&local, &[remote], 50);
-        assert_eq!(merged.stats.bookmarks, 1);
-        assert_eq!(merged.stats.bookmarks_deleted, 1);
-        assert_eq!(merged.plan.bookmark_upserts[0].1.uid, "right");
-        assert_eq!(merged.plan.bookmark_deletes[0].uid, "left");
-        let uids: Vec<&str> = merged.snapshot.books["hash"]
-            .bookmarks
-            .iter()
-            .map(|bookmark| bookmark.uid.as_str())
-            .collect();
-        assert_eq!(uids, ["restored", "right"]);
-    }
-
-    /// 远端有、本机没有的书不动：记录留在远端，等这本书被导入后再同步。
-    #[test]
-    fn remote_books_missing_locally_are_left_alone() {
-        let local = Snapshot::new("dev-local", 10);
-        let remote = with_book(
-            Snapshot::new("dev-remote", 20),
-            "not-here",
-            BookSnapshot {
-                annotations: vec![annotation("a", 20)],
-                ..BookSnapshot::default()
-            },
-        );
-
-        let merged = merge(&local, &[remote], 30);
-        assert!(merged.snapshot.books.is_empty());
-        assert!(merged.plan.annotation_upserts.is_empty());
-    }
-
-    /// 同一秒里远端一台删、一台留：删除优先，不让同秒复活。
-    #[test]
-    fn a_remote_tombstone_wins_a_same_second_tie_against_remote_record() {
-        let local = with_book(
-            Snapshot::new("dev-local", 10),
-            "hash",
-            BookSnapshot::default(),
-        );
-        let a = with_book(
-            Snapshot::new("dev-a", 20),
-            "hash",
-            BookSnapshot {
-                annotations: vec![annotation("a", 20)],
-                ..BookSnapshot::default()
-            },
-        );
-        let b = with_book(
-            Snapshot::new("dev-b", 20),
-            "hash",
-            BookSnapshot {
-                tombstones: vec![tombstone(TombstoneKind::Annotation, "a", 20)],
-                ..BookSnapshot::default()
-            },
-        );
-
-        let merged = merge(&local, &[a, b], 30);
-        assert!(merged.snapshot.books["hash"].annotations.is_empty());
-        assert_eq!(merged.snapshot.books["hash"].tombstones.len(), 1);
-    }
-
-    #[test]
-    fn device_ids_are_safe_file_names_and_differ() {
-        let a = new_device_id();
-        let b = new_device_id();
-        assert_eq!(a.len(), 32);
-        assert!(valid_device_id(&a), "{a}");
-        assert_ne!(a, b);
-        assert!(!valid_device_id(""));
-        assert!(!valid_device_id("a/b"));
-        assert!(!valid_device_id("设备"));
-    }
-
-    #[test]
-    fn remote_dir_is_normalized_and_rejects_parent_segments() {
-        assert_eq!(
-            normalize_remote_dir(" /folio//sync/ ").unwrap(),
-            "folio/sync"
-        );
-        assert_eq!(normalize_remote_dir("").unwrap(), "");
-        assert!(normalize_remote_dir("folio/../别的").is_err());
-    }
-
-    #[test]
-    fn a_snapshot_round_trips_through_json() {
-        let snapshot = with_book(
-            Snapshot::new("dev", 10),
-            "hash",
-            BookSnapshot {
-                position: Some(position(3, 10)),
-                annotations: vec![annotation("a", 10)],
-                bookmarks: vec![bookmark("b", 10)],
-                tombstones: vec![tombstone(TombstoneKind::Annotation, "c", 10)],
-                // 新字段也要真走一遍 JSON：不填它等于没测到它写得出去读得回来。
-                settings: Some(settings(10, 26.0)),
-            },
-        );
-        let bytes = serde_json::to_vec(&snapshot).unwrap();
-        let back: Snapshot = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back, snapshot);
-        assert!(bytes.len() < 4096);
-    }
-
-    /// 阅读设置按**整本差量**比时间：远端更新的写回本机，远端更旧的留着本机那份。
-    #[test]
-    fn newer_remote_settings_win_whole_patch_while_older_ones_are_dropped() {
-        let local = with_book(
-            Snapshot::new("dev-local", 10),
-            "hash",
-            BookSnapshot {
-                settings: Some(settings(20, 19.0)),
-                ..BookSnapshot::default()
-            },
-        );
-        let newer = with_book(
-            Snapshot::new("dev-remote", 20),
-            "hash",
-            BookSnapshot {
-                settings: Some(settings(30, 26.0)),
-                ..BookSnapshot::default()
-            },
-        );
-        let merged = merge(&local, std::slice::from_ref(&newer), 40);
-        assert_eq!(merged.plan.settings.len(), 1, "更新的远端差量该写回本机");
-        assert_eq!(merged.stats.settings, 1);
-        assert_eq!(
-            merged.snapshot.books["hash"]
-                .settings
-                .as_ref()
-                .unwrap()
-                .settings,
-            settings(30, 26.0).settings,
-            "上传的那份该是赢了的那个"
-        );
-
-        let older = with_book(
-            Snapshot::new("dev-remote", 20),
-            "hash",
-            BookSnapshot {
-                settings: Some(settings(5, 17.0)),
-                ..BookSnapshot::default()
-            },
-        );
-        let merged = merge(&local, std::slice::from_ref(&older), 40);
-        assert!(merged.plan.settings.is_empty(), "更旧的远端差量不该盖本机");
-        assert_eq!(
-            merged.snapshot.books["hash"]
-                .settings
-                .as_ref()
-                .unwrap()
-                .settings,
-            settings(20, 19.0).settings,
-            "本机那份该留着"
-        );
-    }
-
-    /// 「恢复本书默认」同步得出去：`Some(空差量)` 带着更新的时间要盖掉旧的差量。
-    ///
-    /// 这一条盯 `Option<SettingsRecord>` 的两义性 —— `None` 是「这台设备没话说」，
-    /// `Some(空)` 是「这台设备把它清干净了」。把后者当没话说丢掉，症状是读者在另一台
-    /// 设备上看到「我明明清过了，那套设置又回来了」。
-    #[test]
-    fn a_cleared_patch_beats_an_older_non_empty_one() {
-        let local = with_book(
-            Snapshot::new("dev-local", 10),
-            "hash",
-            BookSnapshot {
-                settings: Some(cleared(30)),
-                ..BookSnapshot::default()
-            },
-        );
-        let remote = with_book(
-            Snapshot::new("dev-remote", 20),
-            "hash",
-            BookSnapshot {
-                settings: Some(settings(10, 26.0)),
-                ..BookSnapshot::default()
-            },
-        );
-        let merged = merge(&local, std::slice::from_ref(&remote), 40);
-        assert!(merged.plan.settings.is_empty(), "远端更旧，不该往本机写");
-        let uploaded = merged.snapshot.books["hash"].settings.clone().unwrap();
-        assert!(
-            uploaded.settings.is_empty(),
-            "上传的那份该是「已经清干净」，而不是把那两格又带回去"
-        );
-        assert_eq!(uploaded.updated_at, 30);
-    }
-
-    #[test]
-    fn an_empty_book_snapshot_omits_its_fields() {
-        let mut books = BTreeMap::new();
-        books.insert("hash".to_string(), BookSnapshot::default());
-        let snapshot = Snapshot {
-            version: 1,
-            device_id: "dev".into(),
-            exported_at: 10,
-            books,
-        };
-        let json = serde_json::to_string(&snapshot).unwrap();
-        assert!(json.contains("\"books\":{\"hash\":{}}"), "{json}");
-    }
-
-    /// 平移要一次搬走**所有**时间：漏掉哪一类，那一类就还在用对面的钟参加比较。
-    #[test]
-    fn shifting_the_clock_moves_every_timestamp_at_once() {
-        let mut snapshot = with_book(
-            Snapshot::new("dev-remote", 100),
-            "hash",
-            BookSnapshot {
-                position: Some(position(7, 200)),
-                annotations: vec![annotation("a", 300)],
-                bookmarks: vec![bookmark("b", 400)],
-                tombstones: vec![tombstone(TombstoneKind::Annotation, "c", 500)],
-                settings: Some(settings(600, 22.0)),
-            },
-        );
-
-        snapshot.shift_clock(1_000);
-
-        let book = &snapshot.books["hash"];
-        assert_eq!(snapshot.exported_at, 1_100);
-        assert_eq!(book.position.as_ref().unwrap().updated_at, 1_200);
-        assert_eq!(book.annotations[0].created_at, 1_300);
-        assert_eq!(book.annotations[0].updated_at, 1_300);
-        assert_eq!(book.bookmarks[0].created_at, 1_400);
-        assert_eq!(book.bookmarks[0].updated_at, 1_400);
-        assert_eq!(book.tombstones[0].deleted_at, 1_500);
-        assert_eq!(book.settings.as_ref().unwrap().updated_at, 1_600);
-        // 位置本身不是时间，不该被搬。
-        assert_eq!(book.position.as_ref().unwrap().locator.offset, 7);
-    }
-
-    /// 这一条是平移存在的理由：对面那台钟快一小时，它更早写的那一条在**不平移**时会压过
-    /// 本机更新的一条。先把这个错的结局断下来，再断平移后的对结局 —— 只断后者，
-    /// 测试在实现漏掉平移时也可能因为别的原因通过。
-    #[test]
-    fn a_fast_peer_clock_stops_winning_once_the_snapshot_is_shifted() {
-        // 对端的钟比本机快 3600 秒；它在真实时刻 89_000 写了这一条，落上自己的钟是 92_600。
-        let local = with_book(
-            Snapshot::new("dev-local", 95_000),
-            "hash",
-            BookSnapshot {
-                // 本机在真实时刻 90_000 读到第 12 页。
-                position: Some(position(12, 90_000)),
-                ..BookSnapshot::default()
-            },
-        );
-        let remote = with_book(
-            Snapshot::new("dev-remote", 93_600),
-            "hash",
-            BookSnapshot {
-                position: Some(position(3, 92_600)),
-                ..BookSnapshot::default()
-            },
-        );
-
-        // 本机钟 95_000，对面报文库里写的是 93_600 → 偏移 = 本机 - 对面 = -3600。
-        let unshifted = merge(&local, std::slice::from_ref(&remote), 95_000);
-        assert_eq!(
-            unshifted.stats.positions, 1,
-            "不平移的话，钟快那台那条更早的记录会赢"
-        );
-        assert_eq!(unshifted.plan.positions[0].1.locator.offset, 3);
-
-        let mut corrected = remote.clone();
-        corrected.shift_clock(-3_600);
-        let shifted = merge(&local, std::slice::from_ref(&corrected), 95_000);
-        assert_eq!(shifted.stats.positions, 0, "平移过后本机那条更新的该守住");
-        assert!(shifted.plan.positions.is_empty());
-        assert_eq!(
-            shifted.snapshot.books["hash"]
-                .position
-                .as_ref()
-                .unwrap()
-                .locator
-                .offset,
-            12,
-            "合并结果里留下的必须是本机那一次阅读"
-        );
-    }
-
-    /// 偏移取自对面报文里的一个 `i64`，坏值不能把时间绕回 1970 之前 —— 那会让一份快照
-    /// 里所有记录同时变成「最旧的」，看起来像「对面什么都没改」。
-    #[test]
-    fn a_poisoned_delta_saturates_instead_of_wrapping_time() {
-        let mut forward = with_book(
-            Snapshot::new("dev-remote", 100),
-            "hash",
-            BookSnapshot {
-                position: Some(position(1, i64::MAX - 10)),
-                ..BookSnapshot::default()
-            },
-        );
-        forward.shift_clock(i64::MAX);
-        assert_eq!(forward.exported_at, i64::MAX, "往前搬到底停在上边界");
-        assert_eq!(
-            forward.books["hash"].position.as_ref().unwrap().updated_at,
-            i64::MAX
-        );
-
-        let mut backward = with_book(
-            Snapshot::new("dev-remote", 100),
-            "hash",
-            BookSnapshot {
-                position: Some(position(1, i64::MIN + 10)),
-                ..BookSnapshot::default()
-            },
-        );
-        backward.shift_clock(i64::MIN);
-        // 100 + i64::MIN 落在可表示的范围里，所以按算术走、不钳 —— 要紧的是它仍然是个
-        // 负数，没有一个时间绕回成正的大数。
-        assert_eq!(backward.exported_at, i64::MIN + 100, "能表示的差就照实算");
-        assert_eq!(
-            backward.books["hash"].position.as_ref().unwrap().updated_at,
-            i64::MIN,
-            "真下溢那一条钳在边界，不回绕成正数"
-        );
-    }
-
-    /// 对表搬的是**读数**：对面的钟快一小时，那一头的「刚刚」搬过来就是「一小时前」，
-    /// 于是它赢不过本机一小时前的那一条 —— 这一格错了，合并挑出来的就是「谁的钟快」。
-    #[test]
-    fn rebasing_moves_every_timestamp_onto_the_local_clock() {
-        let remote = retimed(
-            &with_book(
-                Snapshot::new("dev-peer", 5_000),
-                "hash",
-                BookSnapshot {
-                    position: Some(position(30, 4_000)),
-                    annotations: vec![annotation("a", 4_000)],
-                    bookmarks: vec![bookmark("b", 4_000)],
-                    tombstones: vec![tombstone(TombstoneKind::Bookmark, "c", 4_000)],
-                    settings: Some(settings(4_000, 22.0)),
-                },
-            ),
-            // 对面导出那一刻它的钟是 5_000，而本机此刻读到的自己那一个是 4_000。
-            5_000,
-            4_000,
-        );
-
-        assert_eq!(remote.exported_at, 4_000, "导出的读数也跟着搬到本机钟面");
-        let book = &remote.books["hash"];
-        assert_eq!(book.position.as_ref().unwrap().updated_at, 3_000);
-        assert_eq!(book.annotations[0].updated_at, 3_000);
-        assert_eq!(book.bookmarks[0].updated_at, 3_000);
-        assert_eq!(book.tombstones[0].deleted_at, 3_000);
-        assert_eq!(book.settings.as_ref().unwrap().updated_at, 3_000);
-
-        // 搬到本机钟面之后，本机那条 3_500 的进度就是更新的，不该被盖掉。
-        let local = with_book(
-            Snapshot::new("dev-local", 4_100),
-            "hash",
-            BookSnapshot {
-                position: Some(position(10, 3_500)),
-                ..BookSnapshot::default()
-            },
-        );
-        let merged = merge(&local, &[remote], 4_100);
-        assert!(
-            merged.plan.positions.is_empty(),
-            "对过表就知道本机这条更新，不该认错赢者"
-        );
-    }
-}
-
+mod tests;
 #[cfg(test)]
-mod wire_tests {
-    use std::collections::HashMap;
-    use std::path::Path;
-    use std::sync::{Arc, Mutex};
-
-    use crate::content::anchor::TextAnchor;
-    use crate::content::format::{DocMeta, Format};
-    use crate::net::remote::dav;
-    use crate::net::remote::{Cancel, Method, Request, Response, Sink, Transport};
-    use crate::position::Locator;
-    use crate::store::{AnnotationStyle, Store};
-    use crate::sync::{
-        AnnotationRecord, BookSnapshot, PositionRecord, Snapshot, Tombstone, TombstoneKind,
-        sync_once,
-    };
-
-    struct MockDav {
-        base: String,
-        files: Mutex<HashMap<String, Vec<u8>>>,
-        seen: Mutex<Vec<(Method, String)>>,
-    }
-
-    impl MockDav {
-        fn new(base: &str, files: HashMap<String, Vec<u8>>) -> Self {
-            Self {
-                base: base.into(),
-                files: Mutex::new(files),
-                seen: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn rel(&self, url: &str) -> String {
-            url.strip_prefix(&self.base)
-                .unwrap_or(url)
-                .trim_matches('/')
-                .to_string()
-        }
-
-        fn path_prefix(&self) -> &str {
-            let after = self.base.split_once("://").unwrap().1;
-            &after[after.find('/').unwrap()..]
-        }
-
-        fn listing(&self, dir: &str) -> String {
-            let prefix = if dir.is_empty() {
-                String::new()
-            } else {
-                format!("{dir}/")
-            };
-            let mut entries: Vec<String> = self
-                .files
-                .lock()
-                .unwrap()
-                .keys()
-                .filter(|path| path.starts_with(&prefix))
-                .filter_map(|path| {
-                    let rest = path.strip_prefix(&prefix)?;
-                    (!rest.contains('/')).then(|| rest.to_string())
-                })
-                .collect();
-            entries.sort();
-            let mut xml = String::from(
-                "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:multistatus xmlns:d=\"DAV:\">",
-            );
-            for entry in entries {
-                // displayname 故意与文件名不同：同步层必须认路径末段，不能拿 displayname
-                // 判「这是不是我自己那份」。
-                xml.push_str(&format!(
-                    "<d:response><d:href>{}{}{}</d:href><d:propstat><d:prop><d:resourcetype/><d:displayname>shown</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
-                    self.path_prefix(),
-                    prefix,
-                    entry
-                ));
-            }
-            xml.push_str("</d:multistatus>");
-            xml
-        }
-    }
-
-    impl Transport for MockDav {
-        fn request(&self, req: Request) -> crate::net::remote::Result<Response> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push((req.method, req.url.clone()));
-            let rel = self.rel(&req.url);
-            let response = match req.method {
-                Method::Mkcol => Response {
-                    status: 201,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                },
-                Method::Put => {
-                    self.files.lock().unwrap().insert(rel, req.body);
-                    Response {
-                        status: 201,
-                        headers: Vec::new(),
-                        body: Vec::new(),
-                    }
-                }
-                Method::Get => match self.files.lock().unwrap().get(&rel) {
-                    Some(body) => Response {
-                        status: 200,
-                        headers: Vec::new(),
-                        body: body.clone(),
-                    },
-                    None => Response {
-                        status: 404,
-                        headers: Vec::new(),
-                        body: Vec::new(),
-                    },
-                },
-                Method::Propfind => {
-                    let xml = self.listing(rel.trim_end_matches('/'));
-                    Response {
-                        status: 207,
-                        headers: Vec::new(),
-                        body: xml.into_bytes(),
-                    }
-                }
-                _ => Response {
-                    status: 405,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                },
-            };
-            Ok(response)
-        }
-
-        fn download(
-            &self,
-            _req: Request,
-            _sink: &mut dyn Sink,
-            _cancel: &Cancel,
-        ) -> crate::net::remote::Result<u64> {
-            Err(crate::net::remote::Error::Cancelled)
-        }
-    }
-
-    fn meta() -> DocMeta {
-        DocMeta {
-            title: "书".into(),
-            format: Format::Epub,
-            size: 1,
-            ..DocMeta::default()
-        }
-    }
-
-    fn position(offset: usize, at: i64) -> PositionRecord {
-        PositionRecord {
-            mode: "paged".into(),
-            locator: Locator { chapter: 0, offset },
-            updated_at: at,
-        }
-    }
-
-    /// 一次完整往返：读别人的快照、应用远端记录与墓碑、写回自己的那份；自己的旧文件
-    /// 即使读不懂也**不许被读**（它不是事实来源，本机库才是）。
-    #[test]
-    fn a_wire_round_trip_applies_remote_state_and_replaces_our_snapshot() {
-        let store = Store::in_memory().unwrap();
-        let book = store.add_book(Path::new("/books/a.epub"), &meta()).unwrap();
-        store.set_content_hash(book, "hash-a", "sha256").unwrap();
-        store
-            .set_position_at(
-                book,
-                "paged",
-                &Locator {
-                    chapter: 0,
-                    offset: 5,
-                },
-                10,
-            )
-            .unwrap();
-        store
-            .add_annotation(
-                book,
-                &TextAnchor::default(),
-                "本机",
-                "amber",
-                AnnotationStyle::default(),
-            )
-            .unwrap();
-        let local_uid = store.annotations(book).unwrap()[0].uid.clone();
-
-        // 本机那条批注的时间戳是真实的「现在」；远端要压过它，就得给未来的时间。
-        let future = crate::infra::time::now() + 100;
-        let mut remote_book = BookSnapshot {
-            position: Some(position(9, future)),
-            annotations: vec![AnnotationRecord {
-                uid: "remote-a".into(),
-                anchor: TextAnchor::default(),
-                note: "远".into(),
-                color: "rose".into(),
-                style: "wavy".into(),
-                created_at: future,
-                updated_at: future,
-            }],
-            ..BookSnapshot::default()
-        };
-        remote_book.tombstones.push(Tombstone {
-            kind: TombstoneKind::Annotation,
-            uid: local_uid.clone(),
-            deleted_at: future,
-        });
-        let mut remote = Snapshot::new("dev-a", future);
-        remote.books.insert("hash-a".into(), remote_book);
-
-        let mut files = HashMap::new();
-        files.insert(
-            "folio-sync/dev-a.json".to_string(),
-            serde_json::to_vec(&remote).unwrap(),
-        );
-        // 自己的旧文件故意写成坏 JSON：这趟都不该打开它，更不该因此失败。
-        files.insert(
-            "folio-sync/dev-local.json".to_string(),
-            b"not json".to_vec(),
-        );
-        let mock = Arc::new(MockDav::new("https://dav.test/dav/", files));
-        let client = dav::Client::new(
-            dav::Endpoint::new("https://dav.test/dav/", "u", "p"),
-            mock.clone(),
-        );
-
-        let report = sync_once(&store, &client, "folio-sync", "dev-local", future + 1).unwrap();
-        assert_eq!(report.remote_devices, 1);
-        assert_eq!(report.applied_positions, 1);
-        assert_eq!(report.applied_annotations, 1);
-        assert_eq!(report.deleted_annotations, 1);
-
-        let (mode, locator, updated_at) = store.position_with_time(book).unwrap().unwrap();
-        assert_eq!(mode, "paged");
-        assert_eq!(locator.offset, 9, "远端更新的进度要落到本机");
-        assert_eq!(updated_at, future, "要保留远端时间戳，不能写成现在");
-        let annotations = store.annotations(book).unwrap();
-        assert_eq!(annotations.len(), 1);
-        assert_eq!(annotations[0].uid, "remote-a", "远端批注要进来");
-        assert!(
-            annotations
-                .iter()
-                .all(|annotation| annotation.uid != local_uid),
-            "远端墓碑要删掉本机那条"
-        );
-
-        {
-            let seen = mock.seen.lock().unwrap();
-            assert!(
-                !seen
-                    .iter()
-                    .any(|(method, url)| *method == Method::Get && url.ends_with("dev-local.json")),
-                "自己的旧快照不该被读取"
-            );
-        }
-
-        let uploaded = mock
-            .files
-            .lock()
-            .unwrap()
-            .get("folio-sync/dev-local.json")
-            .cloned()
-            .expect("自己的快照要写回去");
-        let uploaded: Snapshot = serde_json::from_slice(&uploaded).unwrap();
-        assert_eq!(uploaded.version, 1);
-        assert_eq!(uploaded.device_id, "dev-local");
-        let book_snapshot = &uploaded.books["hash-a"];
-        assert_eq!(book_snapshot.annotations.len(), 1);
-        assert_eq!(book_snapshot.annotations[0].uid, "remote-a");
-        assert_eq!(book_snapshot.tombstones.len(), 1);
-        assert_eq!(book_snapshot.tombstones[0].uid, local_uid);
-    }
-}
+mod wire_tests;

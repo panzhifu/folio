@@ -83,6 +83,14 @@ pub(crate) fn names(path: &Path, family: Family) -> Option<Vec<String>> {
         }
         Family::Rar => {
             let archive = rars::ArchiveReader::read_path(path).ok()?;
+            if archive
+                .members()
+                .take(crate::limits::MAX_ARCHIVE_ENTRIES + 1)
+                .count()
+                > crate::limits::MAX_ARCHIVE_ENTRIES
+            {
+                return None;
+            }
             let mut out = Vec::new();
             for member in archive.members() {
                 if member.meta.is_directory || member.meta.is_redirection {
@@ -95,6 +103,9 @@ pub(crate) fn names(path: &Path, family: Family) -> Option<Vec<String>> {
         Family::SevenZ => {
             let reader =
                 sevenz_rust2::ArchiveReader::open(path, sevenz_rust2::Password::empty()).ok()?;
+            if reader.archive().files.len() > crate::limits::MAX_ARCHIVE_ENTRIES {
+                return None;
+            }
             Some(
                 reader
                     .archive()
@@ -109,7 +120,10 @@ pub(crate) fn names(path: &Path, family: Family) -> Option<Vec<String>> {
             let file = std::fs::File::open(path).ok()?;
             let mut archive = tar::Archive::new(file);
             let mut out = Vec::new();
-            for entry in archive.entries().ok()? {
+            for (index, entry) in archive.entries().ok()?.enumerate() {
+                if index >= crate::limits::MAX_ARCHIVE_ENTRIES {
+                    return None;
+                }
                 let entry = entry.ok()?;
                 if !entry.header().entry_type().is_file() {
                     continue;
@@ -151,6 +165,15 @@ pub fn extract_to(
 fn extract_rar(path: &Path, want: &str, dest: &Path, max: u64) -> std::result::Result<u64, String> {
     let archive =
         rars::ArchiveReader::read_path(path).map_err(|err| format!("RAR 读不出来：{err}"))?;
+    if archive
+        .members()
+        .take(crate::limits::MAX_ARCHIVE_ENTRIES + 1)
+        .count()
+        > crate::limits::MAX_ARCHIVE_ENTRIES
+    {
+        return Err("归档条目过多".into());
+    }
+    let budget = crate::limits::OutputBudget::default();
     let mut found = false;
     let outcome = archive.extract_with_control(rars::ArchiveReadOptions::new(), |member| {
         if member.meta.is_directory || member.meta.is_redirection {
@@ -161,7 +184,7 @@ fn extract_rar(path: &Path, want: &str, dest: &Path, max: u64) -> std::result::R
         }
         if display_name(&member.meta.name) != want {
             return Ok(if member.is_solid() {
-                rars::ExtractionDecision::Extract(Box::new(std::io::sink()))
+                rars::ExtractionDecision::Extract(Box::new(budget.writer(std::io::sink())))
             } else {
                 rars::ExtractionDecision::Skip
             });
@@ -197,16 +220,20 @@ fn extract_sevenz(
 ) -> std::result::Result<u64, String> {
     let mut reader = sevenz_rust2::ArchiveReader::open(path, sevenz_rust2::Password::empty())
         .map_err(|err| format!("7z 读不出来：{err}"))?;
+    if reader.archive().files.len() > crate::limits::MAX_ARCHIVE_ENTRIES {
+        return Err("归档条目过多".into());
+    }
+    let budget = crate::limits::OutputBudget::default();
     let mut written = None;
     reader
         .for_each_entries(|entry, data| {
             let name = normalize(entry.name());
             if entry.is_directory() || name != want {
-                std::io::copy(data, &mut std::io::sink())?;
+                std::io::copy(data, &mut budget.writer(std::io::sink()))?;
                 return Ok(true);
             }
             let mut file = std::fs::File::create(dest)?;
-            let got = std::io::copy(&mut data.take(max + 1), &mut file)?;
+            let got = std::io::copy(&mut data.take(max.saturating_add(1)), &mut file)?;
             written = Some(got);
             Ok(false)
         })
@@ -225,7 +252,10 @@ fn extract_tar(path: &Path, want: &str, dest: &Path, max: u64) -> std::result::R
     let entries = archive
         .entries()
         .map_err(|err| format!("tar 目录读不出来：{err}"))?;
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        if index >= crate::limits::MAX_ARCHIVE_ENTRIES {
+            return Err("归档条目过多".into());
+        }
         let mut entry = entry.map_err(|err| format!("tar 条目读不出来：{err}"))?;
         if !entry.header().entry_type().is_file() {
             continue;
@@ -240,7 +270,7 @@ fn extract_tar(path: &Path, want: &str, dest: &Path, max: u64) -> std::result::R
             continue;
         }
         let mut out = std::fs::File::create(dest).map_err(|err| format!("写不进暂存区：{err}"))?;
-        let got = std::io::copy(&mut entry.by_ref().take(max + 1), &mut out)
+        let got = std::io::copy(&mut entry.by_ref().take(max.saturating_add(1)), &mut out)
             .map_err(|err| format!("tar 解不出来：{err}"))?;
         if got > max {
             return Err(format!("解压后超过 {} MB", max >> 20));
@@ -259,7 +289,7 @@ struct Limited {
 
 impl std::io::Write for Limited {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.written + buf.len() as u64 > self.max {
+        if buf.len() as u64 > self.max.saturating_sub(self.written) {
             return Err(std::io::Error::other("解压后超过上限"));
         }
         let got = self.file.write(buf)?;

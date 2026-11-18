@@ -11,4 +11,4 @@ pub(in crate::ui::features::reader) mod reading_page;
 pub(in crate::ui::features::reader) mod regions;
 pub(in crate::ui::features::reader) mod scene;
 
-pub use reading_page::ReadingPage;
+pub use reading_page::{ReadingPage, ReadingPageEvent};

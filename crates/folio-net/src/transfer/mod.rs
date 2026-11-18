@@ -124,7 +124,7 @@ impl TransferServer {
         let mut listener = None;
         let mut last_err = None;
         for port in config.port..config.port + 10 {
-            match TcpListener::bind(("0.0.0.0", port)) {
+            match TcpListener::bind(("127.0.0.1", port)) {
                 Ok(l) => {
                     listener = Some(l);
                     break;

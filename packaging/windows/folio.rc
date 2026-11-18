@@ -1,0 +1,5 @@
+// Windows 的 exe 图标资源：资源管理器、任务栏和 Alt-Tab 都读二进制里这一份。
+// 由 `crates/folio-app/build.rs` 在链接期嵌进 folio.exe（`embed-resource` 自己找 rc.exe）。
+// 图标 ID 用 1：资源管理器取 ID 最小的图标组。图标本体仍是 packaging/icons/folio.ico，
+// 这里只引用，不存第二份。
+1 ICON "../icons/folio.ico"

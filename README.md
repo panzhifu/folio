@@ -1,4 +1,4 @@
-[中文](./doc/README_zh.md) | English
+[工程文档（中文）](doc/文档索引.md) | English
 
 <p align="center"><img src="packaging/icons/folio.png" width="112" alt="Folio icon"></p>
 
@@ -12,7 +12,7 @@
 ---
 
 Folio opens books in a GPU-rendered native window and lays the text out itself:
-a DOM → CSS-subset → layout pipeline inside `folio-core`, built on GPUI's text
+a DOM → CSS-subset → layout pipeline across `folio-format` and `folio-render`, built on GPUI's text
 primitives (shaping, line breaking, per-glyph painting) and the application shell
 from [gpui-kit](https://gpui-kit.com). Doing the typesetting in-house is what makes
 book typography possible without shipping a browser: first-line indents, centered
@@ -80,8 +80,8 @@ version. The app can also check that page for updates from inside
   first install as a test.
 - Android ships `arm64-v8a` only, and the APK does not bundle the third-party
   license texts (every desktop package does).
-- The Notes screen is an explicit empty state: the annotation backend and the
-  highlight write-path have landed; the interface has not.
+- Notes group annotations and bookmarks by book, support jumping back to the text,
+  and export to text, Markdown or HTML. Backup restoration is still pending.
 - HarmonyOS and iOS host projects live in the tree, but are not part of the
   release matrix.
 
@@ -89,7 +89,7 @@ version. The app can also check that page for updates from inside
 
 Directions, not promises:
 
-1. **Notes & annotations UI** — wire the existing backend to the screen.
+1. **Data reliability** — complete backup restoration and strengthen sync convergence.
 2. **iOS and HarmonyOS hosts**, once they enter the release matrix.
 
 ## Building from source
@@ -104,15 +104,16 @@ working Vulkan driver. Building from source also needs two compile-time
 dependencies for the read-aloud feature: **libclang** (used by bindgen) and the
 **libspeechd development headers** (`libspeechd-dev` on Debian/Ubuntu,
 `speech-dispatcher` on Arch). Android cross-compilation, packaging, logging
-configuration and the release process are described in the developer handbook:
-**[doc/development.md](doc/development.md)** (中文).
+configuration and the release process are described in
+**[AGENTS.md](AGENTS.md)** and the **[engineering standard](doc/工程规范.md)** (中文).
 
 ## Under the hood
 
 ```
-crates/folio-core/   the engine, zero GPUI dependency: DOM, CSS subset, layout,
-                     anchors & annotations, 21 format providers, SQLite (library,
-                     progress, annotations, reading stats, page tables), logging
+crates/folio-format/ format providers, DOM and CSS subset
+crates/folio-render/ layout and pagination, zero GPUI dependency
+crates/folio-store/  SQLite library, progress, annotations and reading statistics
+crates/folio-core/   anchors, import and service orchestration, zero GPUI dependency
 
 crates/folio-app/    the shell: adaptive navigation, reader, shelf, settings,
                      stats; desktop and Android share one rendering path — only

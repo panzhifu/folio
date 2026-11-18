@@ -86,12 +86,6 @@ impl ReaderSession {
         }
     }
 
-    /// 系统内存告警：只丢可重建的图像；当前屏与放大查看那一层由图集自己保护。
-    pub(in crate::ui::features::reader) fn trim_caches(&mut self, cx: &mut Context<Self>) {
-        self.atlas
-            .update(cx, |atlas, cx| atlas.trim_for_memory_pressure(cx));
-    }
-
     /// 把「从 [`Self::reading_segment_start`] 到此刻、且不超过宽限线」那一段写进库，
     /// 然后把段首推到此刻。
     pub(in crate::ui::features::reader) fn settle_reading(&mut self) {

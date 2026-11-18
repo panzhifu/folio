@@ -77,9 +77,9 @@ use super::pages::membership::status_line;
 use super::spec::{self, RowKind};
 use super::{NotesSheet, spec_pages};
 use crate::ui::components::{FontPicker, SearchBox, SearchBoxEvent, TopBar, muted_label};
+use crate::ui::foundation::navigation;
 use crate::ui::services::l10n::tr;
 use crate::ui::services::storage::{self, Job};
-use crate::ui::shell::navigation;
 
 /// 一行的可命中高度。Apple HIG 明文那条 44×44；规范点名的 `px` 例外之一就是
 /// 「最小命中容差」，所以这一格不跟着 rem 走。

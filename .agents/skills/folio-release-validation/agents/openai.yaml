@@ -1,0 +1,3 @@
+interface:
+  display_name: "Folio 发布验证"
+  short_description: "对账版本、依赖、治理和实际产物，按授权完成平台构建及推送验证"

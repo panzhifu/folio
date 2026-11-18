@@ -30,6 +30,30 @@
 
 use gpui_kit::{App, Global, Window};
 
+mod memory;
+pub use memory::physical_memory_bytes;
+
+/// 原生平台决定导航的输入形态，宽度规则共用一份纯函数。
+pub fn size_class(window: &Window) -> crate::ui::foundation::navigation::SizeClass {
+    crate::ui::foundation::navigation::SizeClass::for_width(
+        window.viewport_size().width.into(),
+        cfg!(mobile),
+    )
+}
+
+pub fn has_window_chrome() -> bool {
+    !cfg!(mobile)
+}
+
+pub fn uses_share_sheet() -> bool {
+    cfg!(mobile)
+}
+
+#[cfg(mobile)]
+pub fn save_copy(_bytes: &[u8], _name: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// 四边 inset，逻辑像素。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Insets {

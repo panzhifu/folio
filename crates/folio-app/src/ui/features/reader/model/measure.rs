@@ -1,17 +1,13 @@
 //! `Measure` 的 gpui 实现：断行走 App 级 `TextSystem::line_wrapper`，
 //! 整行度量走 `WindowTextSystem::layout_line`（按线程建，见 `THREAD_WINDOW_TEXTS`）。
 //!
-//! 两者的分工是 spike① 实测出来的，不是猜的：`line_wrapper` / `advance` 挂在
-//! `Arc<TextSystem>` 上（不要求 `&mut Window`，所以能进后台线程），
-//! `shape_line` / `layout_line` 挂在 `WindowTextSystem` 上；它从 0.3.11 起带线程内
-//! scratch，不能跨线程共享。
+//! `line_wrapper` / `advance` 使用可共享的 `Arc<TextSystem>`；整行 shaping 使用
+//! `WindowTextSystem` 的线程内 scratch，不能跨线程共享。
 //!
 //! 一个必须同源的细节：**断行用的宽度累加**与**行盒报告的宽度**都来自同一套
 //! 单字 advance，否则会出现「按 A 算说放得下、按 B 量却溢出」。
 //!
-//! 桌面与移动**共用这一份**。原先移动端有另一份逐行照抄的实现，唯一的区别是
-//! `f32::from(x)` 还是 `x.as_f32()`；两件事因此成立：一处改了断行口径两端同时生效，
-//! 以及同一本书在两端折出的行数可以逐行比对（`document.rs` 的 tests 就靠这个前提）。
+//! 桌面与移动共用度量口径，便于逐行比较排版结果。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -65,11 +61,6 @@ pub(super) fn is_generic(family: &str) -> bool {
 /// （[`GENERIC_FAMILIES`] 那段讲的正是同一个坑），标题会歪出版心，而汉字要靠系统兜底
 /// 才画得出来。拉丁那一路要做得带一份覆盖表，不在这一格顺手猜。
 ///
-/// 本机实测（2026-10-16，两台都量过）：手机 Meizu 20 的 `/system/fonts` 里 serif 家族
-/// **一个都没有**（`ls /system/fonts | grep -ci serif` = 0），CJK 只有一份
-/// `NotoSansCJK-Regular.ttc`；桌面这端有 `Noto Sans CJK` 而没有 `Noto Serif CJK`
-/// （`fc-list : family` 数出来的）。所以「宋体」这一档在**这两台机器上都找不到同类**，
-/// 会照名单往下掉 —— 这一格真正生效的是装着衬线中文字体的那类设备。
 /// 名单加长要照 `all_font_names()` 实际报出来的数，不照猜（全落空时日志会整份打出来，
 /// 见 `ui::host::CJK_PREFERRED` 上那三行同样的叮嘱）。
 const CJK_CLASS: &[(&[&str], &[&str])] = &[
@@ -328,6 +319,14 @@ impl FontCache {
     /// body / mono 换了（读者改正文或等宽字体）时清缓存：它们不入键。
     pub fn clear(&mut self) {
         self.resolved.clear();
+    }
+
+    pub fn estimated_cache_bytes(&self) -> usize {
+        self.resolved.capacity() * std::mem::size_of::<(FontKey, Font)>()
+    }
+
+    pub fn release_cache_memory(&mut self) {
+        self.resolved = HashMap::new();
     }
 
     pub fn resolve(

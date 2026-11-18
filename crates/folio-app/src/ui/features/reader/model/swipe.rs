@@ -45,7 +45,7 @@ use crate::ui::features::reader::model::session::{
 use crate::ui::features::reader::model::turn::{TurnIntent, TurnPlan};
 use crate::ui::features::reader::motion::turn_animation::{self, Axis};
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::turn_duration;
+use crate::ui::services::motion::turn_duration;
 
 /// 按下来后要走过多远才算「在拖」而不是「点了一下」。
 ///
@@ -163,7 +163,7 @@ pub(in crate::ui::features::reader) fn snap(along: f32, dist: f32, speed: f32) -
 /// 松手那一腿的时长下限。
 ///
 /// 再狠的一甩也不许短到看不清纸怎么落（落定读成「啪」）。上限不在这儿：上限就是 `fallback`
-/// （读者那一格「翻页时长」，`crate::ui::shell::turn_duration`），见 [`release_duration`]。
+/// （读者那一格「翻页时长」，`crate::ui::services::motion::turn_duration`），见 [`release_duration`]。
 const RELEASE_MIN: Duration = Duration::from_millis(120);
 
 /// 松手那一腿走多久：**以松手那一刻的速度起步、匀减速到落点正好停住**。
@@ -811,7 +811,7 @@ mod tests {
         fling_floor, passed, progress, release_duration, release_easing, release_shape, snap,
         toward, travel,
     };
-    use crate::ui::shell::NAV_TRANSITION;
+    use crate::ui::services::motion::NAV_TRANSITION;
 
     const DIST: f32 = 400.0;
 

@@ -4,5 +4,3 @@
 
 pub(in crate::ui::features::shelf) mod book_card;
 pub(in crate::ui::features::shelf) mod book_menu;
-
-pub(crate) use book_card::AUTHOR_SEP;

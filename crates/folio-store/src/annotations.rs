@@ -9,12 +9,8 @@ use super::{Store, now};
 use crate::Result;
 use folio_model::TextAnchor;
 
-/// [`Store::annotation`] 一次从库里读回来的形状：
+/// [`Store::annotation`] 的列序：
 /// `(uid, 锚点 JSON, 书 id, stale, 创建, 更新, 笔记, 颜色, 画法)`。
-///
-/// 起这个名字是因为「画法」那一格加上来之后，第八元素让 clippy 的
-/// `type_complexity` 直接报错。而它报得对：裸的八个元组在这里既读不出哪一格是什么，
-/// 换一次 `SELECT` 的顺序也不会被编译器抓住 —— 颜色与画法同为 `String`，错位照样编得过。
 type AnnotationRow = (
     Option<String>,
     String,
@@ -28,17 +24,8 @@ type AnnotationRow = (
 );
 
 impl Store {
-    /// 记一条标注。`anchor` 是调用方从可见文本坐标建好的（见 `folio_model::anchor`），
-    /// 存储层不参与坐标换算 —— 它不知道排版，也不该知道。
-    ///
-    /// 颜色不认识时回落到默认那条，而不是拒写：写失败会让读者刚划的批注直接丢掉，
-    /// 那比颜色不对严重得多。画法这一档由 [`AnnotationStyle`] 本身兜（它是枚举，
-    /// 递不进来一个不存在的值）。
-    ///
-    /// **章只在 `anchor_json` 里，表里没有第二个地方记它**（v13 之前那一列
-    /// `chapter_id` 是外键挂到 `chapters(id)` 上的，重扫一次就被级联删光，
-    /// 见 `store/schema.rs` 的 v13）。所以这一条语句不查任何别的表：
-    /// 批注能不能活下来与章表当时有没有那一行彻底无关。
+    /// 存储调用方已换算好的可见文本锚点，未知颜色回落默认值以避免丢失批注。
+    /// 章号只存在 `anchor_json` 中，不依赖章表行；重扫章表不得级联删除批注（schema v13）。
     pub fn add_annotation(
         &self,
         book_id: i64,
@@ -48,7 +35,7 @@ impl Store {
         style: AnnotationStyle,
     ) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let stamp = now();
+        let stamp = super::sync_order::next_version(0, now())?;
         conn.execute(
             "INSERT INTO annotations
              (uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
@@ -166,9 +153,21 @@ impl Store {
         style: AnnotationStyle,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let current: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT coalesce(uid,''),updated_at FROM annotations WHERE id=?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((uid, observed)) = current else {
+            return Ok(());
+        };
+        let stamp =
+            super::sync_order::next_mark_version(&conn, "annotation", &uid, observed, now())?;
         conn.execute(
             "UPDATE annotations SET note = ?2, color = ?3, style = ?4, updated_at = ?5 WHERE id = ?1",
-            params![id, note, color_of(color), style.as_str(), now()],
+            params![id, note, color_of(color), style.as_str(), stamp],
         )?;
         Ok(())
     }
@@ -200,22 +199,29 @@ impl Store {
     /// 书，这条删除传不到任何地方。
     pub fn delete_annotation(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(Option<String>, Option<String>)> = conn
+        let row: Option<(Option<String>, Option<String>, i64)> = conn
             .query_row(
-                "SELECT a.uid, b.content_hash
+                "SELECT a.uid, b.content_hash, a.updated_at
                  FROM annotations a JOIN books b ON b.id = a.book_id
                  WHERE a.id = ?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some((uid, hash)) = row else {
+        let Some((uid, hash, observed)) = row else {
             return Ok(());
         };
         // 一笔事务：删掉那一行与记下墓碑必须同生同死。分两条裸语句中间被杀（Android
         // 直接杀进程），下次同步就没有任何东西说「这条删过」，于是它在别的设备上活着回来
         // —— 而读者已经看不见它了（`plans/基础设施.md` §1.3 那条「两写一账」）。
         let tx = conn.unchecked_transaction()?;
+        let stamp = super::sync_order::next_mark_version(
+            &tx,
+            "annotation",
+            uid.as_deref().unwrap_or(""),
+            observed,
+            now(),
+        )?;
         tx.execute("DELETE FROM annotations WHERE id = ?1", params![id])?;
         if let (Some(uid), Some(hash)) = (uid, hash) {
             super::sync::record_tombstone(
@@ -223,7 +229,7 @@ impl Store {
                 folio_model::sync::TombstoneKind::Annotation,
                 &uid,
                 &hash,
-                now(),
+                stamp,
             )?;
         }
         tx.commit()?;
@@ -311,6 +317,13 @@ impl Store {
         // 「把行插回」与「把墓碑撤掉」是一笔：中间被杀就留下「行回来了但本机仍报已删」
         // 那一半，下一次同步又把它删走（与 [`Self::delete_annotation`] 同一条两写一账）。
         let tx = conn.unchecked_transaction()?;
+        let stamp = super::sync_order::next_mark_version(
+            &tx,
+            "annotation",
+            &row.uid,
+            row.updated_at,
+            now(),
+        )?;
         tx.execute(
             "INSERT OR REPLACE INTO annotations
              (id, uid, book_id, anchor_json, note, color, style, stale, created_at, updated_at)
@@ -325,7 +338,7 @@ impl Store {
                 row.style.as_str(),
                 row.stale as i64,
                 row.created_at,
-                now()
+                stamp
             ],
         )?;
         tx.execute(

@@ -29,6 +29,7 @@ pub mod annotation;
 pub use folio_format as format;
 pub use folio_format::document;
 pub use folio_format::dom;
+pub use folio_format::limits;
 pub use folio_format::scan;
 pub use folio_store::assets;
 pub mod hit;

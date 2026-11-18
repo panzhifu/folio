@@ -194,23 +194,47 @@ impl Complex {
     }
 
     fn matches(&self, dom: &Dom, node: NodeId) -> bool {
-        self.right.matches(dom, node) && self.matches_left(dom, node, self.left.len())
+        let remaining = std::cell::Cell::new(4096);
+        self.right.matches(dom, node) && self.matches_left(dom, node, self.left.len(), &remaining)
     }
 
-    fn matches_left(&self, dom: &Dom, node: NodeId, depth: usize) -> bool {
+    fn matches_left(
+        &self,
+        dom: &Dom,
+        node: NodeId,
+        depth: usize,
+        remaining: &std::cell::Cell<usize>,
+    ) -> bool {
         if depth == 0 {
             return true;
         }
         let (combinator, compound) = &self.left[depth - 1];
-        let candidates: Vec<NodeId> = match combinator {
-            Combinator::Descendant => dom.ancestors(node).collect(),
-            Combinator::Child => dom.get(node).parent.into_iter().collect(),
-            Combinator::NextSibling => dom.prev_element_sibling(node).into_iter().collect(),
-            Combinator::SubsequentSibling => dom.prev_element_siblings(node).collect(),
+        let mut matches = |candidate| {
+            remaining.set(remaining.get() - 1);
+            compound.matches(dom, candidate)
+                && self.matches_left(dom, candidate, depth - 1, remaining)
         };
-        candidates
-            .into_iter()
-            .any(|c| compound.matches(dom, c) && self.matches_left(dom, c, depth - 1))
+        match combinator {
+            Combinator::Descendant => dom
+                .ancestors(node)
+                .take_while(|_| remaining.get() > 0)
+                .any(&mut matches),
+            Combinator::Child => dom
+                .get(node)
+                .parent
+                .into_iter()
+                .take_while(|_| remaining.get() > 0)
+                .any(&mut matches),
+            Combinator::NextSibling => dom
+                .prev_element_sibling(node)
+                .into_iter()
+                .take_while(|_| remaining.get() > 0)
+                .any(&mut matches),
+            Combinator::SubsequentSibling => dom
+                .prev_element_siblings(node)
+                .take_while(|_| remaining.get() > 0)
+                .any(&mut matches),
+        }
     }
 }
 
@@ -240,6 +264,9 @@ impl Selector {
     }
 
     pub fn parse(text: &str) -> Option<Selector> {
+        if text.len() > 16 * 1024 {
+            return None;
+        }
         let mut complexes = Vec::new();
         for part in split_top_level(text, ',') {
             complexes.push(parse_complex(&part)?);
@@ -260,6 +287,9 @@ fn parse_complex(text: &str) -> Option<Complex> {
     let mut pseudo: Option<PseudoElement> = None;
 
     while let Some(c) = cur.next() {
+        if left.len() > 128 || right.simples.len() > 128 {
+            return None;
+        }
         if c.is_whitespace() {
             if pending.is_none() && !right.simples.is_empty() {
                 pending = Some(Combinator::Descendant);

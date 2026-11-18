@@ -52,7 +52,7 @@ pub fn looks_like_svg(bytes: &[u8]) -> bool {
 /// 给图片元数据用（`ImageRes.width/height`）：排版期要按它定占位，而排版是同步的，
 /// 不可能等到真要画时再栅格一次。
 pub fn intrinsic_size(bytes: &[u8]) -> Option<(u32, u32)> {
-    if !looks_like_svg(bytes) {
+    if bytes.len() > crate::limits::MAX_DOM_BYTES || !looks_like_svg(bytes) {
         return None;
     }
     let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;
@@ -70,7 +70,7 @@ pub fn intrinsic_size(bytes: &[u8]) -> Option<(u32, u32)> {
 ///
 /// 无论哪一档，结果的长边都不会超过 [`MAX_EDGE`]。
 pub fn rasterize(bytes: &[u8], target: Option<(u32, u32)>) -> Option<(Vec<u8>, &'static str)> {
-    if !looks_like_svg(bytes) {
+    if bytes.len() > crate::limits::MAX_DOM_BYTES || !looks_like_svg(bytes) {
         return None;
     }
     let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;

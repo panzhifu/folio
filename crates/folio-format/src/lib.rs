@@ -17,6 +17,7 @@ pub mod dom;
 pub mod error;
 pub mod fixtures;
 pub mod href;
+pub mod limits;
 pub mod metrics;
 pub mod scan;
 #[cfg(test)]
@@ -415,7 +416,7 @@ pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static st
     if max_edge == 0 {
         return None;
     }
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
     // 动画 GIF 不缩：`ImageReader` 只解第一帧，缩完就把动画丢了。书里的 GIF 一般是
@@ -426,7 +427,17 @@ pub fn shrink_image(bytes: &[u8], max_edge: u32) -> Option<(Vec<u8>, &'static st
     // 先拿 decoder 把 EXIF 方向读出来再解码：`from_decoder` 不应用方向，
     // 不自己补一下的话，手机上拍的竖图缩完会横着。gpui 自己那条解码路
     // （`decode_static_image_from_decoder`）也是这么做的，两边口径一致。
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(crate::limits::MAX_IMAGE_PIXELS * 4);
+    reader.limits(limits.clone());
     let mut decoder = reader.into_decoder().ok()?;
+    let (width, height) = decoder.dimensions();
+    if !crate::limits::image_dimensions_allowed(width, height) {
+        return None;
+    }
+    decoder.set_limits(limits).ok()?;
     let orientation = decoder.orientation().ok()?;
     let mut image = image::DynamicImage::from_decoder(decoder).ok()?;
     image.apply_orientation(orientation);

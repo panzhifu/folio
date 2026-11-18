@@ -9,8 +9,9 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::rc::Rc;
 
-use html5ever::tendril::{StrTendril, TendrilSink};
+use html5ever::tendril::{ByteTendril, StrTendril, TendrilSink};
 use html5ever::tree_builder::{ElemName, ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::{Attribute, LocalName, Namespace, QualName};
 use html5ever::{ParseOpts, parse_document};
@@ -74,13 +75,41 @@ impl Dom {
     /// （`plans/阅读管线.md` §十二那条计数断言用的就是这一格）。
     pub fn parse(bytes: &[u8]) -> Dom {
         crate::metrics::Metric::DomParses.count();
+        if bytes.len() > crate::limits::MAX_DOM_BYTES {
+            return Self::rejected("正文超过 DOM 字节上限");
+        }
         let sink = DomSink::new();
+        let state = Rc::clone(&sink.state);
         let opts = ParseOpts {
             tokenizer: Default::default(),
             tree_builder: Default::default(),
         };
-        let mut dom = parse_document(sink, opts).from_utf8().one(bytes);
+        let mut parser = parse_document(sink, opts).from_utf8();
+        for chunk in bytes.chunks(8192) {
+            parser.process(ByteTendril::from_slice(chunk));
+            if state.borrow().nodes.len() > crate::limits::MAX_DOM_NODES {
+                return Self::rejected("正文超过 DOM 节点上限");
+            }
+        }
+        let mut dom = parser.finish();
+        if dom.nodes.len() > crate::limits::MAX_DOM_NODES {
+            return Self::rejected("正文超过 DOM 节点上限");
+        }
+        let mut stack = vec![(dom.document, 0usize)];
+        while let Some((id, depth)) = stack.pop() {
+            if depth > crate::limits::MAX_DOM_DEPTH {
+                return Self::rejected("正文超过 DOM 深度上限");
+            }
+            stack.extend(dom.get(id).children.iter().map(|id| (*id, depth + 1)));
+        }
         dom.assign_paths();
+        dom
+    }
+
+    fn rejected(reason: &str) -> Dom {
+        let mut dom = DomSink::new().finish();
+        dom.errors.push(reason.into());
+        tracing::warn!("DOM 拒绝：{reason}");
         dom
     }
 
@@ -130,12 +159,13 @@ impl Dom {
     }
 
     fn collect_raw_text(&self, id: NodeId, out: &mut String) {
-        let node = self.get(id);
-        if node.kind == NodeKind::Text {
-            out.push_str(&node.text);
-        }
-        for child in node.children.clone() {
-            self.collect_raw_text(child, out);
+        let mut pending = vec![id];
+        while let Some(id) = pending.pop() {
+            let node = self.get(id);
+            if node.kind == NodeKind::Text {
+                out.push_str(&node.text);
+            }
+            pending.extend(node.children.iter().rev().copied());
         }
     }
 
@@ -149,15 +179,16 @@ impl Dom {
         )
     }
     fn collect_text(&self, id: NodeId, out: &mut String) {
-        let node = self.get(id);
-        if self.is_non_content_element(node) {
-            return;
-        }
-        if node.kind == NodeKind::Text {
-            out.push_str(&node.text);
-        }
-        for child in node.children.clone() {
-            self.collect_text(child, out);
+        let mut pending = vec![id];
+        while let Some(id) = pending.pop() {
+            let node = self.get(id);
+            if self.is_non_content_element(node) {
+                continue;
+            }
+            if node.kind == NodeKind::Text {
+                out.push_str(&node.text);
+            }
+            pending.extend(node.children.iter().rev().copied());
         }
     }
 
@@ -258,7 +289,7 @@ struct DomState {
 }
 
 pub struct DomSink {
-    state: RefCell<DomState>,
+    state: Rc<RefCell<DomState>>,
 }
 
 impl DomSink {
@@ -273,11 +304,11 @@ impl DomSink {
             path: String::new(),
         }];
         Self {
-            state: RefCell::new(DomState {
+            state: Rc::new(RefCell::new(DomState {
                 nodes,
                 quirks: QuirksMode::NoQuirks,
                 errors: Vec::new(),
-            }),
+            })),
         }
     }
 
@@ -330,17 +361,20 @@ impl TreeSink for DomSink {
         Self: 'a;
 
     fn finish(self) -> Dom {
-        let state = self.state.into_inner();
+        let mut state = self.state.borrow_mut();
         Dom {
-            nodes: state.nodes,
+            nodes: std::mem::take(&mut state.nodes),
             document: 0,
             quirks: state.quirks,
-            errors: state.errors,
+            errors: std::mem::take(&mut state.errors),
         }
     }
 
     fn parse_error(&self, msg: Cow<'static, str>) {
-        self.state.borrow_mut().errors.push(msg.into_owned());
+        let mut state = self.state.borrow_mut();
+        if state.errors.len() < 64 {
+            state.errors.push(msg.into_owned());
+        }
     }
 
     fn get_document(&self) -> NodeId {
@@ -687,5 +721,21 @@ mod tests {
             let dom = parse(src);
             assert!(!dom.nodes.is_empty(), "{src:?} 应至少产出 document");
         }
+    }
+
+    #[test]
+    fn pathological_dom_input_is_rejected_before_layout() {
+        let deep = format!(
+            "{}正文{}",
+            "<div>".repeat(crate::limits::MAX_DOM_DEPTH + 1),
+            "</div>".repeat(crate::limits::MAX_DOM_DEPTH + 1)
+        );
+        let dom = parse(&deep);
+        assert_eq!(dom.nodes.len(), 1);
+        assert!(dom.errors.iter().any(|e| e.contains("深度")));
+        let huge = vec![b'x'; crate::limits::MAX_DOM_BYTES + 1];
+        let dom = Dom::parse(&huge);
+        assert_eq!(dom.nodes.len(), 1);
+        assert!(dom.errors.iter().any(|e| e.contains("字节")));
     }
 }

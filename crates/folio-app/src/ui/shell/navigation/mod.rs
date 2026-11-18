@@ -26,8 +26,8 @@ mod selection_bar;
 mod side_nav;
 mod surface;
 
+pub use crate::ui::foundation::navigation::SelectionAction;
 pub(in crate::ui::shell) use fold::FoldTracker;
-pub use selection_bar::SelectionAction;
 pub(in crate::ui::shell) use selection_bar::selection_bar;
 
 use gpui_kit::assets::IconName;
@@ -37,43 +37,9 @@ use crate::ui::host;
 
 use side_nav::side_nav;
 
-/// 侧栏宽（逻辑像素），三档只有这一个数 —— 华为的「侧边页签」控件就是 96vp。
-///
-/// 它同时是内容让出去的那一条：Medium 档多两倍 [`NAV_MARGIN`]（卡片悬在列里），
-/// Expanded 档就贴边（见 [`reserved_width`]）。
-pub const NAV_WIDTH: f32 = 96.0;
-/// 悬浮片离窗口边的那一圈（左右下同宽）。
-pub const NAV_MARGIN: f32 = 12.0;
-/// 悬浮片的圆角，等于底栏高的一半 —— 一条真正的胶囊，不是「圆角矩形」。
-pub const NAV_RADIUS: f32 = 28.0;
-/// 底栏高（逻辑像素）。华为底部页签是 56vp：图标 24 + 一行小字 + 上下各 6。
-pub const BAR_HEIGHT: f32 = 56.0;
-
-/// 导航栏在一档里**占掉**的宽度：Compact 是浮的（0），Medium 是卡片加两侧留白，
-/// Expanded 是那一条 96 宽的列。
-///
-/// 书架排几列、统计那张热力图的格子多大，都从这一个式子取数 —— 两处各写一份的话，
-/// 改一侧忘另一侧只会表现为「格子宽得莫名其妙」。
-pub fn reserved_width(size: SizeClass) -> f32 {
-    match size {
-        SizeClass::Compact => 0.0,
-        SizeClass::Medium => NAV_WIDTH + NAV_MARGIN * 2.0,
-        SizeClass::Expanded => NAV_WIDTH,
-    }
-}
-
-/// 底栏下沿离窗口底多少：手势条那一条 + 一圈留白。
-pub fn bar_offset(safe_bottom: f32) -> f32 {
-    NAV_MARGIN + safe_bottom
-}
-
-/// 内容尾部要空出来的一段：底栏高 + 上下两圈留白 + 手势条。
-///
-/// 这一段**加在滚动内容里**而不是外壳的容器上：加在容器上等于把视口切短，内容永远
-/// 到不了栏底下，那就不叫悬浮了。滚到底时最后一排正好停在栏的上沿。
-pub fn clearance(safe_bottom: f32) -> f32 {
-    BAR_HEIGHT + NAV_MARGIN * 2.0 + safe_bottom
-}
+pub use crate::ui::foundation::navigation::{
+    BAR_HEIGHT, NAV_MARGIN, NAV_RADIUS, NAV_WIDTH, SizeClass, bar_offset, clearance, reserved_width,
+};
 
 /// 一级目的地。两端**同一个枚举** —— 导航栏与路由都按它工作。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -126,59 +92,6 @@ impl Destination {
     /// 在 [`Destination::ALL`] 里的下标，用于路由表定位。
     pub fn index(self) -> usize {
         Self::ALL.iter().position(|d| *d == self).unwrap_or(0)
-    }
-}
-
-/// 窗口宽度分档（华为那两道线的三档）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SizeClass {
-    /// < 600 逻辑像素：手机。底部页签。
-    Compact,
-    /// 600–840：平板竖屏 / 窄窗口。悬浮侧栏卡片。
-    Medium,
-    /// ≥ 840：桌面宽窗口。嵌入侧栏。
-    ///
-    /// 触屏端走不到这一档：[`SizeClass::of`] 把它夹回悬浮卡片，所以这条整列只在桌面出现。
-    Expanded,
-}
-
-impl SizeClass {
-    /// 按**当前窗口宽度**分档。
-    ///
-    /// 桌面端夹到至少 `Medium`：鼠标桌面即便窗口很窄也不该出现底部导航栏，
-    /// 那里更接近「平板竖屏」而不是「手机」。
-    ///
-    /// 触屏端反过来夹到至多 `Medium`：那条 ≥840 的嵌入整列是华为给鼠标桌面的那一档，
-    /// 平板横屏不该长出它。量在真机上：11 寸平板（DBY-W09）横屏全屏是 2560 物理 px
-    /// 配 400dpi（scale 2.5）= **1024 逻辑 px**，正好越过 840 那条线，于是横屏是整列、
-    /// 竖屏（640）才是悬浮卡片 —— 同一台设备转个身换一种导航，读者会读成 bug。
-    /// 触屏端一律悬浮，两端各自只剩一个判据。
-    pub fn of(window: &Window) -> Self {
-        let width = f32::from(window.viewport_size().width);
-        let class = if width < 600.0 {
-            SizeClass::Compact
-        } else if width < 840.0 {
-            SizeClass::Medium
-        } else {
-            SizeClass::Expanded
-        };
-        #[cfg(not(mobile))]
-        {
-            if class == SizeClass::Compact {
-                return SizeClass::Medium;
-            }
-        }
-        #[cfg(mobile)]
-        {
-            if class == SizeClass::Expanded {
-                return SizeClass::Medium;
-            }
-        }
-        class
-    }
-
-    pub fn is_compact(self) -> bool {
-        self == SizeClass::Compact
     }
 }
 

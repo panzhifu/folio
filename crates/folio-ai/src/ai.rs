@@ -343,7 +343,10 @@ impl Assistant for ChatCompletion {
 
     fn ask(&self, http: &dyn Transport, system: &str, user: &str) -> Result<Answer, AiError> {
         let user = clip(user, MAX_INPUT_CHARS);
-        let response = http.request(self.request(system, &user)?)?;
+        let response = http.request(
+            self.request(system, &user)?
+                .limits(folio_net::RequestLimits::ai()),
+        )?;
         parse_response(&response)
     }
 
@@ -356,11 +359,11 @@ impl Assistant for ChatCompletion {
         cancel: &Cancel,
     ) -> Result<Answer, AiError> {
         let user = clip(user, MAX_INPUT_CHARS);
-        let req = self.stream_request(system, &user)?;
+        let req = self
+            .stream_request(system, &user)?
+            .limits(folio_net::RequestLimits::ai());
         let mut sink = SseSink::new(on);
-        // download 的契约接住了三件事：非 2xx 一块不写就报错（401/429 那些档位
-        // 由 From<Error> 折过来）、取消在块边界生效、体量不限。流式不重试
-        // （Retrying 不包 download）—— 打字机没有「回到开头」这一口。
+        // 流式问答有独立容量与等待预算，不自动重发已计费请求。
         http.download(req, &mut sink, cancel)?;
         sink.answer()
     }

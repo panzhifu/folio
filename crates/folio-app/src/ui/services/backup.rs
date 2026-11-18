@@ -25,6 +25,8 @@ use super::app_store;
 use super::config::ConfigHolder;
 use super::resident;
 
+pub mod restore;
+
 /// 这一屏能发起的作业。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Job {
@@ -69,6 +71,8 @@ pub struct BackupState {
     pending_delete: Option<PathBuf>,
     /// 在飞那条线的事件泵。跟着实体一起掉。
     _pump: Option<Task<()>>,
+    restore: restore::RestoreState,
+    _restore_pump: Option<Task<()>>,
 }
 
 impl BackupState {
@@ -79,7 +83,7 @@ impl BackupState {
 
     /// 有没有作业在飞。
     pub fn busy(&self) -> bool {
-        self.busy.is_some()
+        self.busy.is_some() || self.restore.is_busy()
     }
 
     /// 在飞的那一条是哪一条。
@@ -110,7 +114,7 @@ impl BackupState {
 
     /// 点某一行的「删除」：先摊开确认面板，不动磁盘。
     pub fn ask_delete(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+        if self.busy() {
             return;
         }
         self.pending_delete = Some(path);
@@ -134,7 +138,7 @@ impl BackupState {
 
     /// 起一条作业。已经有作业在飞时这一句是空转。
     pub fn start(&mut self, job: Job, path: Option<PathBuf>, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+        if self.busy() {
             return;
         }
         self.start_at(
@@ -148,7 +152,7 @@ impl BackupState {
     /// 同 [`start`](Self::start)，但根目录由调用方给 —— 测试用它把作业指到临时目录，
     /// 不碰进程级的 `FOLIO_DATA_DIR`（理由与 `storage.rs` 的 `start_at` 同一条）。
     fn start_at(&mut self, job: Job, path: Option<PathBuf>, roots: Roots, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
+        if self.busy() {
             return;
         }
         let store = app_store::handle(cx);
@@ -324,6 +328,7 @@ mod tests {
             data,
             library: Some(library),
             dicts: None,
+            fonts: None,
             themes: None,
         };
         (roots, config)

@@ -27,18 +27,14 @@ use gpui_kit::{
 use super::reading_page::ReadingPage;
 
 impl ReadingPage {
-    /// 顶栏：返回在左，右侧是书签与宽档的目录开关。
+    /// 顶栏：返回在左，右侧是书签。
     ///
     /// 书名与章名不摆在这一条上 —— 阅读时它们不改变下一步动作，只占掉返回与右侧开关
     /// 之间的宽度。章名在干净态页眉那条小字里仍然念得到（`bands::header`）。
     ///
-    /// `wide` 决定目录开关长不长在这一条上：手机档的目录是底部弹层，入口在底栏；平板 / PC
-    /// 档的目录是盖在正文上的抽屉，没有常驻的栏可以挂关闭键，开关就长在这里。
-    pub(in crate::ui::features::reader) fn top_bar(
-        &self,
-        wide: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// 目录不摆在这一条上：两个档位都从底栏那格「目录」（[`Self::entry_row`]）开，
+    /// 抽屉自己带关闭键，点遮罩、按返回也都收得掉 —— 顶栏不再多一颗只做同一件事的开关。
+    pub(in crate::ui::features::reader) fn top_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = cx.entity().clone();
         // 书签开关两端都在：钉的是「正在读的这一处」，与目录、设置那类入口不同类 ——
         // 它是有状态的开关（钉着 / 没钉），所以吃 `selected`。判据在会话里
@@ -59,24 +55,6 @@ impl ReadingPage {
             .accessibility_label(bookmark_label)
             .on_click(move |_, _, cx| bookmark_page.update(cx, |this, cx| this.toggle_bookmark(cx)))
             .into_any_element();
-        // 宽档上目录开关长在顶栏：底栏浮层收起时读者常驻看见的是这一条，而抽屉本身
-        // 也带一颗关闭 —— 开的关的两个入口都在这块屏上。
-        let toggle = wide.then(|| {
-            let open = self.toc.read(cx).is_open(cx);
-            let toc_page = cx.entity().clone();
-            let label = tr(cx, "reader.toc");
-            Button::new("toc-toggle")
-                .ghost()
-                .small()
-                .selected(open)
-                .icon(IconName::ListTree)
-                .tooltip(label.clone().to_string())
-                .accessibility_label(label)
-                .on_click(move |_, _, cx| {
-                    toc_page.update(cx, |this, cx| this.toggle_toc(cx));
-                })
-                .into_any_element()
-        });
         TopBar::new("reader-top-bar")
             .overlay(self.top_inset)
             .height(chrome::TOP_BAR_HEIGHT)
@@ -84,7 +62,6 @@ impl ReadingPage {
             .on_back(move |_, cx| {
                 page.update(cx, |this, cx| this.pop(cx));
             })
-            .children(toggle)
             .child(bookmark)
             .into_any_element()
     }

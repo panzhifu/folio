@@ -160,13 +160,20 @@ impl Areas {
     /// 要走一遍的根。书库在配置根或数据根里面时**不再单独走它** —— 那遍已经覆盖了它，
     /// 再走一次就是同一个文件算两遍。
     fn walk_roots(&self) -> Vec<&Path> {
-        let mut roots = vec![self.config.as_path(), self.data.as_path()];
-        // `let` 链而不是套一层 `if`：两个条件说的是同一件事（这一遍已经覆盖了书库）。
-        if let Some(library) = self.library_root()
-            && !library.starts_with(&self.data)
-            && !library.starts_with(&self.config)
+        let mut roots: Vec<&Path> = Vec::new();
+        for path in [
+            Some(self.config.as_path()),
+            Some(self.data.as_path()),
+            self.library_root(),
+        ]
+        .into_iter()
+        .flatten()
         {
-            roots.push(library);
+            if roots.iter().any(|root| path.starts_with(root)) {
+                continue;
+            }
+            roots.retain(|root| !root.starts_with(path));
+            roots.push(path);
         }
         roots
     }
@@ -633,5 +640,47 @@ mod tests {
         );
         // 夹具里每一类都有东西，所以这一版是一条不落。
         assert_eq!(filled.len(), Area::ALL.len());
+    }
+
+    #[test]
+    fn shared_or_nested_config_and_data_roots_count_each_file_once() {
+        let temp = tempfile::tempdir().unwrap();
+        for arrangement in ["shared", "config-inside", "data-inside"] {
+            let root = temp.path().join(arrangement);
+            let data = if arrangement == "data-inside" {
+                root.join("data")
+            } else {
+                root.clone()
+            };
+            let config = if arrangement == "config-inside" {
+                root.join("preferences")
+            } else {
+                root
+            };
+            let library = data.join("books");
+            file(&data, "folio.db", 100);
+            file(&config, "config.json", 3);
+            file(&library, "book.epub", 70);
+            file(&data, "logs/folio.log", 5);
+            file(&data, "cache/comics/page.png", 11);
+            let areas = Areas {
+                config,
+                db: data.join("folio.db"),
+                logs: data.join("logs"),
+                log_active: Some(data.join("logs/folio.log")),
+                inbox: data.join("inbox"),
+                comics: data.join("cache/comics"),
+                data,
+                library: Some(library),
+            };
+            let usage = measure(&areas);
+            assert_eq!(usage.total, 189, "{arrangement}: 重合或嵌套不能重复遍历");
+            assert_eq!(
+                usage.entries.iter().map(|entry| entry.files).sum::<u64>(),
+                5
+            );
+            assert_eq!(usage.get(Area::Config).bytes, 3);
+            assert_eq!(usage.get(Area::Books).bytes, 70);
+        }
     }
 }

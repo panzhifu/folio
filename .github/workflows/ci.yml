@@ -42,6 +42,45 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  native-platforms:
+    name: Native build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: clippy
+      - name: Compile desktop and test targets
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Link native application
+        run: cargo build --locked -p folio-app
+      - name: Validate release sources
+        run: cargo xtask release-check
+
+  governance:
+    name: Repository governance
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Check governance and debt ratchet
+        env:
+          FOLIO_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$FOLIO_BASE" ] || [ "$FOLIO_BASE" = "0000000000000000000000000000000000000000" ]; then
+            FOLIO_BASE=HEAD
+          fi
+          cargo xtask governance --base "$FOLIO_BASE"
+          cargo xtask release-check --base "$FOLIO_BASE"
+      - name: Test governance rejection paths
+        run: cargo test --locked -p folio-xtask
+
   check:
     name: Desktop (fmt · clippy · build · test)
     runs-on: ubuntu-24.04
@@ -190,4 +229,6 @@ jobs:
           export CXX_aarch64_linux_android="$TC/aarch64-linux-android26-clang++"
           export AR_aarch64_linux_android="$TC/llvm-ar"
           export RANLIB_aarch64_linux_android="$TC/llvm-ranlib"
-          cargo clippy --target aarch64-linux-android --lib -- -D warnings
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TC/aarch64-linux-android26-clang"
+          cargo clippy --locked --target aarch64-linux-android --lib -- -D warnings
+          cargo build --locked --target aarch64-linux-android --lib

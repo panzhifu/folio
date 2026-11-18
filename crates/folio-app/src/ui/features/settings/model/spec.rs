@@ -128,7 +128,7 @@ pub(crate) enum RowKind {
         /// 一栏里。手机端不受这一格影响（它本来就把标题摆在上方）。
         vertical: bool,
         /// 拿得到当前窗口：内容的版式要按窗口宽窄分档（外观页的预览卡，平板跟桌面
-        /// 一档、手机另档），那个判据 `SizeClass::of(window)` 只认窗口。
+        /// 一档、手机另档），那个判据 `crate::ui::host::size_class(window)` 只认窗口。
         render: CustomRender,
     },
 }

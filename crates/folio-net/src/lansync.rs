@@ -1,21 +1,5 @@
-//! 局域网同步的**协议形状与客户端那一趟**：路由、报文、缺书对账、一次完整往返。
-//!
-//! 这一层只管「两端怎么说得上话」，不管谁去拨那个连接：
-//!
-//! - 服务端那一半挂在 [`super::transfer`] 那个 axum 服务器上（`tokio` 只许住在
-//!   [`super::transfer`] 的边界里，见 [`super`] 的模块文档），它把这里的 DTO 解出来、
-//!   用 `folio_account` 验过账号再答；
-//! - 客户端的**编排在 [`sync_one`]**，出网口是 [`crate::Transport`]，与 WebDAV、
-//!   翻译、检查更新同一个，于是整趟往返能在测试里塞一只假传输离线跑完；
-//! - 向本机要的那几件事（书架清单、导入一本、合并写回）收在 [`LanLocal`] 这一个出口里，
-//!   由装配那一层实现 —— 书库句柄、导入管线、作业池归它管，不是这一层的事。
-//!
-//! 与 `folio_model::sync` 的分工：那里是「一台设备的全量快照长什么样、几份快照怎么合成一份」，
-//! 这里是「快照与书怎么在局域网里递给对面那台」。合并规则两边共用，一条都没重写。
-//!
-//! **账号 id 是句声称，不是凭据**：`/hello` 里那串 id 任何设备都能广播，所以它只用来
-//! 让对方决定「值不值得跟你握手」；真正的准入是之后那对 nonce 与双向证明
-//! （见 `folio_account`）。证明没过，任何一条数据路由都不答。
+//! 局域网路由、报文与客户端往返；服务器挂 transfer，存储和合并经 LanLocal 注入。
+//! 账号 id 只是声称；nonce 双向证明通过后才允许访问数据路由。
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -27,9 +11,6 @@ use crate::{Method, Request, Response, Transport};
 use folio_account::{AccountKey, Nonce, Proof, Side};
 use folio_model::sync::{SNAPSHOT_VERSION, Snapshot};
 
-// 清单条目的数据形状归 sync（评审稿 Stage 2.2）：读侧要它的是 `store` 的
-// 「本机有哪些可同步的书」，而 store 不许认识网络模块。这里沿用旧路径，
-// `net::lansync::BookEntry` 的既有写法（`net/transfer/lan.rs`、界面侧）一行不改。
 pub use folio_model::sync::BookEntry;
 
 /// 这一版局域网协议。两端各带在自己每一条报文里，`version` 比本机高的对端直接拒：
@@ -68,12 +49,7 @@ pub struct Hello {
     pub nonce: String,
 }
 
-/// `POST /hello` 的响应：对端那一半的 nonce、它出示的证明、这次连接的会话凭据，
-/// 还有它此刻的钟。
-///
-/// `now` 不是装饰：两端各自的表对不上是常态（飞行模式几天、手机自己同步过一次），
-/// 而局域网给了唯一一次「当场对表」的机会 —— 拿它对 [`folio_model::sync::Snapshot::shift_clock`]，
-/// 比对那些隔着云端写下来的时间戳可靠。
+/// 对端 nonce、证明、会话凭据与此刻的钟；钟差只调整导出时间，不改记录版本。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloReply {
     pub version: u32,
@@ -201,8 +177,7 @@ pub trait LanLocal: Send + Sync + 'static {
 
     /// 收下读回来的这些快照，与本机合一次、写回本机，并回**合并后的本机快照 JSON**。
     ///
-    /// 那一份要当场推回对面：两台设备于是在这一趟里都收齐，不必等对面哪天也下拉一次。
-    /// `remotes` 里的时间**已经搬到本机钟面上**（见 [`Peer::retime`]），实现只管合并。
+    /// 合并快照当场推回对面；导出时间已对齐本机，记录版本保持原始值。
     fn merge_and_apply(
         &self,
         remotes: &[Snapshot],
@@ -336,8 +311,7 @@ pub struct Peer {
     base: String,
     /// `/hello` 发下来的会话凭据，之后每一条都要带。
     token: String,
-    /// 对面写下的时间搬到本机钟面要加的秒数：`本机钟 - 对端钟`（与
-    /// [`folio_model::sync::Snapshot::shift_clock`] 的 `delta` 同一个定义）。
+    /// 导出时间的钟差（秒），不应用于记录版本。
     clock_shift: i64,
 }
 
@@ -407,10 +381,7 @@ impl Peer {
         })
     }
 
-    /// 对面那一份快照 → 搬到本机钟面上的那一份。
-    ///
-    /// 偏移量取的是 `/hello` 那一刻当场量到的那一对读数，比快照自己带的 `exported_at` 新
-    /// 一两个网络往返的时间 —— 对表要的就是「现在这一刻两边各读到自己是多少」。
+    /// 按握手钟差调整导出时间；转发与重试不得改记录冲突顺序。
     pub fn retime(&self, remote: &Snapshot) -> Snapshot {
         let mut copy = remote.clone();
         copy.shift_clock(self.clock_shift);
@@ -440,7 +411,7 @@ impl Peer {
         )
     }
 
-    /// `GET /snapshot`：对面那台的全量快照（已经搬到本机钟面）。
+    /// 对端全量快照；仅导出时间按握手钟差对齐。
     pub fn snapshot(&self) -> Result<Snapshot> {
         let remote: Snapshot = self.get(&format!("{ROUTE_SNAPSHOT}?token={}", self.token))?;
         if remote.version != SNAPSHOT_VERSION {
@@ -566,8 +537,12 @@ mod tests {
     use crate as remote;
     use crate::{Method, Request, Response, Sink, Transport};
     use folio_account::{AccountKey, Nonce, Proof, Side};
+    use folio_model::TextAnchor;
     use folio_model::position::Locator;
-    use folio_model::sync::{BookSnapshot, PositionRecord, SNAPSHOT_VERSION, Snapshot};
+    use folio_model::sync::{
+        BookSnapshot, BookmarkRecord, PositionRecord, SNAPSHOT_VERSION, SettingsRecord, Snapshot,
+        Tombstone, TombstoneKind,
+    };
 
     use super::{
         Applied, Auth, BookEntry, Error, Hello, HelloReply, LanLocal, MAX_PULL_BOOKS, Manifest,
@@ -755,7 +730,7 @@ mod tests {
         );
     }
 
-    /// 一次完整往返：握手 → 拉走本机缺的那一本 → 读回对面快照并**搬到本机钟面** →
+    /// 一次完整往返：握手 → 拉走本机缺的那一本 → 读回对面快照并对齐导出时间 →
     /// 把合并后的那一份推回去。三条请求的 URL 都带着这次的 token，本机这一侧只看见四件事。
     #[test]
     fn a_full_round_pulls_the_missing_book_and_pushes_the_merged_snapshot() {
@@ -819,37 +794,57 @@ mod tests {
         );
     }
 
-    /// 对表：对面写下的时间在交到本机合并之前，必须已经搬到本机钟面上。
-    ///
-    /// 这一格错了，合并挑出来的赢者就是「谁的钟快」而不是「谁改得晚」，而屏幕上看不出来。
+    /// 不同接收时钟、重试与转发都不能改记录版本，也不能把陈旧导出时间变成现在。
     #[test]
-    fn remote_timestamps_are_moved_onto_the_local_clock_before_merging() {
+    fn remote_record_versions_survive_clock_offsets_and_retries_before_merging() {
         let key = key();
-        let peer = Arc::new(FakePeer::new(key, PEER_CLOCK));
+        let mut peer = FakePeer::new(key, PEER_CLOCK);
+        peer.snapshot.exported_at = PEER_CLOCK - 200;
+        let book = peer.snapshot.books.get_mut(&hash_of(MISSING)).unwrap();
+        book.bookmarks.push(BookmarkRecord {
+            uid: "mark".into(),
+            anchor: TextAnchor::point(0, 1),
+            created_at: 1800,
+            updated_at: 1901,
+        });
+        book.settings = Some(SettingsRecord {
+            updated_at: 1902,
+            settings: Default::default(),
+        });
+        book.tombstones.push(Tombstone {
+            kind: TombstoneKind::Bookmark,
+            uid: "deleted".into(),
+            deleted_at: 1903,
+        });
+        let original = peer.snapshot.clone();
+        let peer = Arc::new(peer);
         let local = Arc::new(FakeLocal::new([hash_of(OWNED)], "MERGED-JSON"));
-        sync_one(
-            local.as_ref(),
-            clone_transport(&peer),
-            "192.168.1.9:8410",
-            &key,
-            OUR_CLOCK,
-        )
-        .unwrap();
-
-        let merged = local.merged.lock().unwrap();
-        assert_eq!(merged.len(), 1, "本机这一侧只该收到一份对面快照");
-        let book = &merged[0].books[&hash_of(MISSING)];
-        assert_eq!(
-            book.position.as_ref().unwrap().updated_at,
-            900,
-            "对面钟上的一千九百，搬到慢一千秒的本机钟面上是九百"
-        );
-        assert_eq!(
-            merged[0].exported_at, OUR_CLOCK,
-            "导出的读数也跟着搬：它接下来要参加合并的比较"
-        );
-        // `now` 交回本机合并那一步的，也是本机这一个钟。
-        assert_eq!(local.merged_at.lock().unwrap().as_slice(), &[OUR_CLOCK]);
+        let clocks = [OUR_CLOCK, OUR_CLOCK + 50_000, -50_000];
+        for clock in clocks.into_iter().chain([OUR_CLOCK]) {
+            sync_one(
+                local.as_ref(),
+                clone_transport(&peer),
+                "192.168.1.9:8410",
+                &key,
+                clock,
+            )
+            .unwrap();
+            let merged = local.merged.lock().unwrap();
+            assert_eq!(merged.len(), 1, "FakeLocal 只保留最近一次合并输入");
+            let snapshot = &merged[0];
+            assert_eq!(
+                snapshot.books, original.books,
+                "进度、书签、设置与删除版本均不得平移"
+            );
+            assert_eq!(snapshot.device_id, original.device_id);
+            assert_eq!(
+                snapshot.exported_at,
+                clock - 200,
+                "旧快照不能被对表刷新为现在"
+            );
+            assert_eq!(local.merged_at.lock().unwrap().as_slice(), &[clock]);
+        }
+        assert_eq!(peer.snapshot, original, "握手不能修改源快照");
     }
 
     /// 两边密钥不同步时，握手第一步就停：任何一条数据路由都不该被问一次。

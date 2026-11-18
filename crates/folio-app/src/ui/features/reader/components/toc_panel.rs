@@ -48,12 +48,11 @@ use crate::ui::features::reader::model::annotations::Palette;
 use crate::ui::features::reader::model::chrome::percent_label;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::toc_tree::TocView;
-use crate::ui::features::shelf::{AUTHOR_SEP, fmt_size};
+use crate::ui::foundation::book_label::{AUTHOR_SEP, fmt_size};
 use crate::ui::foundation::images::cover_image;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::l10n::{tf, tr};
 use crate::ui::services::resident;
-use crate::ui::shell::navigation::SizeClass;
 
 /// 目录这一屏的横向刻度，全部是在 Meizu 20（scale 2.8）上逐行数参照 App 的墨迹
 /// 边界量出来的（dp = px / 2.8）。
@@ -1862,7 +1861,7 @@ impl Render for TocPanel {
     /// 左边一张带遮罩的抽屉（正文一寸不让）。哪些行看得见、折了哪几枝、搜的是什么词、
     /// 跳到哪一条 —— 全部只有一份，两种摆法读的是同一个 `TocView`。
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if SizeClass::of(window).is_compact() {
+        if crate::ui::host::size_class(window).is_compact() {
             // 弹层**每帧都构造**，收着时也构造 —— 弹簧的采样在里面，只在开着时构造会把
             // 退场动画连状态一起丢（见 `widgets::bottom_sheet` 那段模块注释）。
             self.sheet_element(window, cx)

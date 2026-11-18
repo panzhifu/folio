@@ -9,7 +9,7 @@
 //!   而备份的第一目的恰恰是「换一台机器还能读」；
 //! - **书文件与封面**（`include_files` 开着时）：书库根下除 `.staging` / `.thumbs`
 //!   之外的文件。前者是没走完的导入，后者是可再生的缓存；
-//! - **词典**：配置里 `installed` 指到的那几本 StarDict；
+//! - **词典与字体**：配置里 `installed` 指到的资产；
 //! - **主题**：`themes/` 下的自定义 JSON。它跟着配置走，很小，缺了恢复后那一格会指向
 //!   一个不存在的名字；
 //! - **不装**：日志、漫画解压缓存、缩略图、备份目录自己。这些要么可再生，要么会把
@@ -32,6 +32,14 @@ use crate::infra::config::Config;
 use crate::infra::time::{self, DAY};
 use crate::{Result, Store};
 
+mod activation;
+mod restore;
+pub use activation::{RestoreActivation, activate_restore_on_startup};
+pub use restore::{
+    RestoreLimits, RestorePreview, Restored, preview_restore, restore_into,
+    restore_with_credentials,
+};
+
 /// 这一版备份包的格式。`manifest.json` 里写它，将来恢复流程按它分叉。
 pub const FORMAT: u32 = 1;
 
@@ -47,6 +55,8 @@ pub struct Roots {
     pub library: Option<PathBuf>,
     /// 已导入词典的根；一本都没有时 `None`。
     pub dicts: Option<PathBuf>,
+    /// 已安装的用户字体。
+    pub fonts: Option<PathBuf>,
     /// 自定义主题目录。目录不存在时照样可以给，遍历时自然为空。
     pub themes: Option<PathBuf>,
 }
@@ -61,11 +71,13 @@ impl Roots {
             .is_confirmed()
             .then(|| PathBuf::from(config.library.dir.trim()));
         let dicts = (!config.dictionary.installed.is_empty()).then(|| config.dictionary.root());
+        let fonts = (!config.fonts.installed.is_empty()).then(folio_base::paths::fonts_dir);
         Self {
             backups: crate::infra::paths::backups_dir(),
             data,
             library,
             dicts,
+            fonts,
             themes: Some(crate::infra::paths::themes_dir()),
         }
     }
@@ -322,6 +334,9 @@ fn collect_files(include_files: bool, roots: &Roots) -> (Vec<PackedFile>, usize)
         if let Some(dicts) = &roots.dicts {
             collect_into(dicts, "dicts", roots, &mut files, &mut skipped, true);
         }
+        if let Some(fonts) = &roots.fonts {
+            collect_into(fonts, "fonts", roots, &mut files, &mut skipped, true);
+        }
     }
     if let Some(themes) = &roots.themes {
         collect_into(themes, "themes", roots, &mut files, &mut skipped, true);
@@ -391,6 +406,7 @@ fn collect_into(
 fn is_own_dir(path: &Path, roots: &Roots) -> bool {
     path == roots.backups
         || path == roots.dicts.as_deref().unwrap_or(Path::new(""))
+        || path == roots.fonts.as_deref().unwrap_or(Path::new(""))
         || path == roots.themes.as_deref().unwrap_or(Path::new(""))
         || [
             roots.data.join("logs"),
@@ -531,9 +547,11 @@ mod tests {
         let library = data.join("books");
         let dicts = data.join("dicts");
         let themes = dir.join("config").join("themes");
+        let fonts = data.join("fonts");
         std::fs::create_dir_all(&library).unwrap();
         std::fs::create_dir_all(&dicts).unwrap();
         std::fs::create_dir_all(&themes).unwrap();
+        std::fs::create_dir_all(&fonts).unwrap();
         let mut config = Config {
             library: Library {
                 dir: library.to_string_lossy().into_owned(),
@@ -553,6 +571,7 @@ mod tests {
             data,
             library: Some(library),
             dicts: Some(dicts),
+            fonts: Some(fonts),
             themes: Some(themes),
         };
         (roots, config)
@@ -598,6 +617,12 @@ mod tests {
         )
         .unwrap();
         std::fs::write(roots.dicts.as_ref().unwrap().join("cedict.ifo"), b"ifo").unwrap();
+        std::fs::create_dir_all(roots.fonts.as_ref().unwrap().join("font-a")).unwrap();
+        std::fs::write(
+            roots.fonts.as_ref().unwrap().join("font-a/font.ttf"),
+            b"font",
+        )
+        .unwrap();
         std::fs::write(roots.themes.as_ref().unwrap().join("mine.json"), b"{}").unwrap();
 
         let store = Store::open_at(&roots.data.join("folio.db")).unwrap();
@@ -619,6 +644,7 @@ mod tests {
             "folio.db",
             "library/书.epub",
             "dicts/cedict.ifo",
+            "fonts/font-a/font.ttf",
             "themes/mine.json",
         ] {
             assert!(
@@ -637,8 +663,8 @@ mod tests {
         let manifest = manifest_of(&created.path);
         assert_eq!(manifest.format, FORMAT);
         assert!(manifest.include_files);
-        // 书、词典、主题各一本；库与配置不算在 `files` 里。
-        assert_eq!(manifest.files, 3, "{manifest:?}");
+        // 书、词典、字体、主题各一份；库与配置不算在 files 里。
+        assert_eq!(manifest.files, 4, "{manifest:?}");
 
         // 库是 `VACUUM INTO` 交出来的一致副本：拿它单独开一次也要能开。
         let tmp = dir.path().join("extract");

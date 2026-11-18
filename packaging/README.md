@@ -28,7 +28,7 @@ magick "$SRC" -define icon:auto-resize=16,24,32,48,64,128,256 packaging/icons/fo
 |---|---|---|
 | Linux `.tar.xz` | `folio.desktop` + `icons/folio.png` | `share/applications/`、`share/icons/hicolor/192x192/apps/folio.png` |
 | Linux `.deb` / `.rpm` | 同上，加 `control.template` / `folio.spec` | 同上；`/usr/bin/folio` 是二进制 |
-| Windows | `icons/folio.ico` + `windows/folio.nsi` | exe 的图标资源、安装器与卸载表 |
+| Windows | `icons/folio.ico` + `windows/folio.rc` + `windows/folio.nsi` | exe 的图标资源（`build.rs` 链接期嵌入）、安装器与卸载表 |
 | macOS | `icons/folio.png` | `Folio.app/Contents/Resources/folio.png` |
 | Android | **不用这里任何一样** —— 自适应图标是 `crates/folio-app/android/app/src/main/res/` 那几份 vector XML | — |
 

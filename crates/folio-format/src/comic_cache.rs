@@ -306,28 +306,34 @@ fn touch(dir: &Path, path: &Path) {
 /// 7z：`decompress_file_with_extract_fn` 给的回调是「一条条目 + 一个读它的流」。
 fn extract_sevenz(path: &Path, dir: &Path) -> std::io::Result<u64> {
     let mut written = 0u64;
+    let budget = crate::limits::OutputBudget::default();
+    let mut entries = 0usize;
     // 回调里要累加字节，而它是个 `FnMut`，所以把计数放在外面按引用借进去。
     let mut count = |bytes: u64| written += bytes;
     sevenz_rust2::decompress_file_with_extract_fn(path, dir, |entry, reader, _dest| {
+        entries += 1;
+        if entries > crate::limits::MAX_ARCHIVE_ENTRIES {
+            return Err(crate::limits::exceeded().into());
+        }
         if entry.is_directory() {
             return Ok(true);
         }
         let name = entry.name();
         let Some(relative) = sanitize_relative(name) else {
-            drain(reader)?;
+            std::io::copy(reader, &mut budget.writer(std::io::sink()))?;
             return Ok(true);
         };
         let href = relative.to_string_lossy().replace('\\', "/");
         if !kept(&href) {
             // 不要的条目也要把这一条读干净，否则同一 solid 块里的下一条会对不齐。
-            drain(reader)?;
+            std::io::copy(reader, &mut budget.writer(std::io::sink()))?;
             return Ok(true);
         }
         let target = dir.join(&relative);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut file = std::fs::File::create(&target)?;
+        let mut file = budget.writer(std::fs::File::create(&target)?);
         let bytes = std::io::copy(reader, &mut file)?;
         count(bytes);
         Ok(true)
@@ -339,25 +345,34 @@ fn extract_sevenz(path: &Path, dir: &Path) -> std::io::Result<u64> {
 /// RAR：`rars` 的 `extract_to` 只要一个「这条写到哪儿」的回调。
 fn extract_rar(path: &Path, dir: &Path) -> std::result::Result<(), rars::Error> {
     let archive = rars::ArchiveReader::read_path(path)?;
+    if archive
+        .members()
+        .take(crate::limits::MAX_ARCHIVE_ENTRIES + 1)
+        .count()
+        > crate::limits::MAX_ARCHIVE_ENTRIES
+    {
+        return Err(crate::limits::exceeded().into());
+    }
+    let budget = crate::limits::OutputBudget::default();
     archive.extract_to(None, |meta| {
         if meta.is_directory {
-            return Ok(Box::new(std::io::sink()));
+            return Ok(Box::new(budget.writer(std::io::sink())));
         }
         let Ok(name) = std::str::from_utf8(&meta.name) else {
-            return Ok(Box::new(std::io::sink()));
+            return Ok(Box::new(budget.writer(std::io::sink())));
         };
         let Some(relative) = sanitize_relative(name) else {
-            return Ok(Box::new(std::io::sink()));
+            return Ok(Box::new(budget.writer(std::io::sink())));
         };
         let href = relative.to_string_lossy().replace('\\', "/");
         if !kept(&href) {
-            return Ok(Box::new(std::io::sink()));
+            return Ok(Box::new(budget.writer(std::io::sink())));
         }
         let target = dir.join(&relative);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Ok(Box::new(std::fs::File::create(target)?))
+        Ok(Box::new(budget.writer(std::fs::File::create(target)?)))
     })
 }
 
@@ -366,7 +381,11 @@ fn extract_tar(path: &Path, dir: &Path) -> std::io::Result<u64> {
     let file = std::fs::File::open(path)?;
     let mut archive = tar::Archive::new(file);
     let mut written = 0u64;
-    for entry in archive.entries()? {
+    let budget = crate::limits::OutputBudget::default();
+    for (index, entry) in archive.entries()?.enumerate() {
+        if index >= crate::limits::MAX_ARCHIVE_ENTRIES {
+            return Err(crate::limits::exceeded());
+        }
         let mut entry = entry?;
         if !entry.header().entry_type().is_file() {
             continue;
@@ -384,7 +403,7 @@ fn extract_tar(path: &Path, dir: &Path) -> std::io::Result<u64> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let mut out = std::fs::File::create(target)?;
+        let mut out = budget.writer(std::fs::File::create(target)?);
         written += std::io::copy(&mut entry, &mut out)?;
     }
     Ok(written)
@@ -480,7 +499,7 @@ pub(crate) fn read_page(dir: &Path, href: &str) -> Option<Vec<u8>> {
     std::fs::read(dir.join(relative)).ok()
 }
 
-/// 7z 条目名 → 安全的相对路径。绝对路径、`..`、盘符一律拒绝。
+/// 归档名 → 宿主的安全相对路径。href 的 `/` 规范化由调用方负责。
 fn sanitize_relative(name: &str) -> Option<PathBuf> {
     if name.starts_with(['/', '\\']) {
         return None;
@@ -490,16 +509,18 @@ fn sanitize_relative(name: &str) -> Option<PathBuf> {
         if part.is_empty() || part == "." {
             continue;
         }
-        if part == ".." || part.contains(':') {
+        // Win32 会折叠尾部空格/点；不能把 ".. " 等组件当普通子目录。
+        if part == ".."
+            || part.ends_with(['.', ' '])
+            || part
+                .chars()
+                .any(|c| c.is_control() || matches!(c, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        {
             return None;
         }
         out.push(part);
     }
     (!out.as_os_str().is_empty()).then_some(out)
-}
-
-fn drain(reader: &mut dyn std::io::Read) -> std::io::Result<()> {
-    std::io::copy(reader, &mut std::io::sink()).map(|_| ())
 }
 
 fn file_name(path: &Path) -> String {
@@ -552,18 +573,48 @@ mod tests {
 
     #[test]
     fn path_traversal_is_rejected() {
-        assert!(sanitize_relative("../../etc/passwd").is_none());
-        assert!(sanitize_relative("/etc/passwd").is_none());
-        assert!(sanitize_relative("C:/x.png").is_none());
-        assert_eq!(
-            sanitize_relative("pages/../a.png"),
-            None,
-            "相对路径里的 .. 也拒"
-        );
-        assert_eq!(
-            sanitize_relative("pages/a.png").unwrap().to_string_lossy(),
-            "pages/a.png"
-        );
+        for name in [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "C:/x.png",
+            "C:x.png",
+            "pages/../a.png",
+            "pages\\..\\a.png",
+            "\\\\server\\share\\a.png",
+            "\\a.png",
+            "pages/.. /a.png",
+            "pages/.../a.png",
+            "pages/a.png ",
+            "pages/\0a.png",
+            "pages/a.png:stream",
+        ] {
+            assert!(sanitize_relative(name).is_none(), "不得接受 {name:?}");
+        }
+        for name in ["pages/a.png", "pages\\a.png", "./pages//a.png"] {
+            assert_eq!(
+                sanitize_relative(name).unwrap(),
+                std::path::Path::new("pages/a.png")
+            );
+        }
+    }
+
+    #[test]
+    fn archive_paths_join_on_the_host_without_changing_slash_hrefs() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(cache.join("pages")).unwrap();
+        std::fs::write(cache.join("pages/a.png"), b"inside").unwrap();
+        std::fs::write(temp.path().join("outside.png"), b"outside").unwrap();
+        assert_eq!(pages(&cache), ["pages/a.png"]);
+        for href in ["pages/a.png", "pages\\a.png"] {
+            assert_eq!(
+                read_page(&cache, href).as_deref(),
+                Some(b"inside".as_slice())
+            );
+        }
+        for href in ["../outside.png", "..\\outside.png", ".. /outside.png"] {
+            assert!(read_page(&cache, href).is_none());
+        }
     }
 
     #[test]

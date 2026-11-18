@@ -20,16 +20,7 @@ use super::surface::floating;
 use super::{BAR_HEIGHT, NAV_MARGIN};
 use crate::ui::services::l10n::{tf, tr};
 
-/// 多选工具栏能做的一件事。分组那一档带组 id：菜单里每一条组各是一个动作。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum SelectionAction {
-    Exit,
-    ToggleAll,
-    Group(i64),
-    Info,
-    Upload,
-    Delete,
-}
+use crate::ui::foundation::navigation::SelectionAction;
 
 /// 画这条工具栏。`groups` 是当前库里的组；为空时「加入分组」按不动（读者先去单本菜单
 /// 里建组，比在这里摆一条空的无处可去更好）。**按值收**而不是切片：那条菜单闭包要把

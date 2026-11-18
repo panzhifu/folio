@@ -23,8 +23,8 @@ use folio_core::content::format::novel::rules::MatchKind;
 use folio_core::infra::config::Mode;
 use folio_core::net::ai::{AiError, Ask};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::NavStackState;
 use gpui_kit::base::motion::{Spring, spring};
-use gpui_kit::base::{NavMotion, NavStackState};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::{Popover, PopoverState};
@@ -37,11 +37,11 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AbsoluteLength, Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, ClickEvent,
-    Context, DefiniteLength, Entity, FocusHandle, Font, FontWeight, HighlightStyle, Hsla, Image,
-    InteractiveElement, InteractiveText, IntoElement, ObjectFit, ParentElement, Pixels, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, StyledImage as _, StyledText,
-    Subscription, TestSupportExt as _, TextRun, TextStyle, WeakEntity, Window, WrappedLine, div,
-    img, point, px,
+    Context, DefiniteLength, Entity, EventEmitter, FocusHandle, Font, FontWeight, HighlightStyle,
+    Hsla, Image, InteractiveElement, InteractiveText, IntoElement, ObjectFit, ParentElement,
+    Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    StyledImage as _, StyledText, Subscription, TestSupportExt as _, TextRun, TextStyle,
+    WeakEntity, Window, WrappedLine, div, img, point, px,
 };
 
 use crate::ui::features::reader::components::image_viewer::{self, ImageViewer};
@@ -55,8 +55,7 @@ use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::model::speech::split_sentences;
 use crate::ui::features::reader::model::translation::{self, TranslationStatus};
 use crate::ui::features::reader::view::regions::ProgressRow;
-use crate::ui::features::settings::CompactSettings;
-use crate::ui::features::shelf::AUTHOR_SEP;
+use crate::ui::foundation::book_label::AUTHOR_SEP;
 use crate::ui::foundation::images::cover_image;
 use crate::ui::foundation::reading_theme;
 use crate::ui::platform;
@@ -87,8 +86,6 @@ fn body_tap_zone(
         zone(x, width, rtl)
     }
 }
-use crate::ui::shell::AppShell;
-use crate::ui::shell::navigation::SizeClass;
 
 /// 脚注小纸片的最宽那一条：内容的 `max_w`，短的一条按自己实际宽居中在标记上方。
 const FOOTNOTE_CARD_W: Pixels = px(300.);
@@ -221,7 +218,6 @@ pub struct ReadingPage {
     pub(in crate::ui::features::reader) stack: WeakEntity<NavStackState>,
     /// 拿着这一层的外壳（同样是弱句柄：外壳攥着这一层，这一层不该反过来攥着外壳）。
     /// 顶栏那颗返回要请它收起这一层 —— 收层是外壳的事，正文这一屏不知道自己盖在谁上面。
-    pub(in crate::ui::features::reader) shell: WeakEntity<AppShell>,
     /// 浮层（顶栏与底栏这一层）的开合。见 [`chrome`]。
     pub(in crate::ui::features::reader) chrome: Chrome,
     /// 自动阅读工具栏那条速度滑条。与底栏进度条同理：`Slider` 是有状态组件，句柄必须
@@ -274,11 +270,18 @@ pub struct ReadingPage {
     pub(in crate::ui::features::reader) _watches: Vec<Subscription>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadingPageEvent {
+    Closed,
+    OpenSettings,
+}
+
+impl EventEmitter<ReadingPageEvent> for ReadingPage {}
+
 impl ReadingPage {
     pub fn new(
         reader: Entity<ReaderSession>,
         stack: WeakEntity<NavStackState>,
-        shell: WeakEntity<AppShell>,
         cx: &mut Context<Self>,
     ) -> Self {
         let progress = cx.new(|_| {
@@ -297,14 +300,16 @@ impl ReadingPage {
         // （[`regions::ProgressRow`]），手指写到哪、重画到哪一行为止，整页的元素树
         // 不跟着拖动重建。
         let mut watches = Vec::new();
-        watches.push(cx.subscribe(&progress, |this: &mut Self, _, event, cx| match event {
-            SliderEvent::Change(_) => this.progress_dragging = true,
-            SliderEvent::Release(value) => {
-                this.progress_dragging = false;
-                this.reader
-                    .update(cx, |reader, cx| reader.seek_ratio(value.end(), cx));
-            }
-        }));
+        watches.push(
+            cx.subscribe(&progress, |this: &mut Self, _, event, cx| match event {
+                SliderEvent::Change(_) => this.progress_dragging = true,
+                SliderEvent::Release(value) => {
+                    this.progress_dragging = false;
+                    this.reader
+                        .update(cx, |reader, cx| reader.seek_ratio(value.end(), cx));
+                }
+            }),
+        );
         // 进度行是自己的视图：拖动中的跟手重画归它（regions.rs 的 ProgressRow），
         // 整页不跟着手指重建。弱句柄在 cx.new 之前取 —— 进去之后 cx 已经是行自己的了。
         let page = cx.weak_entity();
@@ -368,7 +373,6 @@ impl ReadingPage {
             top_inset: 0.0,
             bottom_inset: 0.0,
             stack,
-            shell,
             chrome: Chrome::default(),
             auto_speed,
             progress,
@@ -605,21 +609,10 @@ impl ReadingPage {
         self.reader.read(cx).page_count()
     }
 
-    /// 顶栏那颗返回。正文是这一层那条子栈的栈底，弹不动 —— 该请外壳把整层收走。
-    ///
-    /// 从正文压进来的那一屏（设置）自己带返回，它压着的时候这一屏根本看不见，所以这里
-    /// 不必先问子栈。
-    ///
-    /// 收尾分两步走是因为**这一句跑在本页自己的更新里**（顶栏那一下点击）：
-    /// `page.update(|this| this.pop())` 已经在借着自己了，再请外壳 `update` 一次本页
-    /// （`close_reading` 干的正是那件事）就是二次可变借用，直接 panic —— release 下
-    /// `panic = abort`，读者看到的「点返回直奔桌面」就是它。所以本页该做的事自己做，
-    /// 外壳那边只翻退出那一格（[`AppShell::dismiss_reading`]）。
+    /// 先保存本页，再向外壳请求退场，避免重入更新同一实体。
     pub(crate) fn pop(&mut self, cx: &mut Context<Self>) {
         self.close(cx);
-        if let Some(shell) = self.shell.upgrade() {
-            shell.update(cx, |shell, cx| shell.dismiss_reading(cx));
-        }
+        cx.emit(ReadingPageEvent::Closed);
     }
 
     /// 正文上的一击：先让选中说话（拖选松手的豁免、选中的清除/菜单回开），
@@ -1925,22 +1918,8 @@ impl ReadingPage {
         });
     }
 
-    /// 往正文这条子栈里再压一屏钻入式设置 —— 现在只剩一个入口：目录那屏右上角「⋯」里
-    /// 那颗「目录样式」（阅读设置自己那张卡片已经装了行距、段距、版心、字体家族，
-    /// 底栏不再有「更多设置」那一格）。
-    ///
-    /// 手机上没有独立设置窗口（两栏的整页字段塞不进这块小屏），压进栈的这屏吃的是
-    /// 与桌面同一份页面规格。压进栈而不是切目的地：系统返回 pop 它就回到刚才那
-    /// 一行字，阅读位置一点没动。桌面同样走这条 —— 少一个只在一端存在的窗口，
-    /// 就少一处「这功能那端没有」。
-    ///
-    /// 压的是**这一层自己的**那条栈而不是架面那条：这一层盖在整窗上，架面的栈在它下面，
-    /// 压那边的话这一屏会被自己盖住。
     pub(in crate::ui::features::reader) fn open_settings(&mut self, cx: &mut Context<Self>) {
-        let settings = cx.new(CompactSettings::new);
-        let _ = self.stack.update(cx, |state, cx| {
-            state.push(settings, NavMotion::Animated, cx)
-        });
+        cx.emit(ReadingPageEvent::OpenSettings);
     }
 
     pub(in crate::ui::features::reader) fn advance(
@@ -2233,8 +2212,6 @@ impl Render for ReadingPage {
         // 目录与阅读设置两块卡片，两种表面（手机的底部弹层、平板与桌面的左侧抽屉）都
         // **压在正文之上**：抽屉不再占宽，正文因此一寸不让，点字照常选得中 ——
         // 遮罩会先把那一击收掉。
-        let size = SizeClass::of(window);
-        let wide = !size.is_compact();
         let toc_open = self.toc.read(cx).is_open(cx);
         let settings_open = self.settings.read(cx).is_open(cx);
         let layers_up = self.chrome.is_open()
@@ -2313,7 +2290,7 @@ impl Render for ReadingPage {
             // 顶栏在目录那一层开着时不在这里画 —— 抬到遮罩之上去了（见下面
             // `toc_up` 那一段）。底栏照旧压在遮罩下。
             .when(self.chrome.is_open() && !toc_up, |this| {
-                this.child(self.top_bar(wide, cx)).child(if auto_on {
+                this.child(self.top_bar(cx)).child(if auto_on {
                     self.auto_bar(cx)
                 } else {
                     self.bottom_bar(cx)
@@ -2355,7 +2332,7 @@ impl Render for ReadingPage {
                     .top_0()
                     .left_0()
                     .right_0()
-                    .child(self.top_bar(wide, cx)),
+                    .child(self.top_bar(cx)),
             );
         }
         // 脚注弹层压在目录之上、图片查看器之下：它是「从正文里抬起来的一张小纸」，
@@ -3061,18 +3038,14 @@ mod tests {
     use folio_core::{Appearance, BookSettings, Config};
     use gpui_kit::base::NavStackState;
     use gpui_kit::component::Root;
-    use gpui_kit::{
-        AnyWindowHandle, AppContext as _, Entity, TestAppContext, WeakEntity, px, size,
-    };
+    use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
     /// 一扇**不带书**的阅读页：只用到视图自己的状态（日间/夜间、自动前进那条工具栏），
     /// 不碰排版。`ReaderSession::boot` 给的就是「没有书」的那一屏。
     fn a_reading_page(cx: &mut TestAppContext) -> Entity<ReadingPage> {
         let reader = cx.update(|cx| cx.new(|cx| ReaderSession::boot(cx)));
         let stack = cx.update(|cx| cx.new(|_| NavStackState::new()));
-        cx.update(|cx| {
-            cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), WeakEntity::new_invalid(), cx))
-        })
+        cx.update(|cx| cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), cx)))
     }
 
     /// 列宽：手机窄、平板宽；宽过 [`LISTEN_TEXT_W`] 之后不再增长（折点不跟着屏幕无限变）。

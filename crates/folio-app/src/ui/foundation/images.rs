@@ -1,15 +1,9 @@
 //! 书籍图片索引：把 `<img src>` 解析成容器路径，并按 href 交出一张图的**取字节方式**。
 //!
-//! 分三层是为了少复制：`BookImages` 在打开一本书时建一次，每张图只存**元数据**
-//! （href、媒体类型、固有尺寸）与一个按需读字节的来源 [`ByteSource`]；
-//! **要画时才产出一条 [`DecodeRequest`]**（怎么读字节、要不要缩小、按什么格式解），
-//! 真去读去解的那一趟由 `reader::image_atlas` 在**后台线程**上跑；`ChapterImages`
-//! 只按当前章的目录解析相对路径，换章时重建，成本是一张 `HashMap` 的键拷贝。
-//!
-//! 字节不随 `FlowDoc` 常驻内存，也不进数据库 —— 对应 KOReader 的
-//! [`NodeImageProxy`]：只持 `refName` 与宽高，`Decode()` 时才 `container->OpenStream`
-//! 现取（`reference/koreader/base/thirdparty/kpvcrlib/crengine/crengine/src/lvtinydom.cpp:22178`）。
-//! 解出来的**像素**同样不常驻：那一份现在有人回收了（`reader::image_atlas`）。
+//! `BookImages` 每本建一次，只存图片元数据与按需取字节的 [`ByteSource`]；
+//! `ChapterImages` 按当前章目录解析相对路径，换章时重建。
+//! 绘制时产出 [`DecodeRequest`]，由图集在后台读取、解码并负责像素回收。
+//! 图片字节不随 `FlowDoc` 常驻内存，也不进数据库。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,12 +18,8 @@ use folio_core::layout::{ImageProvider, ResolvedImage};
 use gpui_kit::RenderImage;
 use gpui_kit::{Image, ImageFormat};
 
-/// 容器绝对路径 → 图片字节。
-///
-/// 拿 `Arc<dyn Fn>` 而不是一个具体类型，是为了让「真实容器」与「测试里的内存表」
-/// 共用一个入口：[`DecodeRequest::decode`] 只管问要字节，不问它从哪来。
-///
-/// `Send + Sync` 是硬要求：排版线程要它，`reader::image_atlas` 那趟后台解码更要它。
+/// 容器绝对路径 → 图片字节；真实容器与内存测试来源共用此入口。
+/// `Send + Sync` 供排版与后台解码线程使用，来源不参与解码策略。
 pub type ByteSource = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
 /// 一张图都不来的来源（Markdown / TXT，或「容器丢掉了」那条降级路）。
@@ -38,14 +28,8 @@ pub fn no_images() -> ByteSource {
     Arc::new(|_href| None)
 }
 
-/// 把一本书接成字节来源：问 [`Document::image_bytes`] 要那一条。
-///
-/// 字节从哪来（解 ZIP、单文件、书库、什么都没有）是 `Document` 的事，这一层只转发 ——
-/// 所以界面里不再有「按格式再查一次 provider」那一步（那正是 `Format` 渗进排版链的入口）。
-///
-/// 每次调用重开容器是刻意的，跟 KOReader 对齐（`NodeImageProxy::Decode()` 也是重开）。
-/// 「一张图在屏幕上这段时间只读一次」现在由图集那一层保证（`reader::image_atlas`），
-/// 不在这里 —— 这里连字节都不碰。
+/// 转发 [`Document::image_bytes`]，不在界面判断格式或缓存字节。
+/// 按需重开容器，可见期间的重复解码由图集缓存避免。
 pub fn document_source(doc: Arc<dyn Document>) -> ByteSource {
     Arc::new(move |href| doc.image_bytes(href))
 }
@@ -266,49 +250,51 @@ impl ImageEntry {
         let fits = self.fits_the_device_limits();
         let loader: Arc<dyn Fn() -> Option<Arc<Image>> + Send + Sync> = Arc::new(move || {
             let raw = bytes(&href)?;
+            if raw.len() as u64 > folio_core::content::format::limits::MAX_ENTRY_BYTES {
+                return None;
+            }
             // SVG 走栅格化，别交给 `image` crate（它不认 SVG，`guess_media_type` 会回
             // None，最后退回按 PNG 试一把 → 静默空白）。判定看字节头优先，其次看
             // manifest 声明（真书里两边都可能只对一边）。
             let is_svg =
                 folio_core::content::format::svg::looks_like_svg(&raw) || mime_is_svg(&media_type);
             let (data, format) = if is_svg {
-                match folio_core::content::format::svg::rasterize(
+                let (png, _) = folio_core::content::format::svg::rasterize(
                     &raw,
                     Some((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE)),
-                ) {
-                    Some((png, _)) => {
-                        let fmt = guess_media_type(&png)
-                            .and_then(format_of_mime)
-                            .unwrap_or(ImageFormat::Png);
-                        (png, fmt)
-                    }
-                    // 栅格化不了（坏 SVG、超大）：维持原样，大概率不显示 ——
-                    // 与「这张图本来就没有」同一个表现。
-                    None => (raw, ImageFormat::Png),
+                )?;
+                if !raster_dimensions_allowed(&png) {
+                    return None;
                 }
-            } else if fits {
-                // 固有尺寸是索引里就有的、也没超过上限 —— **一个像素都不必重编**。
-                // 这一格原来无条件走 `shrink_image`，而它是「解码 + 重编码」：
-                // 真机实测一张 1000×1386 的插图要 8–38 ms（`plans/阅读管线.md` §十 的
-                // 判据：这一步能省就省）。挪到后台线程之后它不再卡帧，但仍然是白花的钱。
-                //
-                // EXIF 方向不会因此丢：gpui 自己那条解码路
-                // （`decode_static_image_from_decoder`）同样会应用方向，两边口径一致。
-                let fmt = guess_media_type(&raw)
-                    .or(Some(media_type.as_str()))
+                let fmt = guess_media_type(&png)
                     .and_then(format_of_mime)
                     .unwrap_or(ImageFormat::Png);
-                (raw, fmt)
+                (png, fmt)
             } else {
-                let (data, declared) = match shrink_image(&raw, MAX_IMAGE_EDGE) {
-                    Some((small, mime)) => (small, mime),
-                    None => (raw, media_type.as_str()),
-                };
-                let fmt = guess_media_type(&data)
-                    .or(Some(declared))
-                    .and_then(format_of_mime)
-                    .unwrap_or(ImageFormat::Png);
-                (data, fmt)
+                if !raster_dimensions_allowed(&raw) {
+                    return None;
+                }
+                if fits {
+                    // 固有尺寸是索引里就有的、也没超过上限 —— **一个像素都不必重编**。
+                    // 这一格原来无条件走 `shrink_image`，而它是「解码 + 重编码」：
+                    // 真机实测一张 1000×1386 的插图要 8–38 ms（`plans/阅读管线.md` §十 的
+                    // 判据：这一步能省就省）。挪到后台线程之后它不再卡帧，但仍然是白花的钱。
+                    //
+                    // EXIF 方向不会因此丢：gpui 自己那条解码路
+                    // （`decode_static_image_from_decoder`）同样会应用方向，两边口径一致。
+                    let fmt = guess_media_type(&raw)
+                        .or(Some(media_type.as_str()))
+                        .and_then(format_of_mime)
+                        .unwrap_or(ImageFormat::Png);
+                    (raw, fmt)
+                } else {
+                    let (data, declared) = shrink_image(&raw, MAX_IMAGE_EDGE)?;
+                    let fmt = guess_media_type(&data)
+                        .or(Some(declared))
+                        .and_then(format_of_mime)
+                        .unwrap_or(ImageFormat::Png);
+                    (data, fmt)
+                }
             };
             tracing::info!(
                 "图集: {} 交出去 {} 字节，按 {:?} 解",
@@ -327,6 +313,17 @@ impl ImageEntry {
             priority: folio_core::Priority::Interactive,
         }
     }
+}
+
+fn raster_dimensions_allowed(bytes: &[u8]) -> bool {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok();
+    reader
+        .and_then(|reader| reader.into_dimensions().ok())
+        .is_some_and(|(width, height)| {
+            folio_core::content::format::limits::image_dimensions_allowed(width, height)
+        })
 }
 
 /// 一本书的全部图片，按容器路径索引。
@@ -829,7 +826,7 @@ mod tests {
         use folio_core::content::format::ImageRes;
         use gpui_kit::ImageFormat;
 
-        use crate::ui::foundation::images::{BookImages, ChapterImages};
+        use crate::ui::foundation::images::{BookImages, ChapterImages, TINY_PNG};
 
         let book = BookImages::new(
             &[ImageRes {
@@ -837,12 +834,11 @@ mod tests {
                 source: "OEBPS/Images/pic.png".into(),
                 // 故意写错：这正是真书里会出现的几种。
                 media_type: "image/jpg".into(),
-                width: 1,
-                height: 1,
+                width: 2,
+                height: 2,
             }],
-            // 字节不由 `BookImages` 持有，而是从这条来源现读 —— 测试里用一个内存表
-            // 代替容器。
-            std::sync::Arc::new(|_href: &str| Some(PNG.to_vec())),
+            // 来源提供完整的 2×2 PNG，只有格式签名的短头无法通过真实尺寸校验。
+            std::sync::Arc::new(|_href: &str| Some(TINY_PNG.to_vec())),
         );
         let chapter = ChapterImages::new(std::sync::Arc::new(book), "OEBPS/Text/chap.xhtml");
         let image = chapter

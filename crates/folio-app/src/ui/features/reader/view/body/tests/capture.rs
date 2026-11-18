@@ -6,7 +6,7 @@ use super::harness::{
 use crate::ui::features::reader::model::chrome::{PageMode, Reserve};
 use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::NAV_TRANSITION;
+use crate::ui::services::motion::NAV_TRANSITION;
 use folio_core::ChapterExt;
 use folio_core::content::document::Document;
 use folio_core::{Chapter, Content, FlowDoc, Locator, PageTurn};

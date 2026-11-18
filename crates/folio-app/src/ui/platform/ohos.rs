@@ -33,6 +33,9 @@ pub extern "C" fn ohos_napi_init(
             gpui_kit::assets::AllAssets,
             Box::new(|cx: &mut App| {
                 // 与 iOS 同一条：在模块初始化回调里读配置 + 装日志，再把配置交给 `boot`。
+                if !super::restore::activate() {
+                    return;
+                }
                 let (resolved, _) = folio_core::infra::logging::init_from_config(None);
                 super::boot(cx, resolved);
             }),

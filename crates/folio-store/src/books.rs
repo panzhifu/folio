@@ -1,15 +1,8 @@
-//! 书目与书架：入库、查询、删除，以及「读到哪儿了」「到过哪些章」和分组。
-//!
-//! 书的**身份**是内容哈希（`books.content_hash`，v12 起，见 `plans/导入管线.md` §六），
-//! 判重走 [`Store::book_by_hash`]；`books.path` 从那一刻起只回答「副本躺在哪儿」，
-//! 查与删仍然按它走，但它不再是「是不是同一本书」的判据。
-//! 这一列此刻**可为空**（懒补：老行由补齐作业逐本填），所以「按路径认」那条路还要留着
-//! —— [`Store::book_by_path`] 现在的用处是「这条副本路径被哪一行认领着」，不是判存在性。
-//!
-//! 分组查询（[`Store::shelf_grouped`] / [`Store::collection_groups`]）也住在这里：
-//! 它们不是另一张表的事，只是同一个书架换一种摆法。
+//! 书目、阅读位置与书架查询。内容哈希是书的身份，路径只表示副本位置。
+//! 老行的 content_hash 可空，由补齐作业填充；按路径查询仍用于确认路径归属。
 
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -22,10 +15,7 @@ use folio_model::group::{GroupBy, ShelfGroup, UNGROUPED, group_shelf};
 use folio_model::position::Locator;
 use folio_model::reading::BookSettings;
 
-/// 多值的那几格（作者、贡献者、主题词）在库里是**换行拼接**的一列。
-///
-/// 不另引一种 JSON 编码：同一件事两种写法，早晚长出两种读法。`join("\n")` 与
-/// `lines()` 就是这一列的全部规则，写侧与读侧各一处。
+/// 作者、贡献者、主题词以换行分隔，与 [`split_list`] 共用编码。
 pub(super) fn join_list(items: &[String]) -> String {
     items.join("\n")
 }
@@ -104,22 +94,8 @@ fn mtime_of(path: &Path) -> i64 {
 /// 集合那几个查询要按同一列序取 `BookRow`，所以它对 `store` 内可见。
 pub(super) const BOOK_COLUMNS: &str = "id, path, title, authors, format, size, last_opened_at";
 
-/// 书架投影：书目那几列，加上算已读比例要的四格。
-///
-/// 后四格（下标 8–11）都可空，因为「算不出来」是常态而不是异常：
-///
-/// - `total_chars` —— 全书规范化字数（`SUM` 跳过 NULL）。
-/// - `unknown_chapters` —— 有几章的字数还没算过。**有它就整个不报进度**：
-///   `SUM` 跳过 NULL 会让分母偏小、百分比偏大，而那种错是安静的
-///   （读者读到一半进度条已经满了）。
-/// - `read_chars` —— 读者当前位置**之前**各章的字数之和。
-/// - `unknown_read` —— 那些章里有几章字数不知道（理由同上）。
-///
-/// SQL 只读 `json_extract(positions.locator_json, '$.chapter')` **一个整数**，
-/// 用来跟 `chapters.idx` 比大小；位置串本身仍由 Rust 侧的 [`Locator`] 反序列化
-/// （见 `progress_of`）。之所以敢在 SQL 里碰 JSON，是因为这里把 `chapter` 当
-/// **不透明的位置指示**用：这个键从 v1 的位置格式起就没改过，改动它本来就要
-/// 升 `LOCATOR_FORMAT_VERSION` 并走迁移，那时这里会跟着一起改（有测试盯着）。
+/// 书架投影附带全书/已读字数及未知字数的章数；有未知章时不显示进度。
+/// SQL 只读位置 JSON 的 chapter 整数，格式变更须与 Locator 迁移同步。
 const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, books.format, \
      books.size, books.last_opened_at, \
      (SELECT SUM(char_len) FROM chapters c WHERE c.book_id = books.id) AS total_chars, \
@@ -133,48 +109,12 @@ const SHELF_COLUMNS: &str = "books.id, books.path, books.title, books.authors, b
          AND c.idx < json_extract(positions.locator_json, '$.chapter')) AS unknown_read, \
      positions.locator_json, books.cover_hash, books.cover_mime";
 
-/// 书架那套排序，几处查询共用一条常量。
-///
-/// **「最近有动静」= `MAX(入库, 翻开)`**：刚导进来的书 `last_opened_at` 还是 NULL，
-/// 只按「翻开过没有」分层的话它会落在**所有**翻开过的书后面 —— 读者导完一本退回书架，
-/// 新书排在第二屏之外，看着就是「没导进来」。用两个时刻的最大值，导入本身就是一次
-/// 动静：新书排最前，翻开任意一本之后那本自然压过它。
-///
-/// **末尾的 `books.id DESC` 不是装饰，是必需的终结符**：入库时间戳是**秒**
-/// （`store::now`），一次批量导入的十几本会拿到同一个 `added_at`，于是 `added_at DESC`
-/// 全是并列 —— 并列之间 SQLite 不保证任何顺序，实测同一份数据能给出两种先后（本项目的
-/// `store::books::grouping::shelf_grouped_splits_by_author` 就是这么翻车的）。后果不只是
-/// 难看：整架那一片与某一组那一页在两次查询之间换序，读者的眼睛跟着丢一行。
-///
-/// 按 `id DESC` 收尾 = 「同秒入库的，后落库的在先」，与入库时间倒序同向。
-/// 中间那对 `last_opened_at IS NULL, last_opened_at DESC` 只在两个时刻**并列**时
-/// 说话（同一秒里又导入又翻开）：翻开过的那本在前，其余仍交给行号。
-///
-/// 整架、某一组那一页、还没进组的那一批三条查询共用这一条常量 —— 分组只回答「摆哪几本」，
-/// 「先看见哪一本」不归它管（见 [`Store::shelf_in_collection`]）。
+/// 整架与分组共用排序：最近导入或翻开的在前。
+/// 秒级时间可能并列，最终以 books.id DESC 保证稳定顺序。
 const SHELF_ORDER: &str = "ORDER BY MAX(added_at, COALESCE(last_opened_at, 0)) DESC, \
      last_opened_at IS NULL, last_opened_at DESC, books.id DESC";
 
-/// 一本副本所在的书库根 —— 用于拼 `covers/` 的位置。
-///
-/// 副本直接躺在书库根上（`plans/导入管线.md` 的施工标注里那条偏离：
-/// 文档写 `<书库>/books/<哈希名>`，实现是「根就是那一层 `books/`」），所以
-/// **父目录就是书库根**。唯一的例外是导入途中的那份：它在 `<书库>/.staging/` 底下，
-/// 父目录是 `.staging` —— 退回一层。
-///
-/// 为什么从路径推而不是让 `Store` 记住书库位置：书库位置是**读者确认过的目录**，
-/// 属于界面/配置那一层；`Store` 只是「这些行存在哪儿」，把它绑到一个绝对路径上
-/// 会让测试与「换书库位置」都变难。而副本路径本来就在库里那一行上。
-///
-/// 推出来的目录不存在时也不报错：`cover::resolve` 会回 `None`，读那一侧退回 BLOB。
-/// `stale_reason` 要的那几格：路径、大小、mtime、索引版本、封面哈希。
-///
-/// 与 [`CoverRow`] 同一个理由：七元组摊在 `query_row` 闭包里的话，
-/// 「哪一格是什么」只存在于 `SELECT` 那一行的顺序里，改列序时编译器帮不上忙。
-/// [`Store::stale_reason`] 一趟读回来的那几格。
-///
-/// 用带名字的字段而不是元组：这里有 3 个相邻的 `i64` 和 2 个相邻的 `Option<String>`，
-/// 排错一位不会有任何编译错误，只会让「文件换了」去看修改时间那一格。
+/// 索引校验需要的文件、版本、封面与分章规则状态。
 struct StaleRow {
     path: String,
     /// `books.format` 那一列，原样（库里是字符串，`Format::parse` 认不出来就当不依赖规则表）。
@@ -190,6 +130,7 @@ struct StaleRow {
     rules_hash: Option<String>,
 }
 
+/// 副本父目录是书库根；位于 .staging 的临时副本再向上取一层。
 pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
     let parent = copy_path.parent().unwrap_or(Path::new(""));
     if parent.file_name().and_then(|n| n.to_str()) == Some(".staging") {
@@ -202,12 +143,7 @@ pub fn book_root(copy_path: &Path) -> std::path::PathBuf {
 
 fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     let authors: String = r.get(3)?;
-    // 第 7 格是 `books.cover` 留下的空位（v16 删了那一列，字节改走 `covers/`），
-    // 所以下面这几格的**下标比看上去小一号**。改 `SHELF_COLUMNS` 时这几行要一起改 ——
-    // 这一层是位置对应的，编译器帮不上忙。
-    //
-    // 「算不出分母」与「没读过」都回 `None` —— 界面两者都该按「没有进度可显示」
-    // 处理，而不是画一条 0% 的进度条（那会让「还没算过」看起来像「一字未读」）。
+    // 下标须与 SHELF_COLUMNS 同步；未知分母与未读都不显示百分比。
     let total: Option<i64> = r.get(7)?;
     let unknown_chapters: i64 = r.get(8)?;
     let read_chars: Option<i64> = r.get(9)?;
@@ -233,10 +169,7 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
             .collect(),
         format: r.get(4)?,
         last_opened_at: r.get(6)?,
-        // 第 7 格（`books.cover`）已经不存在（v16：字节不能进库）。架上那一格
-        // 画的封面由 `book_card` 按 `cover_ref` 去 `covers/` 取文件，
-        // 所以 `ShelfItem.cover` 恒为 `None` —— 它留着只是为了让读的人看出
-        // 「封面不走这一条路」，而不是一个被忘掉的字段。
+        // 封面字节由 book_card 按 cover_ref 从 covers/ 读取。
         cover: None,
         progress: progress_of(
             total,
@@ -252,21 +185,8 @@ fn shelf_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShelfItem> {
     })
 }
 
-/// **已读比例**：`(前面各章字数之和 + 章内偏移) ÷ 全书总字数`。
-///
-/// 五个入参就是 [`SHELF_COLUMNS`] 那几格：全书字数、还没算过字数的章数、
-/// 当前位置之前各章的字数之和、那些章里有几章不知道、以及位置 JSON 原文。
-///
-/// 四种情况回 `None`，每一种都是「不该显示进度」而不是「显示 0%」：
-///
-/// - **没打开过**（没有位置行）—— 「从没打开」在界面上通常要画成另一种样子，
-///   所以这里不替界面决定，把判断权交出去。
-/// - **有章字数不知道** —— 无论不知道的那章在当前位置之前还是之后，分母都可能
-///   偏小、百分比偏大。这是安静的错误，所以宁可整本不报；`reindex` 一次就会补上。
-/// - **总字数为 0** —— 空书，除法没有意义。
-/// - **位置串读不出来** —— 坏 JSON、或来自更新版本的位置格式。
-///
-/// `offset` 要夹：它可能来自改过字号之前的旧串，越界不该让进度条冲出 100%。
+/// 已读比例 = (前面各章字数 + 章内偏移) / 全书字数，结果夹在 [0, 1]。
+/// 无位置、未知章字数、空书或位置 JSON 无效时返回 None，不冒充 0%。
 fn progress_of(
     total: Option<i64>,
     unknown_chapters: i64,
@@ -295,22 +215,42 @@ pub struct CoverBackfillRow {
     pub cover_mime: Option<String>,
 }
 
+/// 源文件探测的失败原因；这只是当前快照，不授权删除书库记录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceUnavailable {
+    Missing,
+    NotFile,
+    Unreadable(ErrorKind),
+}
+
+/// 一次只读检查发现的不可用书源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableSource {
+    pub book_id: i64,
+    pub reason: SourceUnavailable,
+}
+
+fn source_unavailable(path: &Path) -> Option<SourceUnavailable> {
+    let checked: std::io::Result<bool> = (|| {
+        if !std::fs::metadata(path)?.is_file() {
+            return Ok(false);
+        }
+        // metadata 成功不代表有读取权限；打开后再确认类型，且不读取正文。
+        std::fs::File::open(path)?
+            .metadata()
+            .map(|meta| meta.is_file())
+    })();
+    match checked {
+        Ok(true) => None,
+        Ok(false) => Some(SourceUnavailable::NotFile),
+        Err(error) if error.kind() == ErrorKind::NotFound => Some(SourceUnavailable::Missing),
+        Err(error) => Some(SourceUnavailable::Unreadable(error.kind())),
+    }
+}
+
 impl Store {
-    /// 落一行书目：同一**路径**重复入库是更新，不是第二本书。
-    ///
-    /// 「这本书是不是已经在了」不由这里判——管线在落地之前就按内容哈希判过重了
-    /// （[`Store::book_by_hash`]）。这里只管把那一行写成现在这个样子。
-    ///
-    /// 会走到 `ON CONFLICT` 臂的只有**重扫**那一条路（[`folio_core::ingest::import::reindex`]）：
-    /// 新导入按哈希判重提前返回，自愈走 [`Store::retarget_book_path`]。所以这一臂刷新的
-    /// 只该是「那份文件的事实」（格式、大小、修改时间与那几书目列），**不碰 title / authors**
-    /// ——重扫解析的是哈希名副本，无内嵌书名的格式（PDF / TXT）会把标题回落成文件主名，
-    /// 也就是一串哈希（0.1.4 bump `INDEX_VERSION` 全书重扫时整架标题变哈希串，就是这一句盖的）。
-    /// 读者改过的书名同理保得住：[`Store::set_book_meta`] 不再被重扫静默冲掉。
-    ///
-    /// `content_hash` 不在本语句里写：管线随后单独调 [`Store::set_content_hash`]。
-    /// 中间崩溃留下的是一条**没有身份的行**，而懒补本来就有这个状态（NULL），
-    /// 补齐作业会重算哈希把它填上——所以这两步不需要包在一个事务里。
+    /// 同路径入库更新文件事实，保留读者修改的 title/authors；哈希去重由导入管线负责。
+    /// content_hash 另由 set_content_hash 写入，中断留下的 NULL 可由补齐作业恢复。
     pub fn add_book(&self, path: &Path, meta: &DocMeta) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let path_s = path.to_string_lossy().into_owned();
@@ -374,21 +314,8 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?)
     }
 
-    /// 书架：整架或按**书名 / 作者**过滤，排序与 [`Store::list_books`] 同一条
-    /// （最近有动静的在前：刚导入的与最近翻开过的都算，见 [`SHELF_ORDER`]）。
-    ///
-    /// 空查询走 `?1 = ''` 那个短路分支而不是拼两条 SQL：一条语句两种绑定，
-    /// 免得两处各写一遍排序而写歪。
-    ///
-    /// 这里**不**查正文。全文检索是另一件事，而书架上那颗框在读者眼里是
-    /// 「找我那本书」，输入两个字就该立刻列出书名 —— 把两者混在一个入口会让短查询
-    /// 静默返回空。
-    ///
-    /// 这一条数的是**全部**书，不看集合名分 —— 所以架面带搜索词时走的是它而不是
-    /// [`Store::shelf_ungrouped`]：挂进过组的书也要搜得出来。
-    ///
-    /// （正文的全文检索推后做。真要接的时候，索引该是**可重建的派生数据**，
-    /// 而不是现在这样跟正文一起当权威数据存，见 `plans/text-compressed.md`。）
+    /// 按书名/作者过滤全部书（含集合成员），空查询返回整架；排序见 SHELF_ORDER。
+    /// 此入口不查询正文。
     pub fn shelf(&self, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::shelf_in(&conn, query)
@@ -402,11 +329,7 @@ impl Store {
             .optional()?)
     }
 
-    /// 一本**书**的全部书目（Dublin Core 那一组）。
-    ///
-    /// 按 id 单查一条，而不是给 `BookRow` 加几列：架面一次要过几百行，而简介是长文本。
-    /// 同一条理由当年把封面字节挪出了库（v16），也同一条理由不让 `shelf()` 顺手带上它们。
-    /// 值全部来自导入那一趟 —— 这一格为空就是「这本书的书目区里没写」，不是「没读」。
+    /// 按 id 读取完整书目，长文本不进入书架批量投影；缺失字段保持空值。
     pub fn book_meta(&self, id: i64) -> Result<Option<BookMeta>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = format!("SELECT {META_COLUMNS} FROM books WHERE id = ?1");
@@ -415,19 +338,7 @@ impl Store {
             .optional()?)
     }
 
-    /// 单拿这一本的封面字节。
-    ///
-    /// **只认 `covers/` 里那个文件**（v16：字节不再进库）。文件不在了就回 `None`，
-    /// 界面画占位 —— 不再退回任何库里存的副本，因为库里已经没有字节了。
-    ///
-    /// 这个取舍是有意的（`plans/导入管线.md` §八 第 4 条）：封面字节是 MB 级的东西，
-    /// 而 `books` 表每次列书目都要过一遍；把它留在库里等于让库随书数线性膨胀，
-    /// 只为架上那一格画什么。代价是**封面不会自己回来** —— `covers/` 被清掉、
-    /// 或这一行是别处拷来的库，就要重新导入那一本。封面是装饰，不是内容的入口。
-    ///
-    /// 为什么不在 [`Store::book`] 里一起给：`BookRow` 被桌面端整库握在手里当标签页
-    /// 列表用，那一用不需要字节；而「点开一本书的信息」那一屏要的正好只是这一本的图，
-    /// 一次一条语句取回，比把整库的图读进内存便宜得多。
+    /// 从 covers/ 读取封面，文件缺失返回 None；不从数据库读取或缓存封面字节。
     pub fn book_cover(&self, id: i64) -> Result<Option<Vec<u8>>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let row: Option<(String, Option<String>, Option<String>)> = conn
@@ -470,10 +381,7 @@ impl Store {
         Ok(conn.query_row(&sql, params![s], book_from_row).optional()?)
     }
 
-    /// 按**内容哈希**找那一行：`plans/导入管线.md` §六 的判重入口，同哈希 = 同一本书。
-    ///
-    /// 走这一列而不是 `path`：书库搬家、读者改文件名、同一本书从三个来源进来，都不该
-    /// 因此多出第二行（而第二行意味着第二套进度与批注）。
+    /// 按内容身份查询，路径或文件名变化不应产生第二套进度与批注。
     pub fn book_by_hash(&self, hash_hex: &str) -> Result<Option<BookRow>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = format!("SELECT {BOOK_COLUMNS} FROM books WHERE content_hash = ?1");
@@ -493,15 +401,8 @@ impl Store {
         Ok(())
     }
 
-    /// 有身份的那些书：`(字节数, 完整哈希, 行号)`。
-    ///
-    /// 整机扫描那一屏拿它核对「这个候选其实已经在架上」：副本按内容改成
-    /// `<哈希>.ext` 之后，`books.path` 里已经没有读者那个原始文件名，唯一认得出
-    /// 「同一本」的是**内容哈希**。调用方先按 `size` 预筛（同内容必同尺寸），只对
-    /// 尺寸撞上的那几本算一遍 sha256 —— 整机扫几千本时真正要读的通常是个位数。
-    ///
-    /// `size = 0` 的行不进表：那是「不知道字节数」的老行，它与任何候选都不该因为
-    /// 一个 0 被当成同一本。没有身份的行同样不进（判重本来就认不出它们）。
+    /// 返回 (字节数, 内容哈希, 行号)，供扫描先按大小筛选，再计算哈希。
+    /// 缺少哈希或 size=0 的旧行不参与判重。
     pub fn identities_by_size(&self) -> Result<Vec<(u64, String, i64)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
@@ -522,15 +423,8 @@ impl Store {
         Ok(out)
     }
 
-    /// 把那一行的「副本在哪儿」改成新位置。身份那一列不动 —— 内容没变，变的是它躺在哪。
-    ///
-    /// 两个用处：补齐作业把旧名字副本改成哈希名之后回写；以及判重命中**但旧副本文件已经不
-    /// 在了**那次自愈 —— 记录重新接上一份内容相同的文件（§六「判重的语义」）。
-    /// `size` 与 `mtime` 一起刷：文件换了就该被 [`Store::stale_reason`] 认出来，留着旧数
-    /// 等于让自愈过的书一直报「文件被外部改过」。
-    ///
-    /// 新位置撞上别的行的 `path`（`UNIQUE`）时这里返回 `Err`：那种情况只能是两行在往同一个
-    /// 哈希名落地，判重本该先把它们合成一行，所以不静默覆盖，报出去让人看见。
+    /// 更新副本路径、大小与修改时间，保留内容身份；用于改名和缺失副本修复。
+    /// 路径被其它记录占用时返回错误，不覆盖记录。
     pub fn retarget_book_path(&self, id: i64, path: &Path) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let s = path.to_string_lossy().into_owned();
@@ -552,21 +446,8 @@ impl Store {
         Ok(())
     }
 
-    /// 改掉读者**自己认**的书名与作者：只动 `title` 与 `authors` 两列。
-    ///
-    /// 为什么只有这两列改得动：`format` / `size` / `path` 是那份文件的事实，读者说了不算；
-    /// 而入库时从文件里抠出来的书目经常是错的 —— EPUB 的 `<dc:title>` 写着 `Untitled`、
-    /// 作者栏塞的是出版社，架面上认错一本靠的正是这两条。正文、进度、批注一概不碰。
-    ///
-    /// `authors` 按 `\n` 存，读回时 [`book_from_row`] 用 `.lines()` 拆 —— 与
-    /// [`Store::add_book`] 写的那份是同一个编码，两侧不必再约定一遍分隔符。
-    /// 空串与只有空白的作者**不存**：`authors = ''` 读回来是空 `Vec`，界面上那一行随之消失
-    /// （`shelf::book_info` 的「作者可能缺」那条规则）。
-    ///
-    /// **重扫不会把它盖回去**：[`Store::add_book`] 的 `ON CONFLICT DO UPDATE`
-    /// 不碰这两列（能走到那一臂的只有重扫，它解析的是哈希名副本，盖回来只会把
-    /// 无内嵌书名的格式变成一串哈希）。同一份内容从别的文件**重新导入**时走判重
-    /// 提前返回，也不经过那一条语句 —— 读者改的名字是稳的。
+    /// 只更新 title/authors；作者按换行存储并去掉空白项。
+    /// 重扫与重复导入保留这两项，正文、进度和批注不变。
     pub fn set_book_meta(&self, id: i64, title: &str, authors: &[String]) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let rows = conn.execute(
@@ -579,13 +460,7 @@ impl Store {
         Ok(())
     }
 
-    /// 这一本的阅读设置**差量**（v26 那一列）。库里那一行不在时交回空差量 ——
-    /// 空差量与「这本书完全跟随默认」是同一件事，但**日志必须留一句**：否则「按错了
-    /// id」与「这一本确实没单独设过」在调用方那边长得一模一样。
-    ///
-    /// 为什么单独一条查询而不挂在 [`BookRow`] 上：`BookRow` 被桌面端整库握在手里当
-    /// 标签页列表用（与 [`Store::book_cover`] 同一个理由），而这一格只有阅读层在开书
-    /// 那一刻要一次。
+    /// 按本读取阅读设置差量；记录不存在返回空差量并记录警告。
     pub fn book_settings(&self, id: i64) -> Result<BookSettings> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let raw: Option<String> = conn
@@ -604,25 +479,19 @@ impl Store {
         }
     }
 
-    /// 整份替换那一本的差量；空差量落成空串。
-    ///
-    /// 不做「读出来改一格再写回」：调用方手上本来就有整份生效值，
-    /// [`BookSettings::record_reader`] 一次算完差量，比在 SQL 里逐格合并少一套口径。
-    ///
-    /// **每改一格就写一次**，不攒：这一条 UPDATE 按主键动一行，而攒着的那一份在
-    /// 进程被系统杀掉（手机上读着读着被回收是常态）时会连刚调完的那一格一起丢 ——
-    /// 那是读者手上的东西，比省几次写贵。
-    ///
-    /// 每一次写都盖一个本机时间（`settings_updated_at`，v27）：跨设备合并按**整本差量**
-    /// 取新的那一份，所以「恢复本书默认」那一次空写入也必须有时间戳 —— 少了它，另一台
-    /// 设备上那份旧差量会盖回来，读者看到的是「我明明清过了」。
+    /// 整份替换阅读差量；空差量写空串。
+    /// 每次写入（含恢复默认）都更新时间戳，供同步比较整份差量。
     pub fn set_book_settings(&self, id: i64, settings: &BookSettings) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let stamp = super::sync_order::next_version(
+            super::sync_order::settings(&conn, id)?.map_or(0, |r| r.updated_at),
+            now(),
+        )?;
         let rows = conn.execute(
             "UPDATE books
                 SET settings_json = ?2, settings_updated_at = ?3
               WHERE id = ?1",
-            params![id, settings.to_column(), now()],
+            params![id, settings.to_column(), stamp],
         )?;
         if rows == 0 {
             tracing::warn!("store: 改第 {id} 本的阅读设置，但没有这一行");
@@ -630,12 +499,7 @@ impl Store {
         Ok(())
     }
 
-    /// 还没算过内容身份的行（`content_hash IS NULL`），整行交出去。
-    ///
-    /// 这是懒补的那半张清单：补齐作业按它逐本算哈希、把旧名字的副本改成哈希名、回写
-    /// 位置（`Cleanup` 档，见 `folio_base::task::Priority` 与 `folio_core::ingest::import::backfill_copies`）。
-    /// 空表 = 全库都已认得自己的书。
-    /// 按 `id` 排是为了断言可复现，也让一次中断之后剩下的那批是确定的。
+    /// 按 id 返回 content_hash 为 NULL 的行，供可中断的补齐作业处理。
     pub fn rows_missing_hash(&self) -> Result<Vec<BookRow>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql =
@@ -647,12 +511,7 @@ impl Store {
         Ok(rows)
     }
 
-    /// 还有多少行指着同一个副本路径（不算 `except_id` 自己）。
-    ///
-    /// 删一本书的副本之前问这一句：内容寻址之后「两条记录共用一个文件」是一个**可能**的
-    /// 状态（自愈会把记录接到一份已存在的副本上），连带删掉另一本的正文与批注不可接受
-    /// （`plans/导入管线.md` §六 末段、§十一 已决第 3 条）。计数从库里查，不另设计数表 ——
-    /// 计数表与记录本身迟早会漂开。
+    /// 统计其它记录对副本的引用；删除文件前必须检查，避免毁掉共享正文。
     pub fn rows_sharing_path(&self, path: &str, except_id: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let n: i64 = conn.query_row(
@@ -663,11 +522,8 @@ impl Store {
         Ok(n as usize)
     }
 
-    /// 封面补齐那一趟要读的所有行。
-    ///
-    /// **不过滤**：`cover_hash` 有值但 `covers/` 里文件没了（`covers/` 被清过、
-    /// 只导数据的备份恢复过来、书库搬过家）同样是要补的一档，漏掉它封面还是不回来。
-    /// 只 SELECT 四列，不开容器；判文件在不在交给调用方按 `book_root` + `cover::resolve` 做。
+    /// 返回全部行的封面描述，包括已有哈希但文件可能丢失的行。
+    /// 此处不打开容器；调用方按 book_root + cover::resolve 检查文件。
     pub fn rows_for_cover_backfill(&self) -> Result<Vec<CoverBackfillRow>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt =
@@ -695,15 +551,7 @@ impl Store {
         Ok(())
     }
 
-    /// 还有几条**别的**记录指着同一张封面 —— 删书时决定那个封面文件能不能删。
-    ///
-    /// 与 [`Store::rows_sharing_path`] 同一条规矩（`plans/导入管线.md` §八 第 4 条
-    /// 末段）：**封面是它自己字节的身份，不是这本书的**。两本书共用一张封面
-    /// （同一套系列设计）时磁盘上只有一个文件，所以删掉其中一本不能连带删掉它 ——
-    /// 那会让另一本的封面凭空消失，而且没有任何报错。
-    ///
-    /// 计数从库里查，不另设计数表：一张表要与 `books.cover_hash` 保持一致，
-    /// 而它本来就是派生量。
+    /// 统计其它记录对封面的引用；封面按自身内容寻址，删除前须保护共享文件。
     pub fn rows_sharing_cover(&self, hash: &str, except_id: i64) -> Result<usize> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let n: i64 = conn.query_row(
@@ -714,21 +562,7 @@ impl Store {
         Ok(n as usize)
     }
 
-    /// 这一本的封面文件路径（**在库里那一行还活着的时候问**）。
-    ///
-    /// 删书那一步要用它：先问出文件名，删完行之后才发现「还有别人指着」就晚了。
-    /// 行删掉之后 `cover_hash` 就问不出来，所以顺序不能反。
-    ///
-    /// `None` 有两种来路，删书那一侧都该当「没有文件可删」：
-    ///
-    /// - **老库那一档**：封面还只在 `books.cover` 那个 BLOB 里，磁盘上没有文件。
-    /// - **还有别人指着同一份字节**：两本书共用一张封面时磁盘上只有一个文件
-    ///   （`plans/导入管线.md` §八 第 4 条），删掉其中一本不能把它带走 ——
-    ///   那会让另一本的封面凭空消失，而且没有任何报错。
-    ///
-    /// 把「共用」这一问收在这里，是因为它要读 `payload` 之外的列（`cover_hash` 的
-    /// 完整十六进制），而调用方手上只有文件名那一格（它是哈希的前 20 字）。
-    /// 让调用方自己去比完整哈希，就是两处各答一遍「谁跟谁共用」。
+    /// 在删除书目行前取得封面路径，行删除后将无法再查询其哈希。
     pub fn orphan_cover_file(&self, id: i64) -> Result<Option<std::path::PathBuf>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let row: Option<(String, Option<String>, Option<String>)> = conn
@@ -804,7 +638,13 @@ impl Store {
     }
 
     pub fn set_position(&self, book_id: i64, mode: &str, locator: &Locator) -> Result<()> {
-        self.set_position_at(book_id, mode, locator, now())
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let stamp = super::sync_order::next_version(
+            super::sync_order::position(&conn, book_id)?.map_or(0, |r| r.updated_at),
+            now(),
+        )?;
+        conn.execute("INSERT INTO positions (book_id,mode,locator_json,updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(book_id) DO UPDATE SET mode=excluded.mode,locator_json=excluded.locator_json,updated_at=excluded.updated_at", params![book_id,mode,locator.to_json(),stamp])?;
+        Ok(())
     }
 
     /// 写入进度，但用调用方给的时间戳。**只给同步用**：把远端那份原样搬进来时要保留
@@ -902,12 +742,8 @@ impl Store {
         Ok(group_shelf(Self::shelf_in(&conn, query)?, by))
     }
 
-    /// 每个集合一组，末尾追一个「未分组」（装了但还没进任何集合的书）。
-    ///
-    /// 这里**空集合也留着**：这一条是「按组清点」那份数据形状（一组一串书），不是架面顶部
-    /// 那一排组卡的读法 —— 组卡按 [`Collection::is_shown`] 筛掉 0 本的。判据不同是有意的：
-    /// 清点要看得到空组，而一张点进去是空白的卡不该占架面顶部那一格。
-    /// 组名用 [`UNGROUPED`] 而不是空串，理由见那里的说明。
+    /// 每个集合一组，保留空集合，末尾追加名为 [`UNGROUPED`] 的未分组。
+    /// 这是完整清点接口；架面组卡另按 [`Collection::is_shown`] 隐藏空集合。
     pub fn collection_groups(&self) -> Result<Vec<ShelfGroup>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut groups = Vec::new();
@@ -927,17 +763,9 @@ impl Store {
         Ok(groups)
     }
 
-    /// 每个**摆得出来**的组带前 `limit` 本，按 [`Store::collections`] 那条序排（组内有过
-    /// 打开的在前）。架面顶部那一排组卡走这一条。
-    ///
-    /// 只取前 `limit` 本而不是整组：一张卡装得下的就是那几格，而一个组可能有几百本 ——
-    /// 一次查全部会把画不出来的那些行也读一遍。取的是组内那条「最近在先」（与
-    /// [`Store::shelf_in_collection`] 同一个排序），所以卡上那几张封面就是读者在这一组里
-    /// 最后翻开的那几本 —— 认一组靠的是「这里我在读什么」，不是「最后丢进来的是什么」。
-    ///
-    /// 0 本的组**不给卡**（[`Collection::is_shown`]）：那条入口点进去是一屏空，而它占的
-    /// 那一格正压着「我刚在读的那一组在哪儿」。留着空组原本的顾虑是「刚建的组消失会像没
-    /// 建成」，而架面建组那一刻必然同时挂进一本书（`ShelfView::create_group`），那条走不到。
+    /// 架面组卡投影：集合按 [`Store::collections`] 排序，每组只取前 `limit` 本以免读取整组。
+    /// 组内沿用 [`Store::shelf_in_collection`] 的最近阅读优先顺序；空组按
+    /// [`Collection::is_shown`] 隐藏，完整清点请用 [`Store::collection_groups`]。
     pub fn collection_tiles(&self, limit: usize) -> Result<Vec<(Collection, Vec<ShelfItem>)>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::collections_in(&conn)?
@@ -951,22 +779,13 @@ impl Store {
             .collect()
     }
 
-    /// 一个集合里的书，可再按书名 / 作者筛一道。架面点开某一组那一页走这一条。
-    ///
-    /// 排序**与整架同一条**（同一个 `SHELF_ORDER` 常量）：分组只回答「摆哪几本」，不改
-    /// 「先看见哪一本」。按进组先后排的话，刚丢进来的那本会把读到一半的书挤到下面，
-    /// 而读者点开一组要找的正是「我上次读到哪儿了」。
+    /// 按书名/作者筛选集合成员，顺序与整架共用 SHELF_ORDER。
     pub fn shelf_in_collection(&self, collection_id: i64, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::shelf_in_collection_in(&conn, collection_id, query)
     }
 
-    /// 还没进任何集合的书，同一套书名 / 作者过滤。**架面整架那一片走这一条**：一本挂进了
-    /// 某个组就从整架消失，只有走进那一组才看得见（界面侧只有组卡与那颗「去处」菜单两处
-    /// 入口，没有叫「未分组」的那一页 —— 整架那一片本身就是它）。
-    ///
-    /// 「未分组」是筛出来的、不是存出来的：库里没有一个叫这个名字的组，它是
-    /// [`Store::collection_groups`] 末尾追加的那一格（名字用 [`folio_model::group::UNGROUPED`]）。
+    /// 按书名/作者筛选未入组的书；未分组是查询结果，不是库里的集合。
     pub fn shelf_ungrouped(&self, query: &str) -> Result<Vec<ShelfItem>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::shelf_in_no_collection_in(&conn, query)
@@ -989,11 +808,7 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?)
     }
 
-    /// [`Store::shelf_in_collection`] 的不上锁版本；只由已经持了锁的一方调用。
-    ///
-    /// 名分用 `IN (SELECT …)` 问而不是 join `collection_books`：join 进来会带一张也有
-    /// `added_at` 的表，那条共用的 `SHELF_ORDER` 里的裸列名就此变成歧义列（SQLite 当场
-    /// 报错，不是静默选错），与 [`Store::shelf_in_no_collection_in`] 同一写法。
+    /// 已持库锁的查询助手。使用 IN 子查询避免 JOIN 带来的 added_at 列名歧义。
     fn shelf_in_collection_in(
         conn: &Connection,
         collection_id: i64,
@@ -1035,11 +850,7 @@ impl Store {
     }
 }
 
-/// 「词为空就全放，否则书名或作者命中」那一段 WHERE。整架、某组、未分组三条查询共用
-/// 同一份措辞 —— 少一处 `ESCAPE '\\'` 或把列名写歪，不会报错，只会让三处搜出三套结果。
-///
-/// 占位符序号由调用方给：整架那条词是 `?1`、模式串是 `?2`；按组筛的那条前面还占了一个
-/// 集合 id，序号就往后挪一位。
+/// 全架、集合与未分组查询共用的过滤条件；占位符序号由调用方提供。
 fn query_clause(word: &str, pattern: &str) -> String {
     format!(
         r#"({word} = ''
@@ -1048,12 +859,8 @@ fn query_clause(word: &str, pattern: &str) -> String {
     )
 }
 
-/// 用户输入 → `LIKE` 的匹配串。
-///
-/// 三个都要转：`%` 和 `_` 是通配符，读者书名里真会有（`100%` 那种营销标题、
-/// 下划线分隔的文件名），不转的话他搜 `100%` 结果把整个书架都列出来。
-/// 转义符本身先转，否则 `a\` 会被转成 `a\\` 而后面的 `%` 就成了通配。
-/// SQL 侧必须配 `ESCAPE '\'`，那一条见 [`Store::shelf`]。
+/// 将用户输入转成 LIKE 匹配串：先转义反斜杠，再转义 % 和 _。
+/// SQL 必须同时声明 ESCAPE。
 fn like_pattern(query: &str) -> String {
     let mut out = String::with_capacity(query.len() + 2);
     out.push('%');
@@ -1072,11 +879,7 @@ fn like_pattern(query: &str) -> String {
 
 #[cfg(test)]
 mod grouping {
-    //! 书架分组：按作者/格式分，以及集合那一种「组存在库里」的分组。
-    //!
-    //! 组内先后**是**可以断言的：`SHELF_ORDER` 末尾带 `books.id DESC` 那个终结符，
-    //! 同秒入库的书因此有确定顺序（接线前没有，那时这几条只能比集合，见
-    //! `shelf_order_breaks_the_import_tie`）。组名、成员、先后三样都钉。
+    //! 书架分组的组名、成员与稳定顺序回归。
 
     use std::path::{Path, PathBuf};
 
@@ -1125,13 +928,7 @@ mod grouping {
         assert_eq!(ids(&groups[1].items), vec![b]);
     }
 
-    /// 同秒入库必须有终结符，否则书架的顺序是不确定的。
-    ///
-    /// 入库时间戳按**秒**存（`store::now`），所以这三本 `added_at` 完全相同，
-    /// `added_at DESC` 排不出先后；SQLite 对并列行不保证顺序，实测**同一份数据在同一次
-    /// 运行里就能给出两种先后**（这条测试在加 `books.id DESC` 之前大约每五六次翻一次红，
-    /// 而它每次都是新开的 `:memory:` 库，与别的测试无关 —— 那不是 flaky 的借口，是缺终结符）。
-    /// 生产上的后果更实在：批量导入完刷新书架，同一本书换了一格。
+    /// 同秒入库仍须按 id 稳定排序。
     #[test]
     fn shelf_order_breaks_the_import_tie() {
         let store = Store::in_memory().unwrap();
@@ -1200,11 +997,7 @@ mod grouping {
         assert_eq!(loose, vec![b, c]);
     }
 
-    /// 组里那一页的序与整架同一条：**翻开过的那本在先**，不是「最近丢进组的在先」。
-    ///
-    /// 这一条钉的是把 `cb.added_at` 换成 `SHELF_ORDER` 那一手。旧写法下这两句会是
-    /// `[b, a]`（b 后进组），读者「读到一半的那本」被一次分组操作挤到第二排。门要的是
-    /// 「组只决定摆哪几本，不决定先看见哪一本」这条不改的序。
+    /// 集合成员按阅读/导入时间排序，加入集合的时间不改变顺序。
     #[test]
     fn a_collection_page_keeps_the_shelf_order() {
         let store = Store::in_memory().unwrap();
@@ -1227,12 +1020,7 @@ mod grouping {
         );
     }
 
-    /// 还没进组的那一批跟着名分变 —— **那一片就是架面的整架**（`ShelfScope::Shelf` 不带
-    /// 搜索词时查的正是这一条），所以「进组」在读者手里等于从整架消失、「移出」等于回到整架。
-    ///
-    /// 四句各自都能单独坏掉而别的门还是绿的：名分那行写重了会让同一本在架上出现两次；
-    /// 移出没删行会让一本书从整架与那一组两头一起消失；删书不清 `collection_books` 会让
-    /// 某一组数着一本已经不存在的书。
+    /// 入组、移出、删书分别维护未分组投影，成员不得重复或残留。
     #[test]
     fn the_ungrouped_bucket_follows_membership() {
         let store = Store::in_memory().unwrap();
@@ -1290,46 +1078,19 @@ pub enum StaleReason {
     /// 索引是旧引擎算的（[`folio_format::INDEX_VERSION`] 对不上）：
     /// 切章的算法、位置方案或页表算法改过。
     OldIndex,
-    /// 分章那套**规则数据**换了（`.txt`，`books.rules_hash` 对不上）。
-    ///
-    /// 与 `OldIndex` 分两档是因为它们答的是两个问题：那一档说「代码里的算法变了」，
-    /// 这一档说「读者或出厂那份 JSON 变了」。合成一个的话，界面与日志就只能说
-    /// 「索引旧了」，而读者刚换了一份规则表、想看到的是这一句。
-    /// 分开的代价是零：两者的处置本来相同（重扫），只是出处不同。
+    /// 分章规则数据改变（与算法版本 OldIndex 区分），需要重扫。
     RulesChanged,
-    /// 库里记着一份封面（`cover_hash` / `cover_mime`），但 `covers/` 里那个文件不在了。
-    ///
-    /// 与作废的 `OldCover`（封面按旧规格生成）不是一件事：那是「规格变了」，这是
-    /// 「文件没了」。封面字节 v16 起不在库里，唯一的来源是那份书，所以重扫一次
-    /// 就能重新抽出来 —— 这也是「封面突然消失」在升级之外唯一的自愈入口。
+    /// 已登记的封面文件丢失，需要从书文件重新提取。
     MissingCover,
-    // 曾经还有一档 `OldCover`（封面按旧规格生成）：v16 之后封面是一个文件，
-    // 换规格只要重新生成缩略图（`content::assets::thumb`），不必重扫全书 —— 所以这一档
-    // 连同它的判据（`cover_spec` 那一列）一起作废了。
 }
 
 impl Store {
-    /// 这本书记下的索引还可信吗？`None` = 可信。
-    ///
-    /// 正文只在文件里（见 `plans/text-out-of-db.md`），所以「文件还是那份文件吗」从
-    /// 锦上添花变成了**能不能读**的前提。六种不可信各自有后果：
-    ///
-    /// - 文件不在 → 这一章取不到，重扫也没用；
-    /// - 文件换了 → 位置指到别的内容上，进度与批注也跟着漂；
-    /// - 索引是旧引擎算的 → 序号（`Section(n)`）按旧规则算的，可能整体错位；
-    /// - 规则表换了 → 同上，只是换的是那份 JSON 而不是代码；
-    /// - 封面文件不在 → 装饰没了，重扫一次能从书里重新抽出来。
-    ///
-    /// 第一种可以直接删数据（`prune_missing`），其余该重扫 —— 调用方选。
+    /// 检查索引是否过期；None 表示可信，文件不可用不授权删除用户记录。
     pub fn stale_reason(&self, book_id: i64) -> Result<Option<StaleReason>> {
-        // 锁内只问一句 SELECT，出锁再碰文件系统。`fs::metadata` 留在锁里时，界面线程为了
-        // 判「这本还可信吗」既要排在一次后台写库之后，还要替它等一次磁盘 ——
-        // `plans/阅读管线.md` §十.4 第 1 条点名的「锁内做了文件系统操作」就是这一处。
+        // 锁内查询，锁外访问文件系统，避免磁盘等待阻塞库操作。
         let row: Option<StaleRow> = {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            // `cover_hash` 用来在最后判「记过的那份封面文件还在不在」。v16 之后封面规格
-            // 那一档（`cover_spec`）连同 BLOB 一起没了：封面只是 `covers/` 里一个文件，
-            // 它丢了不会让正文读不了，所以排在最后，并由重扫顺手重新抽出来。
+            // 封面缺失最后检查，不能盖过正文或索引错误。
             conn.query_row(
                 "SELECT path, format, size, mtime, index_version, cover_hash, cover_mime, rules_hash
                    FROM books WHERE id = ?1",
@@ -1352,7 +1113,7 @@ impl Store {
         let Some(row) = row else {
             return Ok(None);
         };
-        // 顺序即优先级：文件不在最严重（要删数据），其次才是「算法换了」与「文件换了」。
+        // 文件可用性优先于算法与内容变化；具体不可用原因见 unavailable_sources。
         let meta = std::fs::metadata(&row.path);
         let Ok(meta) = meta else {
             return Ok(Some(StaleReason::Missing));
@@ -1372,12 +1133,7 @@ impl Store {
         if changed {
             return Ok(Some(StaleReason::Changed));
         }
-        // 排在「文件换了」之后：文件都换过了，报规则换了会把真原因盖掉。
-        // 不看规则表的那些格式在这里直接跳过 —— `rules_hash` 交出 `None` 就是
-        // 「这一格式的索引不依赖那张表」，判据只在那一处定义（见它的文档）。
-        // 库里那一列认不出来的格式串（将来加的格式手改进来的）也一并跳过。
-        // NULL 则**不**跳过：v22 之前入库的老行没记这一格，而它正是该重扫的那批
-        // （老序号按当时那套规则算的，而当时那套规则今天可能已经换了）。
+        // 仅依赖规则表的格式参与；旧行 NULL 也必须触发重扫。
         let format = Format::parse(&row.format);
         let want = format.and_then(folio_format::rules_hash);
         if let Some(want) = want
@@ -1385,12 +1141,7 @@ impl Store {
         {
             return Ok(Some(StaleReason::RulesChanged));
         }
-        // 排在最后：封面是装饰，别让它盖过上面那些真问题。
-        // **只认「库里记过封面、文件却不在」这一种**：从来没有封面的那些行
-        // （TXT / Markdown / 没声明封面的 EPUB，`cover_hash` 是 NULL）不能被算成不可信，
-        // 否则每次开书都要为一本注定没有封面的书白重扫一遍。
-        // 这一档也是 `backfill_covers` 那趟开机补齐之外的兜底：那一趟按记号整机只跑
-        // 一次，之后 `covers/` 再被清掉就得靠开书时认出来。
+        // 只检查已登记封面；从未有封面的书不能因此反复重扫。
         if let (Some(hash), Some(mime)) = (row.cover_hash.as_deref(), row.cover_mime.as_deref())
             && !hash.is_empty()
             && !mime.is_empty()
@@ -1404,12 +1155,7 @@ impl Store {
         Ok(None)
     }
 
-    /// 领一张重扫的号：这一本此刻既没在飞、也没在今天这个进程里失败过时返回 `true`，
-    /// 并把它记成在飞。返回 `false` 时调用方**不该**提交作业。
-    ///
-    /// 「同一本只允许一趟」与「失败过就别再自动试」两道门都收在这里，不留在调用方：
-    /// 两处各答一遍「这本该不该重扫」必然漂，同 `layout::key` 只留一把键的理由。
-    /// 号由作业那头 [`Store::note_reindex`] 释放，所以领到号就必须真的把作业投出去。
+    /// 未在飞且本进程内未失败过才领号；成功后必须提交作业，由 note_reindex 退号。
     pub fn claim_reindex(&self, book_id: i64) -> bool {
         // 两道门各自一个作用域，**不同时持有两把锁**：`note_reindex` 取它们的次序是反的，
         // 嵌套持有就是死锁的素材（作业在池线程上，与界面线程真的会撞上）。
@@ -1427,13 +1173,7 @@ impl Store {
             .insert(book_id)
     }
 
-    /// 重扫作业收尾：退号；失败的那本另记一档，本进程内不再自动重投。
-    ///
-    /// 成功要**从在飞里摘掉**而不是留着 —— `index_version` 下次被 bump 时那一本还得能再投
-    /// 一趟，留着号等于把「扫过」变成「永不重扫」。失败留着，因为重扫必然读完整本书
-    /// （`plans/导入管线.md` §八 第 3 条：要读完全书才知道的数全在导入这一趟算），没有这一格
-    /// 的话一本注定失败的书会让每次点开都白付一次全量重读。只在本进程内记：下次启动
-    /// 该再给它一次机会，而「坏在磁盘上」那种状态库里没有地方放。
+    /// 作业收尾时退号；失败只在本进程记住，避免每次开书重复全量重扫。
     pub fn note_reindex(&self, book_id: i64, ok: bool) {
         self.reindex_queued
             .lock()
@@ -1447,39 +1187,17 @@ impl Store {
         }
     }
 
-    /// 源文件已经不在的那些书：**连数据一起删掉**。
-    ///
-    /// 判据是「文件不在」+「上一层目录读得到」：目录本身读不到多半是没挂载 /
-    /// 权限没给（SD 卡拔了、SAF 授权被撤），那种情况下把读者的库删空是灾难。
-    ///
-    /// 返回删掉的那几本（书名），调用方拿去说一句。
-    pub fn prune_missing(&self) -> Result<Vec<String>> {
-        let books = self.list_books()?;
-        let mut gone = Vec::new();
-        for book in books {
-            let path = Path::new(&book.path);
-            if path.exists() {
-                continue;
-            }
-            // 目录读不到就放过：那是「现在看不见」，不是「没了」。
-            let parent_readable = path.parent().is_none_or(|dir| dir.exists());
-            if !parent_readable {
-                tracing::warn!(
-                    "store: 第 {} 本《{}》的文件看不见，但上一层目录也读不到 —— 先不删",
-                    book.id,
-                    book.title
-                );
-                continue;
-            }
-            tracing::warn!(
-                "store: 第 {} 本《{}》的源文件不在了（{}），连带数据一起删",
-                book.id,
-                book.title,
-                book.path
-            );
-            self.remove_book(book.id)?;
-            gone.push(book.title);
-        }
-        Ok(gone)
+    /// 检查源文件是否可读，保留书目、进度和批注；文件系统探测在库锁外执行。
+    pub fn unavailable_sources(&self) -> Result<Vec<UnavailableSource>> {
+        Ok(self
+            .list_books()?
+            .into_iter()
+            .filter_map(|book| {
+                source_unavailable(Path::new(&book.path)).map(|reason| UnavailableSource {
+                    book_id: book.id,
+                    reason,
+                })
+            })
+            .collect())
     }
 }

@@ -12,6 +12,12 @@
 //! 桌面那个 `main` 不能用 `#[cfg(not(mobile))]` 之外的写法，是因为 bin target 在移动
 //! target 上也会被构建，缺一个 `fn main` 会直接报错。
 
+// 关掉 Windows 的控制台窗口只能写在 bin 的 crate 根上：写在模块里会被忽略（rustc 只报一条
+// unused_attributes），双击 exe 时 console 子系统的进程就会多开一个终端。双击启动没有
+// 控制台可写，日志仍落到 `<数据根>/logs/folio.log`；从终端（`cargo run`）启动时 stderr
+// 是继承来的，日志照旧看得到。
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 #[cfg(not(mobile))]
 fn main() {
     folio_app::ui::platform::desktop::run_desktop();

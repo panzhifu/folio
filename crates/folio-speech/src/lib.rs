@@ -57,6 +57,11 @@ use async_channel::{Receiver, Sender};
 use self::gate::Input;
 
 /// `Ready` 快照的三态：-1 还在探测 / 0 不可用 / 1 可用。
+#[cfg(any(
+    test,
+    target_os = "android",
+    all(target_os = "linux", not(target_env = "ohos"))
+))]
 const READY_UNKNOWN: i8 = -1;
 
 /// 引擎线程收到的命令。语速/音高是**语义值**，换算住在引擎线程（见模块文档）。
@@ -110,6 +115,11 @@ impl Engine {
         }
     }
 
+    #[cfg(any(
+        test,
+        target_os = "android",
+        all(target_os = "linux", not(target_env = "ohos"))
+    ))]
     fn set_ready(&self, ok: bool) {
         self.ready.store(if ok { 1 } else { 0 }, Ordering::Relaxed);
     }

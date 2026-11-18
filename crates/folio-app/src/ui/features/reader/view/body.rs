@@ -1,10 +1,8 @@
 //! 阅读视图：把会话的状态摆成元素——逐行画字形、把图片绝对定位、接住滚轮。
 //!
-//! 这一层是**每帧控制器 + 绘制器**：排版本身不在这里（在
-//! [`crate::ui::features::reader::model::chapter_layout`]），状态与命令也不在这里
-//! （在 [`crate::ui::features::reader::model::session`]），但这一帧要排的作业、
-//! 要补的坐标链、要落的章界，以及它们的提交都在这里结算。`render` 按当前模式
-//! 挑出要摆的那几「片」，把排版行摊成 [`Scene`]，再挂上滚轮监听。
+//! 每帧结算排版作业、坐标链与章界提交，按模式把切片排版行摊成 [`Scene`] 并监听滚轮。
+//! 排版归 [`crate::ui::features::reader::model::chapter_layout`]，状态与命令归
+//! [`crate::ui::features::reader::model::session`]。
 //!
 //! 三种模式只差 [`Viewport`] 的那三个数，切片由核心分片器给出：
 //!
@@ -17,10 +15,7 @@
 //! 宽度装不下两栏时双页自动退回分页（判据在 [`chrome::PageMode::effective`]，按宽度而不是
 //! 按 target），所以横屏的平板真能双页，竖屏手机不会长出两条窄柱子。
 //!
-//! 滚动**不自己做惯量**：`gpui-mobile` 的平台层已经把触摸翻译成了 `ScrollWheel` 事件
-//! （`gpui-mobile/src/android/window.rs:1316` 起，用 `momentum::VelocityTracker` 估速度、
-//! 用 `MomentumScroller` 在松手后每帧派发一次衰减增量），视图只要把事件里的 dy 累加到
-//! `scroll_y`。在这里再套一个 `MomentumScroller` 会把同一份惯量算两遍，滚起来直接翻倍。
+//! 平台层已把触摸惯量转为 `ScrollWheel` 增量；这里只累加到 `scroll_y`，不得重复计算惯量。
 //!
 //! 读屏（TalkBack 那一类）也接在这一层的根节点上：正文是逐字形自绘的，accesskit 那棵树
 //! 里本来一个字都没有，所以要按「这一屏的行」现造一份合成子节点（[`spoken_lines`] 收集，
@@ -65,7 +60,7 @@ use crate::ui::features::reader::view::bands;
 use crate::ui::features::reader::view::paint::GlyphsElement;
 use crate::ui::foundation::reading_theme::{self, ReadingPalette};
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::{turn_duration, turn_transition};
+use crate::ui::services::motion::{turn_duration, turn_transition};
 
 /// 定版式预取几页。
 ///
@@ -596,6 +591,7 @@ struct PagedArm<'a> {
 impl Render for ReaderSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::ui::features::reader::model::perf::reset();
+        self.enforce_cache_budget(cx);
         // 这一帧真摆上几张定版式纸：翻页那一趟旧页走纹理，只该剩一张。
         self.fixed_sheets_drawn = 0;
         // 上一帧的绘制回调确认页框完整落在窗口内、并且真的给捕获 pass 排了请求，才把
@@ -1404,12 +1400,16 @@ impl Render for ReaderSession {
         // 同一条 `prepare`，已经在图集里时它什么都不做。这一条决定横滑切图那一瞬卡不卡。
         // 叠图邻居已经按**全清**排过了：记下它们的键，下面那条翻页预取就不必再为
         // 同一张图排一张注定不会被画出来的低清（叠图切过去不走预览档）。
+        if !self.cache_prefetch_allowed() {
+            upcoming.clear();
+        }
         let stack_neighbors: HashSet<String> = upcoming.iter().map(|r| r.key.clone()).collect();
         for request in std::mem::take(&mut upcoming) {
             self.atlas
                 .update(cx, |atlas, cx| atlas.prepare(&request, view, cx));
         }
-        if let Some(side) = prefetch_side
+        if self.cache_prefetch_allowed()
+            && let Some(side) = prefetch_side
             && let Some(book) = self.book()
         {
             // 快滑时把「下一屏」扩成两屏、每帧多排几张**低清**：滑得比画得快时，

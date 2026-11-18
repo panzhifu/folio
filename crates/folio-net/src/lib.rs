@@ -28,6 +28,7 @@ pub mod update;
 pub mod ureq;
 
 use std::io::{Read, Seek};
+use std::time::Duration;
 
 /// 一层「把请求发出去、把响应拿回来」的能力。
 ///
@@ -38,9 +39,8 @@ pub trait Transport: Send + Sync + 'static {
 
     /// 流式下载，响应体按块交给 `sink`。
     ///
-    /// 契约：无论成功、失败还是取消，`Sink` 的 `finish` 与 `abort` **恰好调一个** ——
-    /// 临时文件要么变成正式文件，要么被清掉，不会留下第三种状态。
-    /// 取消不是抢占，只在块与块之间检查，所以最多晚一个块生效。
+    /// 成功调用 finish；任何失败或取消调用 abort，包含 finish 本身失败。
+    /// 取消是协作式的；阻塞连接/读取的等待受 RequestLimits 约束，不保证立即中断。
     ///
     /// **同步签名是有意的**：管线的作业跑在后台线程上，「一个请求流到底」的形状
     /// 用阻塞读最直白（见 folio-core 的 `ingest::import`）；[`UreqTransport`] 就是为此而来的实现。
@@ -50,12 +50,60 @@ pub trait Transport: Send + Sync + 'static {
     /// 应覆盖它 —— 一本几百 MB 的书不该先变成一块 `Vec<u8>` 才出网。
     fn upload(&self, req: Request, source: &mut dyn Read, _len: u64) -> Result<Response> {
         let mut body = Vec::new();
-        source.read_to_end(&mut body)?;
+        source
+            .take(MAX_BUFFERED_UPLOAD + 1)
+            .read_to_end(&mut body)?;
+        if body.len() as u64 > MAX_BUFFERED_UPLOAD {
+            return Err(Error::Malformed(
+                "此传输实现不支持超过 4 MiB 的缓冲上传".into(),
+            ));
+        }
         self.request(req.body(body))
     }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub const MAX_BUFFERED_UPLOAD: u64 = 4 * 1024 * 1024;
+
+/// 每次请求的容量与等待预算。total 覆盖整个往返，idle 限制单次无数据读取/写入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestLimits {
+    pub connect: Duration,
+    pub idle: Duration,
+    pub total: Duration,
+    pub response_bytes: u64,
+}
+
+impl Default for RequestLimits {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(15),
+            idle: Duration::from_secs(15),
+            total: Duration::from_secs(90),
+            response_bytes: 32 * 1024 * 1024,
+        }
+    }
+}
+
+impl RequestLimits {
+    pub fn download() -> Self {
+        Self {
+            total: Duration::from_secs(3600),
+            response_bytes: 8 * 1024 * 1024 * 1024,
+            ..Self::default()
+        }
+    }
+
+    pub fn ai() -> Self {
+        Self {
+            idle: Duration::from_secs(30),
+            total: Duration::from_secs(180),
+            response_bytes: 2 * 1024 * 1024,
+            ..Self::default()
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -136,6 +184,7 @@ pub struct Request {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    pub limits: Option<RequestLimits>,
 }
 
 impl Request {
@@ -145,6 +194,7 @@ impl Request {
             url,
             headers: Vec::new(),
             body: Vec::new(),
+            limits: None,
         }
     }
 
@@ -155,6 +205,11 @@ impl Request {
 
     pub fn body(mut self, body: Vec<u8>) -> Self {
         self.body = body;
+        self
+    }
+
+    pub fn limits(mut self, limits: RequestLimits) -> Self {
+        self.limits = Some(limits);
         self
     }
 

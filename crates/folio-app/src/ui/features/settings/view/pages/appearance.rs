@@ -39,7 +39,6 @@ use gpui_kit::{
 };
 
 use crate::ui::components::muted_label;
-use crate::ui::shell::navigation::SizeClass;
 
 use super::super::*;
 
@@ -197,7 +196,7 @@ fn mode_group(cx: &App) -> Group {
 /// 一半（2026-11-12 读者反馈），缩成一排小卡后这一行只占一条；窄窄一格里
 /// 预览照旧说话，选中态仍走描边 + 勾两条通路。
 fn mode_cards_row(window: &mut Window, cx: &mut App) -> AnyElement {
-    let compact = SizeClass::of(window).is_compact();
+    let compact = crate::ui::host::size_class(window).is_compact();
     let current = ConfigHolder::default_appearance(cx).mode;
     let cards = [
         (Mode::Light, "mode-card-light", tr(cx, "appearance.light")),
@@ -605,7 +604,7 @@ fn theme_cards_row(mode: ThemeMode) -> Row {
 /// 折叠头 + 网格那一行。折叠状态是 `None = 摊开 / Some(读者点过)`，两侧各一格；
 /// 图标在标题**左侧**，合上朝右、摊开朝下 —— 与阅读目录那棵树同一套指向。
 fn theme_section(window: &mut Window, cx: &mut App, mode: ThemeMode) -> AnyElement {
-    let compact = SizeClass::of(window).is_compact();
+    let compact = crate::ui::host::size_class(window).is_compact();
     let fold = window.use_keyed_state(THEME_FOLD_KEY, cx, |_, _| [None::<bool>; 2]);
     let side: usize = if mode.is_dark() { 1 } else { 0 };
     // 默认**收起**（2026-11-12 读者定的档）：选浅/深先看见「有这一格」，点开才见网格。
@@ -693,7 +692,7 @@ fn reading_theme_row(window: &mut Window, cx: &mut App) -> AnyElement {
         .clone()
         .filter(|name| folio_core::infra::reading_theme::find(name).is_some());
     let dark = crate::ui::foundation::reading_theme::dark_side(&appearance, cx);
-    let desktop = !SizeClass::of(window).is_compact();
+    let desktop = !crate::ui::host::size_class(window).is_compact();
     crate::ui::components::ReadingThemePicker {
         selected: current.as_deref(),
         dark,

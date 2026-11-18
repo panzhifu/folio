@@ -104,6 +104,13 @@ pub struct Book {
 }
 
 impl Book {
+    pub(in crate::ui::features::reader) fn estimated_cache_bytes(&self) -> usize {
+        self.spans
+            .iter()
+            .fold(self.document.estimated_cache_bytes(), |bytes, span| {
+                bytes.saturating_add(span.doc.estimated_cache_bytes())
+            })
+    }
     /// 从一份已打开的文档建出一本书，定位到 `locator` 那一章。
     ///
     /// **字体字节不在这一趟读**：`BookFonts::empty()` 先顶上，`FontLoadJob` 随首趟排版作业
@@ -645,6 +652,13 @@ impl Book {
         &mut self,
     ) -> impl Iterator<Item = &mut Document> {
         std::iter::once(&mut self.document).chain(self.spans.iter_mut().map(|span| &mut span.doc))
+    }
+
+    pub(in crate::ui::features::reader) fn release_cache_memory(&mut self) {
+        self.document.release_cache_memory();
+        for span in &mut self.spans {
+            span.doc.release_cache_memory();
+        }
     }
 
     /// 读者偏好变了：所有进窗的章一起作废重排。

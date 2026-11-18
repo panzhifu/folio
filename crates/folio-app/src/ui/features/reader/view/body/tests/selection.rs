@@ -5,7 +5,7 @@ use super::harness::{
     scroll_mode, settle, turn_frame,
 };
 use crate::ui::features::reader::model::chrome::PageMode;
-use crate::ui::shell::NAV_TRANSITION;
+use crate::ui::services::motion::NAV_TRANSITION;
 use folio_core::ChapterExt;
 use folio_core::{Chapter, FlowDoc, Locator};
 use gpui_kit::{

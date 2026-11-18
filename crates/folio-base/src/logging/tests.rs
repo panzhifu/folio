@@ -6,6 +6,50 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::MakeWriter as _;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
+#[test]
+fn startup_diagnostics_do_not_echo_filter_inputs() {
+    use crate::logging::{LEVEL_ENV, init};
+
+    const CHILD_DIR: &str = "FOLIO_TEST_REDACTION_DIR";
+    const SECRET: &str = "SENTINEL_FILTER_CREDENTIAL";
+    if let Some(dir) = std::env::var_os(CHILD_DIR) {
+        init(
+            &Logging {
+                level: SECRET.into(),
+                targets: vec![SECRET.into()],
+                dir: std::path::PathBuf::from(dir).to_string_lossy().into_owned(),
+                stderr: false,
+                ..Logging::default()
+            },
+            None,
+        )
+        .unwrap();
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "logging::tests::startup_diagnostics_do_not_echo_filter_inputs",
+            "--nocapture",
+        ])
+        .env(CHILD_DIR, dir.path())
+        .env(LEVEL_ENV, format!("{SECRET}=trace"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let log = std::fs::read_to_string(dir.path().join("folio.log")).unwrap();
+    for text in [
+        log.as_str(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    ] {
+        assert!(!text.contains(SECRET), "日志过滤参数被回显");
+    }
+    assert!(log.contains("environment_override=true"));
+    assert!(log.contains("target_overrides=1"));
+}
+
 /// 一支 target 的五档级别各发一条。
 ///
 /// 只能写成宏：`tracing` 的 `target:` 要求**字面量**，运行时换个字符串换不掉

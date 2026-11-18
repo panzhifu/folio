@@ -43,6 +43,41 @@
       "skillPath": "skills/find-animation-opportunities/SKILL.md",
       "computedHash": "465d087c41768e4f14ed640dd049036009f613feb55baaa5831b68b33178f9d2"
     },
+    "folio-architecture-review": {
+      "source": "./.agents/skills/folio-architecture-review",
+      "sourceType": "local",
+      "computedHash": "e264f588ae1f465ddaa8dbcb6773d37be2232c40461867fd72aa8fcf04a54b71"
+    },
+    "folio-change-workflow": {
+      "source": "./.agents/skills/folio-change-workflow",
+      "sourceType": "local",
+      "computedHash": "262f9e5192396091fcd38d6e0e6a55282264fa384fa4b0c8af3e6d03afe8de9a"
+    },
+    "folio-data-integrity": {
+      "source": "./.agents/skills/folio-data-integrity",
+      "sourceType": "local",
+      "computedHash": "f14487fa95bd41c5ed60c28f4c2689594a5246883c81c00bea20f524f816134d"
+    },
+    "folio-gpui-delivery": {
+      "source": "./.agents/skills/folio-gpui-delivery",
+      "sourceType": "local",
+      "computedHash": "a25273b000a2a0896c85e7842f79da55c351a0fd47988ea50cc1dc7e4ae52762"
+    },
+    "folio-network-ai": {
+      "source": "./.agents/skills/folio-network-ai",
+      "sourceType": "local",
+      "computedHash": "7cfd342af2c96a0bd5109cdc925332665f30b735e9a780cedbb161574fe5ee32"
+    },
+    "folio-reading-engine": {
+      "source": "./.agents/skills/folio-reading-engine",
+      "sourceType": "local",
+      "computedHash": "dd0e72dfc38d1673bf01fb21f35b5ab4a30cafe9b535abe869129003dea100fc"
+    },
+    "folio-release-validation": {
+      "source": "./.agents/skills/folio-release-validation",
+      "sourceType": "local",
+      "computedHash": "8a1ae7503093cd4500008274ef85d806d93331abeff6abd41bac55f75493523f"
+    },
     "gpui-kit": {
       "source": "longbridge/gpui-kit",
       "sourceType": "github",

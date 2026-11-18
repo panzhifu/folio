@@ -67,10 +67,9 @@ use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, SearchDebounce, TopBar,
     empty_state,
 };
-use crate::ui::features::cloud::{CloudEvent, CloudView};
-use crate::ui::features::opds::{OpdsEvent, OpdsView};
 use crate::ui::foundation::error::{Context as _, report};
 use crate::ui::foundation::file_stem::title_stem;
+use crate::ui::foundation::navigation::{self, SizeClass};
 use crate::ui::host;
 use crate::ui::services::cloud_upload;
 use crate::ui::services::config::ConfigHolder;
@@ -78,7 +77,6 @@ use crate::ui::services::l10n::{book_count, tf, tr};
 use crate::ui::services::library::{delete_book, pick_dir, suggested_dir, target_dir};
 use crate::ui::services::resident;
 use crate::ui::services::transfer;
-use crate::ui::shell::navigation::{self, SizeClass};
 use grid::{Cell, GUTTER, GridSpec, grid_spec, merge_cells};
 use scan::ScanPhase;
 
@@ -122,6 +120,8 @@ pub enum ShelfEvent {
     Deleted(i64),
     /// 多选态变了（进入 / 退出 / 勾选）。外壳据此把底部导航换成多选工具栏。
     SelectionChanged,
+    OpenOpds,
+    OpenCloud,
 }
 
 /// 外壳渲染多选工具栏要的几格。**一次读齐**：分几次 `read` 的话，同一个句柄上读到的
@@ -343,12 +343,7 @@ pub struct ShelfView {
     /// 只要一条：那一页写回书名作者之后报一声，架面重查 —— 那一行字就是这张卡上的。
     /// 每压一页换掉它，上一页的订阅跟着 drop（`Subscription` 一没就退订）。
     pub(in crate::ui::features::shelf) _info_watch: Option<Subscription>,
-    /// OPDS 浏览器那一页的导入事件：有书进了库，架面要重查。
-    _opds_watch: Option<Subscription>,
-    /// 网盘浏览器那一页的导入事件：同一条，谁进了库都报同一声。
-    _cloud_watch: Option<Subscription>,
-    /// 上传实体那一条观察：后台那趟回来要重画进度浮层。与 `_cloud_watch` 同一条
-    /// 「订阅活到这一屏结束」的规矩。
+    /// 上传进度观察随书架生命周期释放。
     _upload_watch: Option<Subscription>,
     /// 「书要拷到哪儿」那块面板里，系统文件夹选择器那条异步链。与 `_import` 同理，要活到选完。
     _pick: Option<Task<()>>,
@@ -423,7 +418,7 @@ impl ShelfView {
         // 尺寸按窗口档位在建的时候就定下：手机上一条满幅的框用默认档（拇指按得中），
         // 桌面工具栏那条用 small 与旁边的按钮同高（见 `toolbar`）。桌面窗口再怎么拉，
         // 档位也夹在 Medium 往上（`SizeClass::of` 的约定），不会中途换档。
-        let compact = SizeClass::of(window).is_compact();
+        let compact = crate::ui::host::size_class(window).is_compact();
         let search = cx.new(|cx| {
             let search = SearchBox::new(tr(cx, "shelf.search_placeholder"), window, cx);
             if compact { search } else { search.small() }
@@ -534,8 +529,6 @@ impl ShelfView {
             _sheet_watches,
             _group_watch: None,
             _info_watch: None,
-            _opds_watch: None,
-            _cloud_watch: None,
             _upload_watch: None,
             _pick: None,
             _access_watch: access_watch,
@@ -662,45 +655,20 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 架面「⋮」菜单里的 OPDS 书源：把浏览器压成一整页。
-    ///
-    /// 与「信息」页同一条栈：系统返回键弹掉整页；浏览器内部的子目录由它自己的顶栏退。
-    /// 它下载成功时往外报一条 [`OpdsEvent::Imported`]，架面收到就重查一次。
     pub(in crate::ui::features::shelf) fn open_opds(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let page = cx.new(|cx| OpdsView::new(self.stack.clone(), cx));
-        self._opds_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
-            if matches!(event, OpdsEvent::Imported) {
-                this.force_reload(cx);
-                this.pending_reload = true;
-            }
-        }));
-        let _ = self
-            .stack
-            .update(cx, |state, cx| state.push(page, NavMotion::Animated, cx));
+        cx.emit(ShelfEvent::OpenOpds);
     }
 
-    /// 架面「⋮」菜单里的网盘取书：把浏览器压成一整页。接线与 [`Self::open_opds`]
-    /// 同一条 —— 系统返回键弹掉整页，浏览器内部自己管目录层级；下载成功报
-    /// [`CloudEvent::Imported`]，架面重查。
     pub(in crate::ui::features::shelf) fn open_cloud(
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let page = cx.new(|cx| CloudView::new(self.stack.clone(), cx));
-        self._cloud_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
-            if matches!(event, CloudEvent::Imported) {
-                this.force_reload(cx);
-                this.pending_reload = true;
-            }
-        }));
-        let _ = self
-            .stack
-            .update(cx, |state, cx| state.push(page, NavMotion::Animated, cx));
+        cx.emit(ShelfEvent::OpenCloud);
     }
 
     /// 按当前搜索词**强制**重查一遍架面。
@@ -1765,6 +1733,8 @@ impl ShelfView {
             ShelfEvent::Open(book_id) => cx.emit(ShelfEvent::Open(*book_id)),
             // 那一页进了多选态：外壳要据此把底部导航换成工具栏，所以这一声也转一道。
             ShelfEvent::SelectionChanged => cx.emit(ShelfEvent::SelectionChanged),
+            ShelfEvent::OpenOpds => cx.emit(ShelfEvent::OpenOpds),
+            ShelfEvent::OpenCloud => cx.emit(ShelfEvent::OpenCloud),
             ShelfEvent::Deleted(book_id) => {
                 // 删掉一本改的是**两片**：那一页自己已经重查过了，身后的整架还留着那一格。
                 this.items.clear();
@@ -2113,7 +2083,7 @@ impl Render for ShelfView {
         let flow = self.flow.clone();
         // 顶部那一行按窗口档位换：手机上满幅的搜索框是「先搜再翻」，桌面上同一颗框
         // 拉到整片内容宽就成了一块空白，所以那边是定宽搜索框 + 导入的工具栏。
-        let size = SizeClass::of(window);
+        let size = crate::ui::host::size_class(window);
         // 顶栏让位不再由这一屏判：外壳听内容那一路的滚动增量（`shell::AppShell::note_scroll`），
         // 四屏共用一句判据，投影由 [`ShelfView::set_fold`] 递回来。
         let top = match self.scope {
@@ -2262,9 +2232,9 @@ mod tests {
     use super::grid::{GAP, GUTTER, columns_for, grid_spec};
     use super::{ShelfScope, cover_scale, share_file_name};
     // 这三条是留给其余用例的：它们散在测试模块里几处（架面起窗、切目的地、压页）。
+    use crate::ui::foundation::navigation;
+    use crate::ui::foundation::navigation::SizeClass;
     use crate::ui::services::config::ConfigHolder;
-    use crate::ui::shell::navigation;
-    use crate::ui::shell::navigation::SizeClass;
     use gpui_kit::base::NavMotion;
 
     /// 封面缩放只认「这一排离视口中心多远」：正中不动，边缘收到 0.96。

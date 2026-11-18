@@ -1,14 +1,4 @@
-//! SSE（Server-Sent Events）流的解析：OpenAI 兼容服务的**流式问答**骑在
-//! [`Transport::download`](folio_net::Transport::download) 上 —— 传输层已经给好了
-//! 「非 2xx 状态门 + 分块读 + 块间取消检查点」，本模块只补一件事：把块里的字节按
-//! `data:` 行拆开，取 `choices[0].delta.content` 交给调用方，攒成一份完整答案。
-//!
-//! **嗅探回退**：有的网关不认 `stream: true`，回一整个 JSON 对象而不是事件流。
-//! 第一块去掉空白后以 `{` 开头就按整份 JSON 解析（读完再解），否则按 SSE 走 ——
-//! 调用方（`ChatCompletion::ask_stream`）不用知道对面是哪一种。
-//!
-//! 取消不是这里的事：`download` 在块与块之间看旗标，取消时把 `Err(Cancelled)`
-//! 抛回调用方；已经交出去的增量留在调用方手里（打字机不回滚）。
+//! Bounded OpenAI-compatible SSE decoding; JSON fallback has the same wire budget.
 
 use std::io;
 
@@ -17,31 +7,28 @@ use serde_json::Value;
 
 use crate::ai::{AiError, Answer, MAX_ANSWER_CHARS, answer_from_body, clip};
 
-/// 喂字节、交增量的桶。实现 [`Sink`] 是为了直接骑在 `Transport::download` 上；
-/// 流结束后用 [`SseSink::answer`](Self::answer) 取攒好的那份。
+pub(crate) const MAX_STREAM_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_EVENT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_EVENTS: usize = 8192;
+
 pub(crate) struct SseSink<'a> {
-    /// 增量出口：每收到一段正文就被调一次（打字机的那一笔）。
     on: &'a mut (dyn FnMut(&str) + Send),
-    /// 还没凑成整行的字节（SSE）或整份 body（JSON 回退）。
     buf: Vec<u8>,
-    /// 攒到现在的正文。
     text: String,
+    chars: usize,
+    received: usize,
+    events: usize,
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
-    /// 对面是哪一种应答：第一块见了才定（嗅探回退，见模块文档）。
     mode: Mode,
-    /// 见了 `[DONE]` 或错误事件：之后的块不再吃。
     stopped: bool,
-    /// 事件流里裹过来的错误（错误也包成一条 `data:` 事件的服务存在）。
+    terminal: bool,
     error: Option<String>,
 }
 
 enum Mode {
-    /// 第一块还没到。
     Undecided,
-    /// 正常的 `data:` 事件流。
     Sse,
-    /// 网关不理 `stream: true`，回了一整个 JSON。
     Json,
 }
 
@@ -51,23 +38,25 @@ impl<'a> SseSink<'a> {
             on,
             buf: Vec::new(),
             text: String::new(),
+            chars: 0,
+            received: 0,
+            events: 0,
             prompt_tokens: None,
             completion_tokens: None,
             mode: Mode::Undecided,
             stopped: false,
+            terminal: false,
             error: None,
         }
     }
 
-    /// 流结束（`download` 回了 `Ok`）后取答案。JSON 回退在这里解整份 body；
-    /// SSE 攒好的直接交。事件里裹过错误时在这里爆出来。
     pub(crate) fn answer(&self) -> Result<Answer, AiError> {
         if let Some(reason) = &self.error {
             return Err(AiError::Malformed(reason.clone()));
         }
         match self.mode {
-            // 咬不准就按 JSON 试：空体两路都解不开，报错口径一致。
             Mode::Undecided | Mode::Json => answer_from_body(&self.buf),
+            Mode::Sse if !self.terminal => Err(AiError::Malformed("事件流未收到完成标记".into())),
             Mode::Sse => Ok(Answer {
                 text: clip(self.text.trim(), MAX_ANSWER_CHARS),
                 prompt_tokens: self.prompt_tokens,
@@ -76,76 +65,100 @@ impl<'a> SseSink<'a> {
         }
     }
 
-    fn feed(&mut self, chunk: &[u8]) {
+    fn feed(&mut self, chunk: &[u8]) -> io::Result<()> {
+        if chunk.len() > MAX_STREAM_BYTES.saturating_sub(self.received) {
+            return self.reject("事件流超过容量上限");
+        }
+        self.received += chunk.len();
         match self.mode {
-            Mode::Undecided => self.sniff(chunk),
+            Mode::Undecided => {
+                self.buf.extend_from_slice(chunk);
+                match self.buf.iter().find(|b| !b.is_ascii_whitespace()) {
+                    Some(b'{') => self.mode = Mode::Json,
+                    Some(_) => {
+                        self.mode = Mode::Sse;
+                        let bytes = std::mem::take(&mut self.buf);
+                        self.feed_sse(&bytes)?;
+                    }
+                    None if self.buf.len() > MAX_EVENT_BYTES => {
+                        return self.reject("事件流前缀超过上限");
+                    }
+                    None => {}
+                }
+            }
             Mode::Json => self.buf.extend_from_slice(chunk),
-            Mode::Sse => self.feed_sse(chunk),
+            Mode::Sse => self.feed_sse(chunk)?,
         }
+        Ok(())
     }
 
-    /// 第一块定模式。前导空白（有的网关爱带换行）不参与判断；全空白就等下一块。
-    fn sniff(&mut self, chunk: &[u8]) {
-        self.buf.extend_from_slice(chunk);
-        let first = self
-            .buf
-            .iter()
-            .position(|b| !b.is_ascii_whitespace())
-            .map(|at| self.buf[at]);
-        match first {
-            Some(b'{') => self.mode = Mode::Json,
-            Some(_) => {
-                self.mode = Mode::Sse;
-                let buffered = std::mem::take(&mut self.buf);
-                self.feed_sse(&buffered);
+    fn reject<T>(&mut self, reason: &'static str) -> io::Result<T> {
+        self.error = Some(reason.into());
+        Err(io::Error::new(io::ErrorKind::InvalidData, reason))
+    }
+
+    fn feed_sse(&mut self, mut chunk: &[u8]) -> io::Result<()> {
+        while !chunk.is_empty() {
+            let end = chunk
+                .iter()
+                .position(|b| *b == b'\n')
+                .map(|at| at + 1)
+                .unwrap_or(chunk.len());
+            if end > MAX_EVENT_BYTES.saturating_sub(self.buf.len()) {
+                return self.reject("单条事件超过容量上限");
             }
-            None => {}
-        }
-    }
-
-    fn feed_sse(&mut self, chunk: &[u8]) {
-        self.buf.extend_from_slice(chunk);
-        // 只吃整行：半行（事件跨块）留在 buf 里等下一块。
-        while let Some(at) = self.buf.iter().position(|b| *b == b'\n') {
-            let mut line: Vec<u8> = self.buf.drain(..=at).collect();
-            line.pop(); // 那个 \n
-            if line.last() == Some(&b'\r') {
+            self.buf.extend_from_slice(&chunk[..end]);
+            chunk = &chunk[end..];
+            if self.buf.last() == Some(&b'\n') {
+                let mut line = std::mem::take(&mut self.buf);
                 line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                if !self.stopped {
+                    self.eat_line(&line)?;
+                }
             }
-            if self.stopped {
-                continue;
-            }
-            self.eat_line(&line);
         }
+        Ok(())
     }
 
-    /// 一条完整的 SSE 行。只认 `data:`：`event:`/`id:`/`retry:` 与 `:` 开头的
-    /// keepalive 注释都与正文无关。
-    fn eat_line(&mut self, line: &[u8]) {
-        let line = match std::str::from_utf8(line) {
-            Ok(line) => line.trim(),
-            Err(_) => return,
-        };
+    fn eat_line(&mut self, line: &[u8]) -> io::Result<()> {
+        let line = std::str::from_utf8(line)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "事件不是 UTF-8"))?
+            .trim();
         let Some(payload) = line.strip_prefix("data:") else {
-            return;
+            return Ok(());
         };
         let payload = payload.trim();
+        if payload.is_empty() {
+            return Ok(());
+        }
+        self.events += 1;
+        if self.events > MAX_EVENTS {
+            return self.reject("事件数量超过上限");
+        }
         if payload == "[DONE]" {
             self.stopped = true;
-            return;
+            self.terminal = true;
+            return Ok(());
         }
-        if payload.is_empty() {
-            return;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(payload) else {
-            return; // 半截 JSON（理论上不会：事件以行为界）按噪音丢掉。
+        let value: Value = match serde_json::from_str(payload) {
+            Ok(value) => value,
+            Err(_) => return self.reject("事件 JSON 不完整"),
         };
         if value.get("error").is_some() {
-            self.error = Some("服务在流里回了错误".to_string());
+            self.error = Some("服务在流里回了错误".into());
             self.stopped = true;
-            return;
+            return Ok(());
         }
-        if let Some(usage) = value.get("usage").filter(|usage| usage.is_object()) {
+        if value
+            .pointer("/choices/0/finish_reason")
+            .is_some_and(|v| v.is_string())
+        {
+            self.terminal = true;
+        }
+        if let Some(usage) = value.get("usage").filter(|v| v.is_object()) {
             self.prompt_tokens = usage
                 .get("prompt_tokens")
                 .and_then(Value::as_u64)
@@ -155,41 +168,48 @@ impl<'a> SseSink<'a> {
                 .and_then(Value::as_u64)
                 .or(self.completion_tokens);
         }
-        // 正文在 delta.content；有的网关在最后一条里用 message.content 复述整段，
-        // 两种都认，拼的时候不去重 —— 重复的代价是显示层多几行，漏掉的代价是缺一段。
-        let piece = value
+        if let Some(piece) = value
             .pointer("/choices/0/delta/content")
             .or_else(|| value.pointer("/choices/0/message/content"))
-            .and_then(Value::as_str);
-        if let Some(piece) = piece
-            && !piece.is_empty()
+            .and_then(Value::as_str)
         {
-            self.text.push_str(piece);
-            (self.on)(piece);
+            let remaining = MAX_ANSWER_CHARS.saturating_sub(self.chars);
+            let piece: String = piece.chars().take(remaining).collect();
+            if !piece.is_empty() {
+                self.chars += piece.chars().count();
+                self.text.push_str(&piece);
+                (self.on)(&piece);
+            }
         }
+        Ok(())
     }
 }
 
 impl Sink for SseSink<'_> {
     fn write(&mut self, chunk: &[u8]) -> io::Result<()> {
-        self.feed(chunk);
-        Ok(())
+        self.feed(chunk)
     }
 
-    /// 契约要求的收尾：答案不从这一步出（见 [`SseSink::answer`]），这里没有要清的东西。
     fn finish(&mut self) -> io::Result<()> {
+        if matches!(self.mode, Mode::Sse) && !self.buf.is_empty() && !self.stopped {
+            let tail = std::mem::take(&mut self.buf);
+            self.eat_line(&tail)?;
+        }
         Ok(())
     }
 
-    fn abort(&mut self) {}
+    fn abort(&mut self) {
+        self.buf.clear();
+        self.text.clear();
+        self.error = Some("事件流已中止".into());
+    }
 }
-
 #[cfg(test)]
 mod tests {
     //! 喂分块字节钉三件事：增量按 `data:` 事件出、`[DONE]` 之后不再吃、
     //! 整份 JSON 的回退路走得通。
 
-    use super::SseSink;
+    use crate::stream::{MAX_EVENT_BYTES, MAX_EVENTS, MAX_STREAM_BYTES, SseSink};
     use folio_net::Sink;
 
     /// 喂一组块，收下每一次增量。
@@ -263,5 +283,42 @@ mod tests {
         sink.finish().unwrap();
         assert!(matches!(sink.answer(), Err(super::AiError::Malformed(_))));
         assert!(deltas.is_empty());
+    }
+
+    #[test]
+    fn stream_limits_reject_unbounded_lines_bodies_and_event_counts() {
+        let mut on = |_: &str| {};
+        let mut sink = SseSink::new(&mut on);
+        assert!(sink.write(&vec![b'x'; MAX_EVENT_BYTES + 1]).is_err());
+        let mut sink = SseSink::new(&mut on);
+        assert!(sink.write(&vec![b'{'; MAX_STREAM_BYTES + 1]).is_err());
+        let mut sink = SseSink::new(&mut on);
+        for _ in 0..MAX_EVENTS {
+            sink.write(b"data: {}\n").unwrap();
+        }
+        assert!(sink.write(b"data: {}\n").is_err());
+    }
+
+    #[test]
+    fn incomplete_stream_is_not_a_successful_answer_and_output_is_bounded() {
+        let mut output = String::new();
+        let mut on = |text: &str| output.push_str(text);
+        let mut sink = SseSink::new(&mut on);
+        let piece = "界".repeat(crate::ai::MAX_ANSWER_CHARS + 1);
+        let data = format!(
+            "data: {}\n",
+            serde_json::json!({"choices":[{"delta":{"content":piece}}]})
+        );
+        sink.write(data.as_bytes()).unwrap();
+        sink.finish().unwrap();
+        assert!(sink.answer().is_err());
+        sink.write(b"data: [DONE]").unwrap();
+        sink.finish().unwrap();
+        assert_eq!(
+            sink.answer().unwrap().text.chars().count(),
+            crate::ai::MAX_ANSWER_CHARS
+        );
+        drop(sink);
+        assert_eq!(output.chars().count(), crate::ai::MAX_ANSWER_CHARS);
     }
 }

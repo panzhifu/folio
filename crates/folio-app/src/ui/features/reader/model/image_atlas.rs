@@ -1,34 +1,10 @@
-//! 书里的图与 GPU 图集之间那一层**会回收**的缓存。
+//! 书籍图片的像素与 GPU 图集缓存，按可见范围、离场帧数和字节预算回收。
 //!
-//! ## 为什么要有这一层
-//!
-//! gpui 把每张画过的图放进 sprite atlas，一格的大小是**图的原始像素**（`宽 × 高 × 4`），
-//! 而**没有任何一条生产可用的路把它放掉**：字形那批格子的确是永远留着（gpui 里没有删字形的口），
-//! 图片这一批本来是有回收口的 —— `App::drop_image` + `RetainAllImageCache` —— 可那个口要拿到
-//! 解好的 `RenderImage` 句柄，而我们从前交给 `img` 的是 `ImageSource::Image(Arc<Image>)`
-//! （编码字节），解出来的那一份由窗口自己的 asset 表持有，界面碰不到。
-//! `ImageSource::remove_asset` 只清那张表里的一条字节 → 像素是放了，**图集那一格照样留着**，
-//! 回屏还会再传一格 —— 用它「回收」是倒贴。
-//!
-//! 于是《未来简史》55 张插图读完全书就是 **126.8 MB** 永久压在显存里（2026-10-15 两条独立
-//! 路子数过：设备库里的 `images` 表，与 EPUB 里真实的 PNG IHDR / JPEG SOF 头，同一个总数）。
-//! 一页 1024² 的纹理才 4 MB，那是三十多张纹理。
-//!
-//! ## 这一层做的事
-//!
-//! 把「谁持有像素」从窗口那张表换成**我们自己的表**：
-//!
-//! - 交给 `img` 的是 `ImageSource::Render(Arc<RenderImage>)`，那份像素的**唯一强引用**
-//!   就在这个实体手里（`Arc::strong_count == 1` 是回收的前提，也是它成立的证据）；
-//! - 解像素的那一趟跑在**后台线程**，而且用的就是 gpui 自己那个公开入口
-//!   （`Image::to_image_data`）—— BGRA 换位、EXIF 方向、动图逐帧的口径与从前
-//!   `ImageSource::Image` 那条路**逐字相同**，我们没有自研解码；
-//! - 一张图离开可见带、又过了 [`policy::HELD_AFTER_LEAVE`] 帧，就 `App::drop_image` 放掉那一格
-//!   并把手里的像素一起扔了。回屏时自动重传（`window.rs` 那句
-//!   `sprite_atlas.get_or_insert_with`），代价是重解一次 —— 后台那一趟，不在绘制帧里。
-//!
-//! 稳态占用的上界因此是「这一屏的图 + 离场不到 [`policy::HELD_AFTER_LEAVE`] 帧的那几屏」，
-//! 再叠一条 [`soft_limit`] 的封顶。从前那个上界是**整本书**。
+//! 后台通过 GPUI 的 `Image::to_image_data` 解码，保留其 BGRA、EXIF 和动图处理口径。
+//! 绘制使用 `ImageSource::Render`；本实体持有像素，`Arc::strong_count == 1` 才可回收。
+//! 离开可见带超过 [`policy::HELD_AFTER_LEAVE`] 帧后调用 `App::drop_image`，同时释放像素；
+//! 回屏后由后台重新解码、上传。仅调用 `ImageSource::remove_asset` 不会释放图集格子。
+//! 图集按原始像素记账（宽 × 高 × 4），软顶由 [`soft_limit`] 给出。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,10 +18,7 @@ use gpui_kit::{
 
 use crate::ui::foundation::images::DecodeRequest;
 
-/// 手里最多攒多少字节的像素 —— 软顶，按设备分档。
-///
-/// 判据与数值都住在 `folio_core::cache::policy`：那一半不碰像素，所以能在 core 的
-/// 单元测试里离线钉住设备分档。这里只把「当前设备」问一次。
+/// 按当前设备分档的像素软顶，单位为字节；策略由 core 提供。
 pub(in crate::ui::features::reader) fn soft_limit() -> usize {
     policy::soft_limit(policy::device_class())
 }
@@ -60,15 +33,13 @@ pub(in crate::ui::features::reader) fn set_screen_width(width: f32) {
     policy::set_screen_width(width);
 }
 
-/// 水墨那一档此刻开着没有。与 [`SCREEN_WIDTH`] 同一手法、同一理由：去不去彩度是**这一档**
-/// 的属性而不是「这一本图集」的属性，而解像素那一路在后台线程里、手上没有 `&App`。
+/// 当前档位是否压低彩度；后台解码没有 `&App`，通过此原子值读取。
 static INK_PIXELS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// 绘制侧每帧推一次，返回**这一帧是不是翻了档**（`true` = 与上一帧不同）。
 ///
-/// 翻了档要清一次图集：表里存的键是「哪一本图的哪一路」，里面没有「哪一档」这一格，
-/// 所以彩色那一份会原样留着继续画。清与调这一句都在 `view::body` 那一处，两处不必各存
-/// 一份「上一帧是什么」。
+/// 图集键不含档位，翻档后必须清掉旧像素；调用和清理由 `view::body` 统一处理，
+/// 不再另存上一帧档位。
 pub(in crate::ui::features::reader) fn set_ink_pixels(ink: bool) -> bool {
     INK_PIXELS.swap(ink, std::sync::atomic::Ordering::Relaxed) != ink
 }
@@ -229,6 +200,7 @@ pub struct ImageAtlas {
     /// 建实体时读一次（[`configured_cache_bytes`]）：这一格不是设置屏上的旋钮，
     /// 为它在每个渲染帧里问一次配置全局不值。
     cache_bytes: Option<usize>,
+    pub(in crate::ui::features::reader) session_budget: Option<usize>,
 }
 
 impl ImageAtlas {
@@ -619,7 +591,35 @@ impl ImageAtlas {
     /// 覆盖只换**那个数**，不换规矩 —— 离场的那些才挤、在屏上的永不碰、焦点页自己
     /// 装不下时仍可涨到两倍（[`policy::hard_of`]），全部在 core 的 `plan` 里重算。
     fn soft_cap(&self) -> usize {
-        self.cache_bytes.unwrap_or_else(soft_limit)
+        let local = self.cache_bytes.unwrap_or_else(soft_limit);
+        self.session_budget
+            .map_or(local, |budget| local.min(budget))
+    }
+
+    /// CPU 为实际像素长度，GPU 是已上传像素的估算，不含渲染器对齐和捕获纹理。
+    pub(in crate::ui::features::reader) fn memory_usage(&self) -> (usize, usize, usize) {
+        let gpu = self
+            .slots
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Held {
+                    bytes,
+                    uploaded: true,
+                    ..
+                } => Some(*bytes),
+                _ => None,
+            })
+            .sum();
+        let pending = self
+            .slots
+            .values()
+            .filter(|slot| matches!(slot, Slot::Loading { .. }))
+            .count();
+        (self.bytes.saturating_add(self.preview_bytes), gpu, pending)
+    }
+
+    pub(in crate::ui::features::reader) fn set_session_budget(&mut self, bytes: usize) {
+        self.session_budget = Some(bytes.max(1));
     }
 
     /// 系统内存告警时的一刀：留住最近两帧上过屏的，其余 `Held` 放掉，未落地的解码取消。

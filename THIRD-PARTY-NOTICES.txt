@@ -533,7 +533,7 @@ Apache License 2.0
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - zopfli 0.8.3
+  - zopfli 0.8.4
 
                                  Apache License
                            Version 2.0, January 2004
@@ -2013,13 +2013,14 @@ Apache License
 
 --------------------------------------------------------------------------------
 Apache License 2.0
-（11 个）
+（12 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - gpui-kit-assets 0.9.0
-  - gpui-kit 0.9.0
-  - gpui-pre-platform 0.3.11
+  - gpui-component-macros 0.9.1
+  - gpui-kit-assets 0.9.1
+  - gpui-kit 0.9.1
+  - gpui-pre-platform 0.3.12
   - gpui-pre-mobile 0.1.0
   - ab_glyph_rasterizer 0.1.10
   - dunce 1.0.5
@@ -2110,23 +2111,23 @@ Apache License 2.0
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - gpui-pre-apple 0.3.11
-  - gpui-pre-wgpu 0.3.11
-  - gpui-pre-windows 0.3.11
-  - gpui-pre 0.3.11
-  - gpui-pre-collections 0.3.11
-  - gpui-pre-derive-refineable 0.3.11
-  - gpui-pre-http-client 0.3.11
-  - gpui-pre-linux 0.3.11
-  - gpui-pre-macos 0.3.11
-  - gpui-pre-macros 0.3.11
-  - gpui-pre-refineable 0.3.11
-  - gpui-pre-scheduler 0.3.11
-  - gpui-pre-shared-string 0.3.11
-  - gpui-pre-sum-tree 0.3.11
-  - gpui-pre-util 0.3.11
-  - gpui-pre-ztracing-macro 0.3.11
-  - gpui-pre-ztracing 0.3.11
+  - gpui-pre-apple 0.3.12
+  - gpui-pre-wgpu 0.3.12
+  - gpui-pre-windows 0.3.12
+  - gpui-pre 0.3.12
+  - gpui-pre-collections 0.3.12
+  - gpui-pre-derive-refineable 0.3.12
+  - gpui-pre-http-client 0.3.12
+  - gpui-pre-linux 0.3.12
+  - gpui-pre-macos 0.3.12
+  - gpui-pre-macros 0.3.12
+  - gpui-pre-refineable 0.3.12
+  - gpui-pre-scheduler 0.3.12
+  - gpui-pre-shared-string 0.3.12
+  - gpui-pre-sum-tree 0.3.12
+  - gpui-pre-util 0.3.12
+  - gpui-pre-ztracing-macro 0.3.12
+  - gpui-pre-ztracing 0.3.12
 
 Copyright 2022 - 2025 Zed Industries, Inc.
 
@@ -2354,13 +2355,12 @@ Apache License
 
 --------------------------------------------------------------------------------
 Apache License 2.0
-（3 个）
+（2 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - gpui-base 0.9.0
-  - gpui-component-macros 0.9.0
-  - gpui-component 0.9.0
+  - gpui-base 0.9.1
+  - gpui-component 0.9.1
 
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
 
@@ -2597,7 +2597,7 @@ BSD 3-Clause "New" or "Revised" License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - encoding_rs 0.8.42
+  - encoding_rs 0.8.44
 
 // Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 //
@@ -2917,7 +2917,7 @@ BSD 3-Clause "New" or "Revised" License
 
 用到这一份的：
   - alloc-stdlib 0.2.4
-  - exr 1.74.2
+  - exr 1.74.3
   - sha1_smol 1.0.1
 
 Copyright (c) <year> <owner>. 
@@ -2939,7 +2939,7 @@ BSD 3-Clause "New" or "Revised" License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - encoding_rs 0.8.42
+  - encoding_rs 0.8.44
 
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 
@@ -2975,7 +2975,7 @@ Creative Commons Zero v1.0 Universal
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - ppmd-rust 1.5.1
+  - ppmd-rust 1.5.2
 
 CC0 1.0 Universal
 
@@ -3104,7 +3104,7 @@ Creative Commons Zero v1.0 Universal
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - notify 8.2.0
+  - notify 8.2.2
 
 Creative Commons CC0 1.0 Universal
 
@@ -3286,7 +3286,7 @@ Community Data License Agreement Permissive 2.0
 
 用到这一份的：
   - webpki-roots 0.26.11
-  - webpki-roots 1.0.9
+  - webpki-roots 1.0.12
 
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -3999,7 +3999,7 @@ ISC License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - rustls-webpki 0.103.15
+  - rustls-webpki 0.103.17
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -4214,7 +4214,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - schemars 1.2.2
+  - schemars 1.2.3
 
 #![allow(clippy::all)]
 use crate::_alloc_prelude::*;
@@ -5223,11 +5223,11 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - backtrace 0.3.76
-  - cc 1.6.0
+  - backtrace 0.3.77
+  - cc 1.11.1
   - cfg-if 1.0.5
   - filetime 0.2.29
-  - find-msvc-tools 0.1.14
+  - find-msvc-tools 0.1.15
   - jobserver 0.1.35
   - pkg-config 0.3.34
   - rustc-demangle 0.1.28
@@ -5296,7 +5296,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - errno 0.3.14
+  - errno 0.3.15
 
 Copyright (c) 2014 Chris Wong
 
@@ -5331,7 +5331,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - mime 0.3.17
+  - mime 0.3.18
 
 Copyright (c) 2014 Sean McArthur
 
@@ -5364,7 +5364,7 @@ MIT License
   - bitflags 1.3.2
   - bitflags 2.13.2
   - glob 0.3.4
-  - log 0.4.34
+  - log 0.4.35
   - num-bigint-dig 0.9.1
   - num-bigint 0.4.8
   - num-complex 0.4.6
@@ -5410,7 +5410,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - uuid 1.27.0
+  - uuid 1.29.2
 
 Copyright (c) 2014 The Rust Project Developers
 Copyright (c) 2018 Ashley Mannix, Christopher Armstrong, Dylan DPC, Hunar Roop Kahlon
@@ -5611,7 +5611,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - flate2 1.1.10
+  - flate2 1.1.11
 
 Copyright (c) 2014-2026 Alex Crichton
 
@@ -5838,7 +5838,7 @@ MIT License
 
 用到这一份的：
   - new_debug_unreachable 1.0.6
-  - ordered-float 5.5.0
+  - ordered-float 5.5.1
 
 Copyright (c) 2015 Jonathan Reem
 
@@ -5911,7 +5911,7 @@ MIT License
 
 用到这一份的：
   - tempfile 3.27.0
-  - xattr 1.6.1
+  - xattr 1.7.0
 
 Copyright (c) 2015 Steven Allen
 
@@ -5946,7 +5946,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - object 0.37.3
+  - object 0.40.0
 
 Copyright (c) 2015 The Gimli Developers
 
@@ -5981,14 +5981,14 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - gimli 0.32.3
+  - gimli 0.34.0
   - heck 0.4.1
   - heck 0.5.0
   - unicode-bidi 0.3.18
   - unicode-id 0.3.7
   - unicode-properties 0.1.3
   - unicode-segmentation 1.13.3
-  - unicode-width 0.2.2
+  - unicode-width 0.2.3
 
 Copyright (c) 2015 The Rust Project Developers
 
@@ -6540,7 +6540,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - rustls 0.23.45
+  - rustls 0.23.46
 
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
 
@@ -6829,7 +6829,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - equivalent 1.0.2
+  - equivalent 1.0.3
 
 Copyright (c) 2016--2023
 
@@ -6864,7 +6864,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - addr2line 0.25.1
+  - addr2line 0.27.1
 
 Copyright (c) 2016-2018 The gimli Developers
 
@@ -6969,7 +6969,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - sha2 0.11.0
+  - sha2 0.11.1
 
 Copyright (c) 2016-2026 The RustCrypto Project Developers
 Copyright (c) 2016 Artyom Pavlov
@@ -7314,7 +7314,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - arc-swap 1.9.2
+  - arc-swap 1.9.5
 
 Copyright (c) 2017 arc-swap developers
 
@@ -7705,7 +7705,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - smallvec 1.16.2
+  - smallvec 1.16.5
 
 Copyright (c) 2018 The Servo Project Developers
 
@@ -7805,7 +7805,7 @@ MIT License
 
 用到这一份的：
   - svgtypes 0.15.3
-  - svgtypes 0.16.1
+  - svgtypes 0.16.2
   - ttf-parser 0.25.1
 
 Copyright (c) 2018 Yevhenii Reizner
@@ -8750,7 +8750,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - yazi 0.2.1
+  - yazi 0.2.2
 
 Copyright (c) 2020 Chad Brokaw
 
@@ -8843,7 +8843,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - litrs 1.0.0
+  - litrs 1.0.1
 
 Copyright (c) 2020 Project Developers
 
@@ -8878,7 +8878,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - memmap2 0.9.11
+  - memmap2 0.9.12
 
 Copyright (c) 2020 Yevhenii Reizner
 Copyright (c) 2015 Dan Burkert
@@ -8984,7 +8984,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - const-oid 0.10.2
+  - const-oid 0.10.3
   - cpufeatures 0.3.1
 
 Copyright (c) 2020-2026 The RustCrypto Project Developers
@@ -9336,7 +9336,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - rustls-pki-types 1.15.1
+  - rustls-pki-types 1.16.0
 
 Copyright (c) 2023 Dirkjan Ochtman <dirkjan@ochtman.nl>
 
@@ -9428,7 +9428,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - notify-types 2.1.0
+  - notify-types 2.3.0
 
 Copyright (c) 2023 Notify Contributors
 
@@ -9527,7 +9527,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - deranged 0.5.8
+  - deranged 0.5.9
 
 Copyright (c) 2024 Jacob Pratt et al.
 
@@ -9552,16 +9552,19 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（6 个）
+（9 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - zbus 5.19.0
+  - zbus 6.2.1
   - zbus_macros 5.19.0
-  - zbus_names 4.3.4
+  - zbus_macros 6.2.1
+  - zbus_names 4.3.5
+  - zbus_utils 6.1.0
   - zbus_xml 5.2.1
-  - zvariant 5.15.0
-  - zvariant_derive 5.15.0
+  - zvariant 5.15.1
+  - zvariant_derive 5.15.1
 
 Copyright (c) 2024 Zeeshan Ali Khan & zbus contributors
 
@@ -9631,7 +9634,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - zcheapstr 1.1.0
+  - zcheapstr 1.2.0
 
 Copyright (c) 2026 Zeeshan Ali Khan & zcheapstr contributors
 
@@ -9662,24 +9665,65 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
+（1 个）
+--------------------------------------------------------------------------------
+
+用到这一份的：
+  - zruntime 0.2.2
+
+Copyright (c) 2026 Zeeshan Ali Khan & zruntime contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+The broadcast channel (`src/broadcast.rs`), its tests (`src/tests/broadcast.rs`) and its
+benchmark (`benches/broadcast.rs`) come from the async-broadcast crate
+(https://github.com/smol-rs/async-broadcast), under the license above and this notice:
+
+Copyright (c) 2020 Yoshua Wuyts, Stjepan Glavina & Zeeshan Ali Khan
+
+
+--------------------------------------------------------------------------------
+MIT License
 （14 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - annotate-snippets 0.12.16
+  - annotate-snippets 0.12.18
   - anstyle 1.0.14
   - env_filter 0.1.4
   - serde_spanned 0.6.9
-  - serde_spanned 1.1.2
+  - serde_spanned 1.1.3
   - toml 0.8.23
-  - toml 1.1.7+spec-1.1.0
+  - toml 1.2.1+spec-1.1.0
   - toml_datetime 0.6.11
-  - toml_datetime 1.1.2+spec-1.1.0
+  - toml_datetime 1.1.3+spec-1.1.0
   - toml_edit 0.22.27
-  - toml_edit 0.25.16+spec-1.1.0
-  - toml_parser 1.1.4+spec-1.1.0
+  - toml_edit 0.25.19+spec-1.1.0
+  - toml_parser 1.1.5+spec-1.1.0
   - toml_write 0.1.2
-  - toml_writer 1.1.3+spec-1.1.0
+  - toml_writer 1.2.0+spec-1.1.0
 
 Copyright (c) Individual contributors
 
@@ -9760,30 +9804,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
---------------------------------------------------------------------------------
-MIT License
-（9 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - hayro-ccitt 0.5.0
-  - hayro-cmap 0.1.1
-  - hayro-font 0.5.0
-  - hayro-interpret 0.9.0
-  - hayro-jbig2 0.4.0
-  - hayro-jpeg2000 0.5.0
-  - hayro-postscript 0.2.0
-  - hayro-syntax 0.9.0
-  - hayro 0.9.0
-
-Copyright (c) The Hayro Authors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
@@ -10050,6 +10070,24 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
+（2 个）
+--------------------------------------------------------------------------------
+
+用到这一份的：
+  - multiversion-macros 0.8.1
+  - multiversion 0.8.1
+
+Copyright 2019 Caleb Zulawski
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+MIT License
 （1 个）
 --------------------------------------------------------------------------------
 
@@ -10174,12 +10212,29 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
+（1 个）
+--------------------------------------------------------------------------------
+
+用到这一份的：
+  - target-features 0.1.6
+
+Copyright 2022 Caleb Zulawski
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+--------------------------------------------------------------------------------
+MIT License
 （2 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - zerocopy-derive 0.8.62
-  - zerocopy 0.8.62
+  - zerocopy-derive 0.8.63
+  - zerocopy 0.8.63
 
 Copyright 2023 The Fuchsia Authors
 
@@ -10211,14 +10266,15 @@ DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（4 个）
+（5 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - chardetng 1.0.0
-  - encoding_rs 0.8.42
+  - encoding_rs 0.8.44
   - multiversion_no_op 1.0.0
-  - utf8_iter 1.0.4
+  - utf8_iter 1.1.0
+  - utf_types 1.0.0
 
 Copyright Mozilla Foundation
 
@@ -10403,7 +10459,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - notify-rust 4.18.2
+  - notify-rust 4.19.0
 
 MIT License
 
@@ -10527,7 +10583,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - crc32fast 1.5.2
+  - crc32fast 1.5.5
 
 MIT License
 
@@ -10589,7 +10645,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - bitvec 1.0.0
+  - bitvec 1.1.1
   - wyz 0.5.1
 
 MIT License
@@ -10672,8 +10728,8 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - schemars 1.2.2
-  - schemars_derive 1.2.2
+  - schemars 1.2.3
+  - schemars_derive 1.2.3
 
 MIT License
 
@@ -10735,7 +10791,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - triomphe 0.1.16
+  - triomphe 0.1.17
 
 MIT License
 
@@ -11328,37 +11384,6 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - pulp 0.22.3
-
-MIT License
-
-Copyright (c) 2021 sarah
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
   - oo7 0.6.0
 
 MIT License
@@ -11395,37 +11420,6 @@ MIT License
 MIT License
 
 Copyright (c) 2022 Ibraheem Ahmed
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - reborrow 0.5.5
-
-MIT License
-
-Copyright (c) 2022 sarah
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11753,11 +11747,20 @@ SOFTWARE.
 
 --------------------------------------------------------------------------------
 MIT License
-（131 个）
+（137 个）
 --------------------------------------------------------------------------------
 
 用到这一份的：
   - folio-curl 0.1.0
+  - hayro-ccitt 0.5.0
+  - hayro-cmap 0.1.1
+  - hayro-font 0.5.0
+  - hayro-interpret 0.9.0
+  - hayro-jbig2 0.4.0
+  - hayro-jpeg2000 0.5.0
+  - hayro-postscript 0.2.0
+  - hayro-syntax 0.9.0
+  - hayro 0.9.0
   - folio-account 0.1.5
   - folio-ai 0.1.5
   - folio-app 0.1.5
@@ -11772,6 +11775,7 @@ MIT License
   - folio-speech 0.1.5
   - folio-store 0.1.5
   - folio-translate 0.1.5
+  - folio-xtask 0.1.5
   - accesskit 0.24.1
   - accesskit_android 0.7.5
   - accesskit_atspi_common 0.19.1
@@ -11802,10 +11806,10 @@ MIT License
   - jni 0.22.4
   - libm 0.2.16
   - lyon 1.0.19
-  - lyon_algorithms 1.0.21
-  - lyon_geom 1.0.19
+  - lyon_algorithms 1.0.22
+  - lyon_geom 1.0.20
   - lyon_path 1.0.19
-  - lyon_tessellation 1.0.22
+  - lyon_tessellation 1.0.23
   - mac-notification-sys 0.6.15
   - mac 0.1.1
   - malloc_buf 0.0.6
@@ -11820,6 +11824,7 @@ MIT License
   - objc2-core-foundation 0.3.2
   - objc2-core-graphics 0.3.2
   - objc2-core-image 0.3.2
+  - objc2-core-services 0.3.2
   - objc2-core-text 0.3.2
   - objc2-core-video 0.3.2
   - objc2-encode 4.1.0
@@ -11837,7 +11842,6 @@ MIT License
   - pathfinder_simd 0.5.6
   - profiling-procmacros 1.0.18
   - profiling 1.0.18
-  - pulp-wasm-simd-flag 0.1.1
   - rust-i18n-macro 4.2.4
   - rust-i18n-support 4.2.4
   - safer-bytes 0.2.0
@@ -11866,23 +11870,19 @@ MIT License
   - windows-strings 0.5.1
   - windows-sys 0.45.0
   - windows-sys 0.48.0
-  - windows-sys 0.60.2
   - windows-sys 0.61.2
   - windows-targets 0.42.2
   - windows-targets 0.48.5
   - windows-targets 0.52.6
-  - windows-targets 0.53.5
   - windows-threading 0.2.1
   - windows-version 0.1.7
   - windows 0.58.0
   - windows 0.62.2
   - windows_x86_64_gnu 0.48.5
   - windows_x86_64_gnu 0.52.6
-  - windows_x86_64_gnu 0.53.1
   - windows_x86_64_msvc 0.42.2
   - windows_x86_64_msvc 0.48.5
   - windows_x86_64_msvc 0.52.6
-  - windows_x86_64_msvc 0.53.1
   - xim-ctext 0.3.0
   - xim-parser 0.2.2
   - zune-core 0.4.12
@@ -11946,7 +11946,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - tokio 1.53.2
+  - tokio 1.54.1
 
 MIT License
 
@@ -12272,7 +12272,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - unicode-script 0.5.8
+  - unicode-script 0.5.9
 
 MIT License
 
@@ -12436,10 +12436,10 @@ MIT License
   - adler2 2.0.1
   - anyhow 1.0.104
   - async-channel 2.5.0
-  - async-executor 1.14.0
+  - async-executor 1.14.1
   - async-fs 2.2.0
   - async-io 2.6.0
-  - async-lock 3.4.2
+  - async-lock 3.5.0
   - async-net 2.0.0
   - async-process 2.5.0
   - async-signal 0.2.14
@@ -12451,13 +12451,13 @@ MIT License
   - dyn-clone 1.0.20
   - endi 1.1.1
   - enumn 0.1.14
-  - erased-serde 0.4.10
+  - erased-serde 0.4.11
   - event-listener-strategy 0.5.4
   - event-listener 5.4.2
   - fastrand 2.5.0
   - futures-lite 2.6.1
   - inventory 0.3.25
-  - itoa 1.0.18
+  - itoa 1.0.19
   - khronos-egl 6.0.0
   - lazy_static 1.5.1
   - linux-raw-sys 0.12.1
@@ -12480,7 +12480,7 @@ MIT License
   - ref-cast-impl 1.0.27
   - ref-cast 1.0.27
   - rustc-hash 1.1.0
-  - rustix 1.1.5
+  - rustix 1.1.6
   - rustversion 1.0.23
   - semver 1.0.28
   - serde-saphyr 1.3.0
@@ -12489,21 +12489,21 @@ MIT License
   - serde_core 1.0.229
   - serde_derive 1.0.229
   - serde_derive_internals 0.30.0
-  - serde_json 1.0.151
+  - serde_json 1.0.154
   - serde_path_to_error 0.1.20
   - serde_repr 0.1.21
   - simd_cesu8 1.2.0
   - smol 2.0.2
-  - smol_str 0.3.6
+  - smol_str 0.3.7
   - syn 2.0.119
-  - syn 3.0.6
+  - syn 3.0.10
   - thiserror-impl 1.0.69
   - thiserror-impl 2.0.21
   - thiserror 1.0.69
   - thiserror 2.0.21
-  - typed-path 0.12.3
+  - typed-path 0.12.4
   - typeid 1.0.3
-  - unicode-ident 1.0.26
+  - unicode-ident 1.0.27
   - utf-8 0.7.6
   - waker-fn 1.2.0
   - zbus-lockstep-macros 0.5.2
@@ -12610,7 +12610,7 @@ MIT License
 
 用到这一份的：
   - winnow 0.7.15
-  - winnow 1.0.4
+  - winnow 1.0.5
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -12994,8 +12994,8 @@ MIT License
   - byteorder-lite 0.1.0
   - byteorder 1.5.0
   - encoding_rs_io 0.1.8
-  - globset 0.4.20
-  - ignore 0.4.33
+  - globset 0.4.21
+  - ignore 0.4.34
   - memchr 2.8.3
   - walkdir 2.5.0
 
@@ -13028,37 +13028,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - raw-cpuid 11.6.0
-
-The MIT License (MIT)
-
-Copyright (c) 2015 Gerd Zellweger
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - combine 4.6.8
+  - combine 4.6.9
 
 The MIT License (MIT)
 
@@ -13113,38 +13083,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
-
---------------------------------------------------------------------------------
-MIT License
-（1 个）
---------------------------------------------------------------------------------
-
-用到这一份的：
-  - fsevent-sys 4.1.0
-
-The MIT License (MIT)
-
-Copyright (c) 2015 Pierre Baillet
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
 
 
 --------------------------------------------------------------------------------
@@ -13314,7 +13252,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - bit_field 0.10.3
+  - bit_field 0.10.4
 
 The MIT License (MIT)
 
@@ -13565,7 +13503,7 @@ MIT License
 
 用到这一份的：
   - roxmltree 0.20.0
-  - roxmltree 0.21.1
+  - roxmltree 0.21.2
 
 The MIT License (MIT)
 
@@ -13596,9 +13534,9 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - rust-embed-impl 8.13.0
-  - rust-embed-utils 8.13.0
-  - rust-embed 8.13.0
+  - rust-embed-impl 8.14.0
+  - rust-embed-utils 8.14.0
+  - rust-embed 8.14.0
 
 The MIT License (MIT)
 
@@ -14080,7 +14018,7 @@ MIT License
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - open 5.4.4
+  - open 5.4.5
 
 The MIT License (MIT)
 =====================
@@ -15073,7 +15011,7 @@ Unicode License v3
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - unicode-ident 1.0.26
+  - unicode-ident 1.0.27
 
 UNICODE LICENSE V3
 
@@ -15285,7 +15223,7 @@ bzip2 and libbzip2 License v1.0.6
 --------------------------------------------------------------------------------
 
 用到这一份的：
-  - libbz2-rs-sys 0.2.5
+  - libbz2-rs-sys 0.2.6
 
 
 --------------------------------------------------------------------------
@@ -15335,6 +15273,5 @@ Julian Seward, jseward@acm.org
 bzip2/libbzip2 version 1.1.0 of 6 September 2010
 
 --------------------------------------------------------------------------
-
 
 

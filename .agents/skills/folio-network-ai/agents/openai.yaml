@@ -1,0 +1,3 @@
+interface:
+  display_name: "Folio 网络与 AI"
+  short_description: "用假传输和断流用例验证网络预算、SSE、取消及凭据不进入诊断链路"

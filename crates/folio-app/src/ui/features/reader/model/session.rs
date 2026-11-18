@@ -1,14 +1,9 @@
 //! 阅读会话：一本书的一屏——切片、摆行、滚动与翻页、位置落盘的状态机与命令入口。
 //!
-//! 这是 `reader` 这一纵切的中枢：它持有 [`Book`]（当前打开的书与本章排版状态）与
-//! 一屏自己的状态（模式、滚动/页号、外壳报的占位），对外给出一排命令
-//! （`set_mode` / `scroll_page` / `goto_chapter` / `persist_position` …），渲染在
-//! [`crate::ui::features::reader::view::body`]（`impl Render for ReaderSession`）。
+//! 持有 [`Book`]、模式、滚动/页号与外壳占位；渲染在
+//! [`crate::ui::features::reader::view::body`]，命令通过 `impl ReaderSession` 共用同一实体。
 //!
-//! 命令按职责分在 [`crate::ui::features::reader::modules`] 下：`navigation`（翻页/滚动/
-//! 模式）、`position`（进度 ↔ 坐标、恢复、落库）、`toc`（章节表）。它们都写
-//! `impl ReaderSession`，靠 `pub(in crate::ui::features::reader)` 字段打进同一个实体 —— 一个会话一个实体，
-//! 不为拆文件而拆实体。
+//! 命令按职责分在 model 的 paging、position、toc 等模块，不为拆文件而拆实体。
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -427,6 +422,7 @@ pub struct ReaderSession {
     /// `FontKey → Font` 的解析缓存。渲染每帧对每条可见 run 都要一次，缓存后只做哈希查表
     /// （见 [`FontCache`]：body / mono / faces / 设备表变了必须 `clear` 或 `reset`）。
     pub(in crate::ui::features::reader) font_cache: FontCache,
+    pub(in crate::ui::features::reader) cache_control: super::memory::CacheControl,
     /// 当前 `Book` 锚章的字体表版本。字体由首趟排版作业注册，表一变就要 reset
     /// `font_cache`；否则旧 `FontKey` 会命中上一张表解析出的 `Font`。
     pub(in crate::ui::features::reader) book_fonts_rev: u32,
@@ -791,6 +787,7 @@ impl ReaderSession {
             store,
             book_id: None,
             font_cache: FontCache::new(cx.text_system().all_font_names()),
+            cache_control: super::memory::CacheControl::default(),
             book_fonts_rev: 0,
             atlas: crate::ui::features::reader::model::image_atlas::ImageAtlas::entity(cx),
             selection: None,
@@ -994,6 +991,7 @@ impl ReaderSession {
             book_id,
             // 设备字体表在这里读一次；换书（可能注册了新内嵌字体）时由 `open_book` reset。
             font_cache: FontCache::new(cx.text_system().all_font_names()),
+            cache_control: super::memory::CacheControl::default(),
             atlas: crate::ui::features::reader::model::image_atlas::ImageAtlas::entity(cx),
             selection: None,
             selection_menu_open: false,
@@ -1070,16 +1068,8 @@ impl ReaderSession {
     pub fn open_book(&mut self, book_id: i64, cx: &mut Context<Self>) {
         // 换书先清掉上一本的整页底色：下面任何一条早退路径都不该让旧书色串过来。
         crate::ui::foundation::reading_theme::set_page_bg(None);
-        // 正文只在源文件里，所以「文件还是那份文件吗」是能不能读的前提。
-        // 不可信的那几种统一交后台重扫：文件换了 / 索引是旧引擎算的 / 那套分章规则换了 /
-        // **封面文件不在了** / **文件此刻读不到**都一样 —— 这一屏照旧用现有索引开，
-        // 位置与批注都还在（`book_id` 没变）。封面那一档重扫时由 `land_cover` 从书里
-        // 重新抽一次写回 `covers/`；文件真不在的重扫会自己失败（进程内抑制，已有机制），
-        // 而这里**不删行**：
-        // 一次 stat 失败可能只是授权被收、卷还没挂载（移动端共享存储最常见），当场删书
-        // 把「暂时看不见」变成「永远没了」；行的去留归启动时 `Store::prune_missing` 判
-        // ——它带着「上一层目录读得到才删」的守门，误删的输入没了，孤儿副本清扫也不会
-        // 跟着把文件带走。
+        // 过期索引交后台重扫，本次仍使用已有索引，保留 book_id、进度和批注。
+        // 文件不可读可能只是权限或挂载问题；重扫失败会被抑制，开书和启动检查都不删记录。
         if let Some(store) = self.store.clone() {
             match store.stale_reason(book_id) {
                 Ok(Some(reason)) => {

@@ -16,6 +16,7 @@ members = [
     "crates/folio-store",
     "crates/folio-core",
     "crates/folio-app",
+    "tools/folio-xtask",
 ]
 
 [workspace.package]
@@ -24,8 +25,6 @@ edition = "2024"
 rust-version = "1.92"
 license = "MIT"
 
-# 只列已经在用的依赖；PDF 的 pdfium-render 等各自里程碑真正要用时再加，
-# 避免空挂依赖。
 [workspace.dependencies]
 folio-base = { path = "crates/folio-base" }
 folio-model = { path = "crates/folio-model" }
@@ -41,85 +40,41 @@ folio-speech = { path = "crates/folio-speech" }
 folio-store = { path = "crates/folio-store" }
 folio-core = { path = "crates/folio-core" }
 
-# 走 git main 而不是 crates.io：上游每周发版，发布版落后一到两周，且主题目录
-# `themes/` 只存在于源码树里（发布出去的 crate 不带）。Cargo.lock 记录具体 commit，
-# 所以换依赖源不影响可复现构建。
-#
-# `Cargo.lock` 与 `crates/folio-app/Cargo.toml` 里那条 `gpui-pre-mobile` 的 rev 必须一起走：
-# gpui-kit main 与 gpui-mobile fork 都精确要求 `gpui-pre =0.3.12`，两边版本差一小格就是两棵
-# 互不兼容的 `gpui`（`Window` / `Element` 类型对不上，编译直接炸）。升级时先推 fork，
-# 再把 `crates/folio-app/Cargo.toml` 的 rev 换成新 commit，最后
-# `cargo update -p gpui-kit -p gpui-pre-mobile`。
+# themes/ 只在上游源码树中，故使用 git 源；具体提交由 Cargo.lock 固定。
+# 升级需同步 gpui-pre-mobile fork 与锁文件，确保两者使用同一 gpui-pre 快照。
+# 先推送 fork，再更新 app 清单中的 rev，最后 cargo update -p gpui-kit -p gpui-pre-mobile。
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit.git", branch = "main", features = ["assets"] }
 
-# folio 唯一的联网出口（远程书库走 WebDAV）。`gpui-pre-` 前缀不是第二个 HTTP 栈：
-# 它就是 gpui 那条依赖图里已经在编译的 reqwest（`gpui-pre-reqwest`，rustls 而非 OpenSSL），
-# 这个包只是给同一套 `http_client::HttpClient` trait 补一个能发请求的实现。
-# `=0.3.12` 的钉法跟 gpui-pre 本身一致 —— 它是整套快照的一部分，跳版本要一起跳，
-# 单独提前会拿到一个 trait 签名不同的版本。
+# GPUI HttpClient 的 reqwest 实现，版本须与 GPUI 快照一起升级。
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.12" }
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"
-# 文件夹监听：Linux 走 inotify，无系统监听 API 的平台由它内置的 PollWatcher 兜底。
 notify = "8"
-# 出网方向的同步 HTTP 客户端（URL 下载、将来的 WebDAV）：同步 API 对上「一个请求流
-# 到底」的管线形状，rustls + webpki-roots（打包根证书，Android 上没有 /etc/ssl 可靠）。
+# 后台作业使用同步 HTTP；rustls + 打包根证书避免依赖 Android 的系统证书路径。
 ureq = "2"
-# OPDS 的相对链接要按 feed 地址解析。锁里已有 2.5.8（ureq 那条链），这里把既有的一份
-# 转成直接依赖，不新增依赖树。
 url = "2.5"
-# 只给 `folio-core::transfer`（Wi-Fi 传书服务器）用：长驻、多连接并发的 HTTP 服务
-# 与现成的 multipart 流式解析。tokio 被 transfer 模块关在自己家里，core 其余部分
-# 照旧是同步形状，公共签名不漏 Future。
+# 异步运行时只服务 folio-net 的 transfer/lansync 入网链路。
 tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"] }
 axum = { version = "0.8", features = ["multipart"] }
-# 局域网同步要把一本书**流式**送出去（`transfer::lan`）：`axum::body::Body::from_stream`
-# 收的是一个 `TryStream`，造它要 `futures_util::stream::try_unfold`。
-# **不是新依赖树**：axum 自己就靠 futures-util，`cargo tree -e normal -i -p futures-util
-# --target aarch64-linux-android` 量到它已由 axum → folio-core 在编，四个端都是。
-# 只开 `std`：`try_unfold` 挂在未设门的 `try_stream` 模块下，宏那一路（`async-await-macro`）
-# 用不上，别顺手带进来。
+# 流式送书用 try_unfold，只需 std，不启用异步宏。
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 html5ever = "0.40"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
-# 网络导入卡上把 Wi-Fi 传书地址画成二维码。用 qrcode 的 `image` feature（同锁里那份
-# image 0.25，不产生第二个图像栈），其余默认特性（svg / pic）关掉——这里只要位图。
+# Wi-Fi 传书地址仅生成位图二维码。
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
-# PNG 编码：只给 `folio_format::pdf` 那条栅格化用（hayro 交回的是像素，页的契约是
-# PNG 字节）。**不新增任何包**：`image` 自己就依赖 png 0.18.1，这里面只有一条直接边。
-# 为什么不走 `image::codecs::png`：同一张 1810×2048 的页，这一层实测 10 ms / 566 KB，
-# 而 `image` 那层封装 169 ms / 568 KB —— 体积一样、慢 17 倍（它把 `Fast` 映射到了
-# 一个更慢的 deflate 档）。这一趟在首图的关键路径上，差 159 ms 是看得见的。
+# PDF 页直接用 png 编码，以避免 image 封装的压缩档位开销。
 png = "0.18"
-# SVG 栅格化：SVG 封面 / 逐页 SVG 漫画 / 正文内联 `<img src="x.svg">` 都要先画成位图。
-# **`resvg` 同样不是新依赖树**：它已经在图上且本来就在编译 —— `gpui-pre → gpui-base`
-# 用它画图标（`cargo tree -i resvg@0.46.0` 可验），这里只是把图上已有的一份转成
-# folio-core 的直接依赖 —— 与上面 `flate2` / `sha2` / `libchm` 同一条口径。
-#
-# **钉死 `=0.46.0`**：锁里另有 `0.45.1`（别的 target 用），写一个两边都不沾的版本号
-# 会像 `sha2` 那条坑一样把**第三条**拉进来。默认 feature（含 `system-fonts`）跟着
-# gpui 那一份走；`usvg::Options::default()` 的 fontdb 本就是空的，不会去扫系统字体。
+# 与 GPUI 使用的版本对齐，避免引入另一套 SVG 栅格化依赖。
 resvg = { version = "=0.46.0" }
-# 读内嵌字体的 cmap：注册一本书的字体之后，要判它有没有拉丁 `m` 才敢交给 gpui
-# 当 primary（gpui 会把没有 `m` 的脸从候选里剔掉，剔空了 `resolve_font` 就 panic）。
-# **不是新依赖树**：锁里已有 0.25.1，`fontdb`（cosmic-text 那一链）与 resvg 都在用它，
-# 这里只是把图上已有的一份转成直接依赖。
+# 注册字体前检查拉丁 m 覆盖：GPUI 会剔除没有 m 的 primary 候选。
 ttf-parser = "0.25"
-# 随书字体的子集化（skera）与 name 表重建（read-fonts / write-fonts）。原在 folio-app
-# 直连；`text::load` 下沉 core 之后两端都要，收进 workspace 统一版本。
+# 随书字体子集化与 name 表重建。
 skera = "0.9"
 read-fonts = "0.46"
 write-fonts = "0.55"
-# ZIP 的压缩方法。**只开纯 Rust 的那几族**：deflate（flate2/zlib-rs + zopfli）、
-# bzip2（bzip2 0.6 的默认后端是 libbz2-rs-sys）、lzma / xz（lzma-rust2）、
-# ppmd（ppmd-rust）、deflate64（纯 Rust 解码器）。7-Zip / WinRAR 做的这几类 zip
-# 因此读得动，而交叉编译不用多一个 C 工具链变量 —— 与上面 sha2 / chardetng 同一条口径。
-# 锁上实测**只多 `deflate64` 一条包**：bzip2 / libbz2-rs-sys / lzma-rust2 / ppmd-rust
-# 本来就在图上（sevenz-rust2 那条链带着），这里只是把已有的一份转成 zip 的 feature。
-#
-# **zstd 不开**：zip 的 zstd feature 指向 zstd-sys（cc）。撞到 zstd 条目时那一条读不出来；
-# 整本都是 zstd 的漫画会以「一页图片都读不出来」收场，而不是悄悄给一本空书。
+# 只启用纯 Rust 压缩后端，避免新增交叉编译的 C 工具链要求。
+# zstd 依赖 zstd-sys，暂不支持；不支持的条目必须明确报错。
 zip = { version = "8", default-features = false, features = [
     "deflate",
     "bzip2",
@@ -128,264 +83,68 @@ zip = { version = "8", default-features = false, features = [
     "ppmd",
     "deflate64",
 ] }
-# EPUB 里的 WOFF1 是「sfnt 逐表 zlib 压缩」。`zip` 已经带进 flate2（锁里 1.1.10），
-# 这里只是把它转成 folio-core 的直接依赖，不新增依赖树。
+# WOFF1 的 sfnt 表使用 zlib 压缩。
 flate2 = "1"
-# 自己按偏移读压缩块就要自己校 CRC32（zip-rs 原本替我们做这件事）。
-# 锁里本来就有这一份（flate2 与 png 都依赖它），转成直接依赖，不新增依赖树。
+# 按偏移自行读 ZIP 压缩块时，CRC 校验也由读取层负责。
 crc32fast = "1"
-# Basic 认证头要 base64。锁里已经有 0.22.1（reqwest 那条链带进来的），
-# 这里把既有的一份转成直接依赖，不新增依赖树 —— 和上面 flate2 同样的理由。
 base64 = "0.22"
-# 书的身份改成内容哈希（见 `plans/导入管线.md` 第六节），算它要 SHA-256。
-# **`sha2` 同样不是新依赖树**，但有一条坑要避开：锁里现在并存两个版本（0.10.9 由 oo7
-# 带进来、0.11.0 由 rust-embed-utils 带进来），直接依赖必须对齐其中的一个 —— 写一个谁
-# 都不沾的版本号会把**第三条** `sha2` 拉进来，与 folio-app 那条「`jni` 要和
-# gpui-pre-mobile 依赖的那份对齐」是同一个问题。这里钉 0.11。
-# 选 `sha2` 而不用同样已在图上的 `ring`：它是纯 Rust 构建，依赖只有 cfg-if /
-# cpufeatures / digest，**没有 `cc` 也没有 `sha-asm`**，交叉编译到 Android 与鸿蒙时
-# 少一个工具链变量。`cpufeatures` 是运行时探测，x86 的 SHA-NI 与 aarch64 的 ARMv8
-# SHA 扩展都在覆盖范围内，所以不要预设「手机上只能软算」。
+# 内容寻址使用纯 Rust SHA-256，版本与锁内已有依赖对齐。
 sha2 = "0.11"
-# 百度网盘的分块上传：precreate 的 block_list 要每一块的 MD5。**图上已有的就不再引**：
-# `oo7`（secret service）拉的是 `md-5` 0.10 这一支（`cargo tree -i md-5@0.10` 可验），
-# 与上面 `resvg` / `sha2` 同一条口径 —— 转直接依赖，不开新树。
+# 百度网盘 precreate 的 block_list 要求分块 MD5。
 md-5 = "0.10"
-# 局域网同步的账号密钥要 HMAC-SHA256 与 OS 熵（见 `account`）。
-#
-# **这一条选 `ring`，和上面那条拒掉 `ring` 的理由不冲突，差别在量出来的事实**：
-# `cargo tree -e normal -i -p ring --target aarch64-linux-android` 出 `ring 0.17.14`
-# （ureq → rustls 带进来的），也就是 Android 那次带 `cc` 的构建**早就在发生**，把它转成
-# 直接依赖不新增包、也不新增工具链变量。锁里同样已有的 `hmac` 反过来是新增编译：
-# 同一条命令在 Android 目标上报 `nothing to print`（它只由 gpui-pre-linux 那条 Linux
-# 链带进来），Linux 之外的三个端要重新编它。
-# 另一头省下来的是两件自己写容易写错的事：`ring::hmac::verify` 是常量时间比较，
-# `ring::rand::SystemRandom` 是 OS 熵而不是时钟低位。
+# 局域网身份验证使用常量时间 HMAC 校验与 OS 熵。
 ring = "0.17"
-# 只为 RTF 那一族：它的正文是 `\'hh` 那串**按码页编码的字节** —— `\ansicpg936` 的 GBK
-# 双字节、cp1252 的拉丁、少数写 65001 的 UTF-8。没有码页表就只有两种下场：丢正文，
-# 或者把一本中文书读成乱码。
-#
-# **`encoding_rs` 同样不是新依赖树**：锁里已有 0.8.42，由 gpui-pre-reqwest、multer 与
-# xim-ctext 带进来并且本来就在编译，这里只是把图上已有的这份转成 folio-core 的直接依赖 ——
-# 与上面 `flate2` / `crc32fast` / `base64` 同样的理由。构建脚本只依赖 `rustversion`，
-# **没有 `cc`**，与上面选 `sha2` 而不选 `ring` 那条交叉编译口径一致。
-#
-# 不引 `rtf-parser`（198k 下载、还在更新）那类现成解析器：它只给 AST 不给语义 ——
-# 码页、`\ucN` 回退字节、`*\目标` 跳过、分章仍然一处都得自己写，省下的恰是省事最少的
-# 那一截，而它的 default feature 挂着 wasm-bindgen，得为关掉它再写一段声明。
-# 词法自己写的理由写在 `folio_format::rtf` 的模块头。
+# RTF 转义字节按声明码页解码。
 encoding_rs = "0.8"
-# CHM（Microsoft Compiled HTML Help）的容器层：ITSF/ITSP 头 + PMGL/PMGI 目录 + LZX 解压。
-# 纯 Rust、MIT、`#![forbid(unsafe_code)]`，依赖只有 bitflags 与 thiserror（两个都已在图上），
-# 也**没有 `cc`** —— 与上面选 `sha2` 而不选 `ring` 那条交叉编译口径一致。
-#
-# **钉死 `=0.3.0`**：它 2025-12 才有第一个版本，上游仓库里没有真实世界编出的 CHM 样本
-# （只有单元测试）。版本一跳就把「我们对拍过的那份解码器」换成另一个东西，而症状是
-# 某本书突然读不出 —— 钉法与上面 `reqwest_client` 那条 `=0.3.12` 同理。
-# 换掉它的成本有出口：容器寻址住在一层之后（`folio_format::container` 的 ITSF 那一支），
-# 自己写一份只动那一处。
+# 固定经过样本验证的 CHM 解码器；升级需重跑容器与正文回归。
 libchm = "=0.3.0"
 quick-xml = "0.42"
 cssparser = "0.38"
 selectors = "0.41"
 unicode-linebreak = "0.1.5"
-# `dir="auto"` 与 CSS 的 `unicode-bidi` 都要按 UAX #9 的**字符类表**判「这个字符算哪一边」，
-# 那张表是七千多行区间 —— 自己抄一份不是省依赖，是拿抄错换一次编译通过。
-#
-# **不是新依赖树**：锁里已有 0.3.18 一份，`gpui-pre-wgpu` 与它带的 `cosmic-text` 都靠这个包
-# 做断行前的 bidi（`unicode-bidi-mirroring` 则是 `rustybuzz` 带的），这里只是把图上已有的这份
-# 转成 folio-core 的直接依赖 —— 与上面 `flate2` / `crc32fast` / `encoding_rs` 和
-# `unicode-linebreak` 完全同一条理由。默认 feature（`std` + `hardcoded-data`）就是要的那份：
-# 表编进二进制，运行时不读外部数据、不联网取 Unicode 版本。
+# UAX #9 字符类表供 dir=auto 与 unicode-bidi 使用。
 unicode-bidi = "0.3"
-# 一本纯文本小说该按哪一套章标记走，取决于它是**什么文字**写的：CJK / 平假名 / 片假名 /
-# 谚文 / 拉丁 / 阿拉伯 的占比要按 Unicode 的 Script 属性数出来，而那张表随 Unicode 版本长
-# （15.0 与 16.0 的区间不一样），自己抄一份区间不是省依赖，是拿抄错换一次编译通过 ——
-# 与上面 `unicode-bidi` 那条同一句话。
-#
-# **不是新依赖树**：锁里已有 0.5.8，它是 `folio-core → resvg → usvg → rustybuzz` 这条链上
-# 本来就在编译、本来就在产物里的一份（`cargo tree -p folio-core -e normal -i unicode-script`
-# 可验），这里只是把图上已有的这份转成 folio-core 的直接依赖 —— 与上面 `flate2` /
-# `crc32fast` / `encoding_rs` 完全同一条理由。版本需求写 `"0.5"`，与 rustybuzz 那一份对齐，
-# 不会拉出第二条 `unicode-script`（写一个两边都不沾的号是上面 `sha2` 那条坑的同一形状）。
+# Unicode Script 属性用于小说分章规则的文字类型判定。
 unicode-script = "0.5"
-# 既没有 BOM、又没有声明、也不是合法 UTF-8 的裸文本（简体 GBK / 繁体 Big5 / 日轻
-# Shift-JIS / 韩文 EUC-KR 的小说 `.txt`）该按哪一码页解。
-#
-# **为什么这一格不是我们自己写**：实测过两条更便宜的判据都不成立。字节合法性分不开
-# —— 一段简体 GBK 的字节流拿 Big5 解**同样一个坏字节都没有**，得到的却是一串夹着注音
-# 符号的怪汉字；「取坏字节最少」因此是掷硬币（纯 ASCII 同时是五种码页的合法输入）。
-# 而误读的产物在屏幕上查不出错，正是 `folio_format::charset` 模块头那句话防的那种
-# 事故。剩下唯一能分开它们的办法就是按字符序列做统计，那件事已经有人按 WHATWG 的规格
-# 写完并测过，不必重做一遍。
-#
-# **新增的包只有一个**：它自己的 deps 是 cfg-if / encoding_rs / memchr，三样都在 folio
-# 的锁里；连 encoding_rs 带的那几样（core_detect / simdutf8 / scopeguard / multiversion
-# 那个 shim / rustversion）也早就在锁里了 —— 实测集合差：`chardetng` 一条包名，别的一律
-# 复用。版本需求写 `"1"`，与它唯一的 1.0.0 对齐。
-# 纯 Rust、没有 `cc`，交叉到 Android 与鸿蒙不用加工具链变量 —— 与上面 `sha2` 那条同一理由。
+# 无 BOM/声明的非 UTF-8 文本需统计识别，不能仅按解码错误数挑码页。
 chardetng = "1"
-# PDF：`hayro`，走 **fork**（`panzhifu/hayro` 的 `main`）而不是 crates.io。
-#
-# 一台引擎管完：解析（页表 / 书目 / 书签 / 文字层 / 加密判定）与画像素都在这里。从前是
-# 两台 —— `pdf_oxide` 管解析、`hayro` 只管画 —— 换的理由不是画得慢（画那一半本来就在
-# hayro 上），而是那一半解析要另付一整棵依赖树，还把 `chrono` / `regex` / `brotli` 那一串
-# 拖进 `.so`。
-#
-# ## 为什么是 git 而不是版本号
-#
-# hayro 0.8 的上游没有 folio 要的那三格，补在 fork 上（`folio-core/src/content/format/pdf.rs`
-# 的模块头逐条写了它们要什么）：
-#   - `hayro_interpret::text`：只记不画的 `Device`，逐字给 unicode、字符码与墨迹盒；
-#   - `Page::placed_images()`：页上每张图的原生像素数与它在页上的框；
-#   - `hayro_syntax::outline`：`/Outlines` 那条链 → 目录树与页号。
-# 三格都没进上游，所以这里钉 rev。上游收了这三格，把这一条换回 `version = "0.8"` 即可，
-# interface 那边一行不用动。
-#
-# ## 为什么**不是**版本号 + 另补
-#
-# 在 folio 里自己写这三格做得到（`Device` 是 `pub`，`PositionedGlyph::transform()` 也是），
-# 但文字层的墨迹盒要 `OutlineFont`（`pub(crate)`）才拿得到字形轮廓，而图片放置与书签解析
-# 都要那几把内部锁（`XRef::root_id`、`Dict::obj_id`）。补在引擎里是一次性成本，补在应用里
-# 是每次升级都要重新对一遍的东西。
-#
-# ## 版本与平台
-#
-# 包名与版本维持 `0.8.0`（fork 没动版本号）。纯 Rust、crate 级 `#![forbid(unsafe_code)]`
-# （`hayro-syntax` 的 `unsafe` feature 是 gzip / jpeg 那条 SIMD 快路，不是 FFI），
-# MIT/Apache 双许可，整棵依赖树没有 C/C++（Android 交叉编译 `cargo ndk -t arm64-v8a -P 26`
-# 实测一次过）。
-#
-# 画一页的速度与没换之前一样（都是 hayro）：同一页 2048 那一档是画 202 ms + 编码 19 ms，
-# `opt-level = "z"`；`opt-level = 3` 下画只要 44 ms（4.6 倍），要再往下压就是给 hayro 那
-# 一支单独开 `opt-level = 3`，那笔账（.so 体积换 4.6 倍）还没量，先记在这里。
+# fork 提供上游缺少的文字墨迹盒、placed_images 与 outline 接口。
+# 这些能力涉及引擎内部数据；上游收齐并通过 PDF 回归后再撤 fork。
 hayro = { git = "https://github.com/panzhifu/hayro.git", rev = "cedf813b78def437a94a461cdd76c12fdb4d127f" }
-# CB7（7z 漫画包）：纯 Rust 的 7z 解压。CBR（RAR）这一版不接 —— rarlab 的 unrar 是 C++，
-# Android NDK 那条构建线还没验，先让 `.cbr` 在判定层得到一句「这一版还读不动」。
-# **钉 0.20 而不是 0.24**：0.20.2 的 MSRV 是 1.85，工作区是 1.90；0.24 要 1.93。
-# 默认 feature 含 `util`（解压入口）与 `compress`（测试里合成 CB7 夹具）。
+# 纯 Rust 7z；默认 util 用于解包，compress 用于合成测试夹具。
 sevenz-rust2 = "0.20"
-# CBR（RAR 漫画包）：纯 Rust 的 RAR 读写实现，**不绑 C/C++**。
-#
-# 为什么不自己写：RAR4/RAR5 的正文是 LZSS + PPMd + 滤波器，外加 solid 字典、跨卷
-# 续传、CRC/BLAKE2sp 校验；手写等于重做一遍 unRAR。`rars` 是独立实现（不搬 unRAR
-# 源码），Apache-2.0，支持 RAR 1.4–7、solid/多卷、store/LZ/PPMd；0.11.0 的 MSRV 是
-# 1.89（工作区 1.90）。默认 feature 含 write/recovery/encryption/parallel，我们只用
-# 读，所以关掉默认 feature，避免把 Rayon、写归档与加密依赖带进来；加密 RAR 会明确
-# 报「这一版不支持」。
+# 只启用 RAR 读取，关闭写入、恢复、加密和并行的默认功能。
+# 加密 RAR 明确返回不支持。
 rars = { version = "0.11", default-features = false }
-# CBT（tar 漫画包）：tar 只是顺序解包，路径校验与图片过滤沿用 comic_cache。
 tar = "0.4"
-# DjVu：纯 Rust 的 DjVu 解码/渲染（MIT，无 GPL），只开 std（默认），
-# 不带到 PDF/EPUB/CBZ 导出、OCR、并行等可选 feature。MSRV 1.88。
+# 使用默认 std 解码，不启用导出、OCR 与并行等可选功能。
 djvu-rs = "0.43"
-# `.doc`（Word 97-2003，[MS-DOC] 那一族）：纯 Rust 的 `rwml`，**`default-features = false`**。
-#
-# 为什么这一条不自己写：旧 Word 的正文不在一个地方 —— `WordDocument` 流装字符流与 FIB，
-# 而 FIB 说 CLX 在 `0Table`/`1Table` 哪一段；piece table 把**字符位**映射到（哪条流、字节偏移、
-# fCompressed），压缩那一支按 FIB 的语言 id 选码页（简体 `0x0804` → cp936/GBK、繁体 → cp950、
-# 日 → cp932、韩 → cp949），段落与字符样式是 PAPX/CHPX 那两套**按 piece 分段生效**的二进制表，
-# 其中还夹着 PRM 字段码元。手写等于重做一遍 LibreOffice 的 ww8 导入。
-#
-# 为什么不开 default：那条 feature 是 `docx`（OOXML）那一半，我们已经有 `.docx` 的自研解析，
-# 而它会把**第二个** `quick-xml`（它要 0.41，图上是 0.42）与第二个 `zip` 搬进来。关掉之后
-# 在这一份锁上实测：**`Cargo.lock` 只多两条包名**（`rwml` 自身 + 它的容器 `cfb`），
-# 而 `cfb` 带的 `fnv` / `byteorder` / `uuid` 与 `rwml` 带的 `encoding_rs` / `thiserror`
-# **一条都没新增** —— 五样早就在锁里（`fnv` 此前只是没被编过）。`wasm-bindgen` 那一支只在
-# `cfg(target_arch = "wasm32")` 上，我们两个平台都不吃。
-# `#![forbid(unsafe_code)]`，MSRV 1.88（工作区 1.90）。
+# 只读旧版 .doc，关闭其 docx 功能以复用现有 OOXML 解析。
 rwml = { version = "0.1.5", default-features = false }
-# OLE2 / CFB（[MS-CFB] 复合文件）那一层容器：`.doc` 的壳，与 `.xls` / `.ppt` / `.lit` 同一家族。
-# 判定层要认的是「这一族的目录里有没有一条 `WordDocument` 流、它的 FIB 是不是 Word」，而
-# `rwml::Document::open` 只有「整本字节交给你、解一遍」那一问 —— 拿它当判据等于每本候选书
-# 先解一次正文（实测一份 9 KB 的最小书 283 µs，一本 20 MB 的书就说不准了）。
-# **这不是新增的一条依赖边**：`cfb` 本来就是 `rwml` 的依赖（同一个 0.10 版、锁里同一条），
-# 这里只是把那条传递边写成显式的，`Cargo.lock` 一条包名都不动。
+# 在解正文前检查 OLE2 的 WordDocument 流与 FIB，供格式识别使用。
 cfb = "0.10"
-# 纯文本小说的章标记、编号体系与书目字段别名（书名/著者/作者/by…）是一族**存在外部数据里的
-# 模式串**：规则表要能按语言换一套、要能被读者整份替换，而字符串模式只有正则引擎吃得下 ——
-# 手写扫描器等于替每条模式各写一遍解析，那些解析从此没人复核。
-#
-# **这一条是新增，别拿上面那句「图上已有」照抄它**：`regex` 1.13.1 确实在锁里、也确实在编译，
-# 但带上它的是 `gpui-base` / `gpui-pre` / `env_filter`（`android_logger` 那条）—— 全在
-# folio-app 那一侧；`cargo tree -p folio-core -e normal -i regex` 回的是 `nothing to print`，
-# 即 core 的运行时图里没有它。所以这里新增的是 folio-core 的一条依赖边与链接面，不是第三个
-# crate 版本：需求写 `"1"`，被锁里那份 1.13.1 直接满足，`Cargo.lock` 因此不动。
-#
-# 默认 feature（`std` + `perf` + `unicode`）就是要的那份：`unicode` 给 `\p{Script}` 与全
-# Unicode 的大小写折叠，多语言那几套模式靠它；`perf` 带的 `aho-corasick` / `memchr` 本来就在
-# 图上。真省下来的不是引擎而是**用法**：规则表里每条自带匹配方式，只有声明成正则的那几条
-# 才编译，字面量那一族走 `starts_with` 或 aho-corasick 的多模式扫。
+# 分章规则来自可配置的模式串，使用默认 Unicode 与大小写折叠支持。
 regex = "1"
-# `.md` 正文里那些标记（`**粗**` / `- 列表` / `> 引用` / ``` 围栏 ```）要变成引擎吃得下的
-# XHTML。CommonMark 是一台状态机加一套 flanking 规则，自己写的那一份永远只覆盖**我们试过的
-# 那几本**；而这一族的坑恰恰在没试过的形状上（`这是**重要**的` 那种 CJK 两侧无空格的强调、
-# 缩进四空格的代码块、围栏里的 `#` 不算标题）。micromark 那一系按 spec 写完并带着
-# CommonMark/GFM 的合规测试跑，不必重做一遍。
-#
-# **这不是新依赖树，一条新包都不带**：锁里已有 1.0.0，`cargo tree -e normal -i markdown`
-# 回的是 `gpui-base` / `gpui-component`（folio-app 经 `gpui-kit` 在吃），而它自己的 deps
-# `serde` 与 `unicode-id` 也都在锁里 —— 实测加进 folio-core 之后 `Cargo.lock` 一条包名都没动。
-# 与上面 `flate2` / `encoding_rs` / `unicode-script` 那几条同一条理由：把图上已有的这份转成
-# folio-core 的直接依赖。版本需求写 `"1"`，与锁里那一份对齐。
-#
-# 取的是默认档（CommonMark）而不是 `Constructs::gfm()`：GFM 多出来的两样里，删除线那一族的
-# `<del>` 引擎的 UA 表已经认，表格那族的 `<table>` 还没有 —— 未认标签一律按 block 降级，
-# 格子会竖着堆成一列字块（`css::ua::is_inline_tag` 那条规则），所以先只开 `gfm_strikethrough`
-# 一条，表格留在「原样一段字」那一档，等 layout 补了行盒再开。
 markdown = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 rust-i18n = "4"
 
-# 错误处理分两层，各用一个库，这是 Rust 社区那套惯用分工：
-#   `folio-core`（后端）→ `thiserror`：定义一个能按分支处理的枚举。这一层不知道自己
-#       会被谁调，「没有这本书」和「sqlite 打不开」要能被分开数、分开提示。
-#   `folio-app`（界面）→ `anyhow`：界面对错误只有两个动作 —— 把一条因果链说清楚，
-#       以及决定这次要不要拦住那个操作。erased 的错误类型让同一个 `Result` 里
-#       `store.add_book(..)?` 与 `std::fs::copy(..)?` 直接共存，不必先互相 `From`。
-# 只挂在 folio-app 上：后端不许反向依赖界面的错误类型。
-# gpui 那条链上本来就有 `anyhow`（`gpui-base` / `gpui-component` 都用它），所以这不是新依赖树。
+# 应用层汇总错误因果链；机制层保持自己的 thiserror 错误类型。
 anyhow = "1"
 
-# 把后台作业的事件流回界面线程，要一条**能 await** 的通道：`folio_core::task` 交回来的是
-# `std::sync::mpsc::Receiver`，它的 `recv` 只会阻塞线程，而界面线程一阻塞整个窗口就停了。
-# **这不是新依赖树**：gpui 的 `prompt_for_paths` 返回的接收端就是 `async-channel` 的
-# （锁里已有 2.5.0，随 gpui 那条链在编译），这里只是把图上已有的这份转成 folio-app 的
-# 直接依赖 —— 与上面 `flate2` / `base64` 那两条同样的理由。
+# 后台事件需要 await 接收，避免阻塞 UI 线程。
 async-channel = "2"
 
-# 只要一个 `_exit`。Activity 结束那条路上 `std::process::exit` 会跑 atexit 与全局析构，
-# 而 Android 的 HWUI 工作线程正好去拿那把已经被销毁的锁 —— 2026-10-18 在 Meizu 20 上实测到
-# `FORTIFY: pthread_mutex_lock called on a destroyed mutex` → `Fatal signal 6` in `hwuiTask0`，
-# 也就是「不闪退」的退出自己变成了闪退。`_exit` 直接陷进 `exit_group`，一个处理器都不跑。
-# **这不是新依赖树**：锁里已有 0.2.189，gpui / wgpu / ndk 那几条链本来就在编译它。
+# Android Activity 退出使用 _exit，避开 atexit 与 HWUI 线程销毁锁的竞态。
 libc = "0.2"
 
-# 只为一件事：把「读者在哪个时区」这个数问出来（`ui::host::local_offset_secs`），
-# 好把它作为参数交给 `folio_core` 的那些按本地日汇总的查询。
-#
-# **`chrono` 同样不是新依赖树**：`gpui-base` 已经带着 0.4.45，而且 `clock` feature 是开着的
-# （实测 `cargo tree -i chrono -e features`），这里只是把图上已有的那份转成 folio-app 的直接
-# 依赖 —— 与上面 `flate2` / `base64` / `async-channel` 同样的理由。
-#
-# `clock` 而不要 `default` 里其余那几项：`serde` / `wasmbind` 这类我们用不上，写清楚
-# 是为了让「只认这一个用途」留在文件里。（feature 是按整张依赖图取并集的，所以这里收紧
-# 并不会改变实际编进去的东西，它改变的只是这份声明传达的意图。）
+# host 读取本地时区偏移再传给引擎，只请求 clock 功能。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
-# 日志。**`tracing` 与 `tracing-subscriber` 都不是新依赖树**：gpui 那条链上
-# `gpui-pre-ztracing` 已经带了同一份 `tracing-subscriber`（默认那组 feature：
-# `fmt` / `registry` / `ansi` / `tracing-log`），`tracing` 本身则是 gpui-base、cosmic-text、
-# h2、zbus 共同的依赖。所以这里只是把图上已有的两个包转成 folio 的直接依赖。
-#
-# `tracing-subscriber` 显式关掉 default 再列 feature，是为了不开 `env-filter`：它要
-# `matchers`（新的），而 folio 用的过滤器是 `Targets` —— 同样能写 `前缀=级别`，
-# 同样按最长前缀赢，只是不支持通配符，而这一条不需要通配符。
-# `tracing-appender` 同理没进来：它按天轮转、还要为 non_blocking 拉 crossbeam-channel
-# 并起一个线程，而 folio 的规则是「开机轮转 + 本轮封顶」，见 `folio_core::logging`。
+# 日志过滤使用 Targets，不启用 env-filter。
+# 轮转按启动次数与本轮容量管理，实现在 folio-base::logging。
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [
     "std",
@@ -398,119 +157,31 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 log = "0.4"
 tracing-log = "0.2"
 
-# 合成朗读（听书）的后端，见 `plans/听书.md`。只挂在拿得到系统 TTS 的这两个平台上：
-# Linux 那一档连的是 **Speech Dispatcher**（不是直接 espeak），Android 那一档走
-# `android.speech.tts.TextToSpeech`；macOS / Windows 的本仓库根本不构建，用不到的后端
-# 不挂上来 —— 每个平台的后端各带一条依赖树（winrt 那一档是 `windows` 0.58）。
-#
-# **两条平台各一的硬约束**，改这个包之前要先知道：
-#   1. Linux：`speech-dispatcher-sys` 在 build 脚本里跑 **bindgen**，所以构建机要
-#      libclang 与 `/usr/include/speech-dispatcher/libspeechd.h`。缺任何一条，
-#      `cargo check` 在这一格红。
-#   2. Android：`tts` 会往我们的 cdylib 里塞一个 `JNI_OnLoad`（`android.rs:30`），它
-#      `find_class("rs/tts/Bridge").expect(...)`。APK 里没有 `rs/tts/Bridge` 这个类就是
-#      **加载期崩**，而 `GpuiActivity` 每次启动都 `System.loadLibrary`。所以随包的
-#      `Bridge.java` 与它的 R8 keep 是这条依赖的一部分，不是可选项。
-#
-# 回调映射两端**是反的**（读过 0.26.3 源码逐条对过，出处在 `plans/听书.md` 第三节）：
-# Android 的 Java `onDone` 喂的是 `on_utterance_stop`、`onError` 喂的是 `on_utterance_end`，
-# 而那个 `onStop(String, Boolean)` 声明的是装箱 `Boolean`、盖不住 SDK 的
-# `onStop(String, boolean)`，所以永远不来。Linux 则是 `on_end` = 念完、`on_cancel` = 取消。
-#
-# 语速与音高的单位两端不同：Android 0.1–10.0（常速 1.0），Linux -100–100（常速 0，
-# `set_voice_rate` 收的是整数）。配置里存的必须是语义值，换算住在 `folio_core::speech`。
-#
-# 钉 `=0.26.3` 与上面 `libchm` / `reqwest_client` 同理：跳版本换掉的是「我们对过源码的那套
-# 映射与那组 `Features` 位」，而它的下场是听不出原因的「按了没声音」。
+# 后端仅在 Linux（非 OHOS）和 Android 启用，见 folio-speech。
+# Linux 构建需要 libclang 与 libspeechd 头文件。
+# Android JNI_OnLoad 要求 APK 带 rs/tts/Bridge；Bridge.java、R8 keep、
+# manifest queries 和 libtts*.so 的打包排除规则须随依赖一起维护。
+# 此版本 Android onDone/onError 与 Linux 的回调含义不同，且 onStop 签名不覆盖 SDK。
+# 语速/音高由 folio-speech 转换语义值；升级必须复核回调、能力位与平台测试。
 tts = "=0.26.3"
 
-# gpui-mobile（移动平台层）带过来的补丁。原先在 folio-mobile 自己的 workspace 根
-# 才生效，现在两个 crate 共用一张依赖图，只能声明在这里 —— 于是桌面端也一起走这个 rev。
-# 注：上游 longbridge/gpui-mobile 已经不声明这条了，若实测确认不再需要，直接删。
-#
-# `gpui-pre-wgpu` 这条是给 `gpui-pre-mobile` 的 `offscreen`（把视图渲成图）用的：那个
-# feature 要的是打了补丁的渲染器（`WgpuHeadlessRenderer` 上多出的 `render_to_image` 等
-# 六个方法），而 crates.io 的 0.3.9 只有 `new()` 是公开的。longbridge 把那份补丁放在
-# `gpui-mobile/vendor/gpui-pre-wgpu/` 里，**cargo 的 git 源只读仓库根那份 manifest，
-# 指不到别人仓库的子目录**，所以链接不上 —— 已按那一带几家快照仓库的惯例，原样抽成
-# `panzhifu/gpui-pre-wgpu`（版本与 gpui-pre 同步走，现在 0.3.12）。与上面那条
-# 同样的道理：**只有写在根上才生效，而它同时换掉桌面的渲染器**（`gpui-pre-linux` /
-# `gpui-pre-platform` 也要这个 crate），桌面像素因此是这份的像素。上游哪天发了带
-# `offscreen` 的版本，这一整条连同 `gpui-pre-mobile` 的那个 feature 一起删。
+# Cargo 只应用 workspace 根的 patch，桌面与移动端共用这组渲染器。
 [patch.crates-io]
+# 移动平台沿用的补丁；确认上游已不再需要并完成验证后可撤除。
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-# 仿真翻页那三处改动都在 `panzhifu/gpui-folio`：一个 workspace 三个成员 —— `gpui-pre` 补
-# Mesh primitive 与页面捕获，`gpui-pre-wgpu` 补网格管线与片元里的圆柱受光，`folio-curl`
-# 是纯 CPU 的顶点与 uniform 定义（folio-app 直接引它，见 `crates/folio-app/Cargo.toml`）。
-# 两条 patch 必须一起换，否则两棵 gpui 的 `Window` / `Scene` 类型对不上；包名与版本维持
-# 0.3.12，否则不满足各处的 `=0.3.12`。
-#
-# 这三条从前是 `path = "../gpui-folio/…"`：仓库外同级目录成了构建前提，全新克隆连
-# `cargo metadata` 都跑不起来（CI 那两个 job 红在第 1 步就是这一条），而 `actions/checkout`
-# 不许把依赖检出到 workspace 外面 —— 所以只能钉 rev，不能指子目录。上游哪天合入这些口子，
-# 这两条连同 `folio-curl` 一起删。
-#
-# 改完 `~/Code/gpui-folio` 要让它在这生效，三步（rev 不推上去 cargo 就取不到）：
-#   1. 在 gpui-folio 里 commit 并 `git push origin main`；
-#   2. 把新 sha 一次替换这里的三条 + `crates/folio-app/Cargo.toml` 那条 `folio-curl`
-#      （四处必须同一个数）；
-#   3. `cargo update -p gpui-pre -p gpui-pre-wgpu -p gpui-pre-platform -p folio-curl`，
-#      然后 `cargo check`。
-#
-# 只想在本机试一版、不打算推：这两条临时改成 `path = "../gpui-folio/gpui-pre"` 与
-# `…/gpui-pre-wgpu`（改完别提交 —— 就是上面说的那条让 CI 红的路）。注意 `paths = [...]`
-# 那一种覆盖对这两个包**不灵**：实测 cargo 报 "path override … has altered the original
-# list of dependencies"（gpui-folio 那份的依赖表与注册表那份不同），并明说将来会变成硬
-# 错误。`gpui-pre-mobile` 没这个问题，它照旧走 `paths`，见 `crates/folio-app/Cargo.toml`。
-# `002b89f`：卷曲的接缝改在片元里从 `uv` 现算（顶点插值的 `past` / 法向只能对齐网格顶点，
-# 斜接缝在屏上是一格一格的台阶），另一处是把 `required_limits` 从 `downlevel_defaults()` 换成
-# 直接取 `adapter.limits()` —— GLES 适配器把 compute 与 storage buffer 两族整族报成 0，
-# 鸿蒙模拟器上那一次 `request_device` 一个 adapter 都留不下。
-# `9790a60`：多一个成员 `gpui-pre-platform`，也就是第三条 patch。鸿蒙的三元组报
-# `target_os = "linux"`，而那层门面按 `target_os` 选平台，于是它把桌面 `gpui-pre-linux`
-# （X11 / Wayland）整条拖进图里，`-lxcb -lxkbcommon -lxkbcommon-x11` 在 OHOS 的 sysroot
-# 里没有对应库 —— **编译全过、只在最后一步链接上撞，`cargo check` 一路绿灯**。消费侧改不动
-# （gpui-kit 显式开了 `gpui_platform` 的 `x11` + `wayland`，那是传递依赖的 feature），所以
-# 判据收紧成 `all(target_os = "linux", not(target_env = "ohos"))` 只能发生在这份快照里。
-# 换上前实测：鸿蒙的 cdylib 链得出来了（DT_NEEDED 只剩 hilog / ace_napi / ace_ndk /
-# native_vsync / time_service / libc），HAP 装得上，hilog 一路到 `vsync frame loop started`
-# 与 `Router: render()`。链得出 ≠ 画得出：那台模拟器的 GLES 3.0 给不出 `VERTEX_STORAGE`，
-# 而 UI 一 build 就撞在 gpui-mobile 那份 OHOS dispatcher 的前台执行器上（见 `plans/facts.md`）。
-# `c261858`：instance 数据走不走纹理，改成问适配器（`DownlevelFlags::VERTEX_STORAGE`）而不是
-# 问 `target_family`。纹理那条路本来就写全了，只是 `WgpuBackend::Gl` 是 wasm 那个变体、
-# 原生 GLES 进来的是 `Native(Backend::Gl)`，没人走得进去。换上前每帧
-# `instance data needs 480 bytes, above the maximum of 0`，换上后 folio 的启动页整页画出来。
-# `b1e3215` 起这四笔都在仿真翻页上：圆锥卷径与锥面法向（亮脊跟着锥面斜）、真 shadow map
-# （按光源方向跑一趟正交深度，主片元 3×3 PCF，平摊页与卷面共用同一张深度图）、捕获分层
-# （`Scene` 的 `capture_layer` 与高 order 段、`Window::set_capture_layer`、第二张捕获纹理与
-# group 4 的背页采样），最后一笔把背面捕获改读第 2 层并给 `Window` 加了 `capture_layer()` 探针。
-# app 侧的接法是：正面画进层 1、背面那一页画进层 2，而主 pass 只画 `order < CAPTURE_ORDER_BASE` ——
-# 层里没内容时卷起来那一片就是清成纸色的空白，所以这四条 rev 与 `crates/folio-app/Cargo.toml`
-# 那条 `folio-curl` 必须同一个数一起走。
-# `bd8332e` 把 `Scene::set_capture_layer` 记进 `paint_operations`，并在每条 deferred 绘制的跨度
-# 开头把层号清回主场景（`window.rs` 那句 `debug_assert` + 一次赋值）—— 在此之前，一道闸管的那段
-# 内容与闸本身可能落在不同的 deferred 条目里，上一条目留下的层号会把别的屏的浮层一并排进捕获段：
-# 主 pass 不画它、捕获 pass 却画它，屏上就是「别的屏的字跟着这一页一起卷」。重放（`reuse_paint`）
-# 的那一段因此也带着自己那两道闸。同一笔还换了背面受墨与平摊页那道贴折痕的软带。
-# `8959066`：`BatchIterator` 每一批的 `next_if` 再问一次 primitive 是否落在 `range` 里。
-# 不补这一步时，某一批之后若再没有别的 kind，`max_order_and_kind` 就是 `u32::MAX`，同一
-# 数组里区间外的 primitive 会被整批吞掉 —— 主 pass 最后一个 sprite 批次因此把捕获层 1 的
-# 副本字画上屏，与正文错开一截印两遍（修前 main `0..13`、修后 `0..10`）。探针是
-# `gpui-pre/examples/capture_order_probe.rs`，不跑图也能复现。
+# gpui-folio 的五条 patch 与 app 的 folio-curl 必须固定同一 rev。
+# fork 提供仿真翻页、页面捕获/offscreen、OHOS 平台选择与 GLES 适配；
+# Apple/Windows 也必须使用支持 PageCurlMeshes 的对应渲染器。
+# 升级：先推送 fork，统一六处 rev，再 cargo update 对应六个包并验证目标平台。
+# 不提交仓库外 path 覆盖；上游收齐相关接口后才能一起撤除这些补丁。
 gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "2df4612cf803395cc8dafbb76f62e8003fe2a70b" }
 gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "2df4612cf803395cc8dafbb76f62e8003fe2a70b" }
 gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "2df4612cf803395cc8dafbb76f62e8003fe2a70b" }
-# apple / windows 两条渲染器也来自 fork（0.3.12，zed@d2a4fb6 快照）：Metal 与 DirectX
-# 各自移植了 page_curl 的网格 / 阴影 / 捕获三趟 —— 注册表那份不知道 fork 加的这个
-# `PrimitiveBatch::PageCurlMeshes` 变体，macOS / Windows 的构建在 exhaustive match 上
-# 必红，所以这两条 patch 不能撤。
 gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "2df4612cf803395cc8dafbb76f62e8003fe2a70b" }
 gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "2df4612cf803395cc8dafbb76f62e8003fe2a70b" }
 
-# 移动端与桌面端现在共用同一张依赖图，profile 只能声明在 workspace 根。
-# opt-level="z" + fat LTO + strip + panic=abort 是为 Android 的体积调的；
-# 代价是桌面 release 也一并生效（换掉 unwinding，行为差异仅限 panic 时）。
-# 需要只在移动端开这几项时，只能用 `cargo build -Zprofile` 或拆回两个 workspace。
+# release 以移动包体积优先；LTO、strip、panic=abort 也作用于桌面。
+# panic=abort 不提供 unwind 恢复。
 [profile.release]
 opt-level = "z"
 lto = "fat"
@@ -518,15 +189,11 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-# 排版那一格单独提到 "s"：`z` 会关掉循环向量化，而 folio-core 的断行/宽度表/锚点是
-# 交互热路径（翻页、拖字号每帧都在跑）。2026-11-02 实测（bench-layout，假度量、比值
-# 可信）：基线 z → folio-core "s"，拉丁整章 65.9→51.0 ms（−23%）、混排 69.3→54~57 ms、
-# 块缓存重排 8.3→6.2~6.8 ms，.so 只 +475 KB（+1.55%）。试过的另外两档都不要：
-# 全部热 crate（hayro/image/解码器）开 3 = .so +6.7%，而 PDF/图片解码是一次性动作、
-# O3 的收益感知不到；folio-core 开 3 = +1.66 MB，比 "s" 贵 3.5 倍、没有再快。
-# LTO 不能按包覆盖，fat LTO 照旧全图生效；libsqlite3-sys 是 C 代码、走 cc 自己的
-# 旗子，不在此列。
+# 热路径采用 s；排版对比条件和结果见 doc/计划/2026-11-18-排版编译档位基准.md。
 [profile.release.package.folio-core]
+opt-level = "s"
+
+[profile.release.package.folio-render]
 opt-level = "s"
 
 [profile.dev]

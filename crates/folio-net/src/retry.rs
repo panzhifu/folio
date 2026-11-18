@@ -54,12 +54,14 @@ impl RetryPolicy {
 ///
 /// - `Transport`：DNS、连接、TLS、读超时 —— 下一次可能就好了。但**只对幂等方法**：
 ///   POST 可能已经在对面执行了，重发会重复建文件 / 重复计费；
-/// - 408 / 429 / 5xx：服务器明确回了状态（限流、过载、网关抽风），POST 也照重发 ——
-///   它已经说完「这次没收下」，再发一次不会把同一件事做两遍。
+///   POST 即使收到 408/429/5xx 也不重放：网关状态不能证明上游没有执行或计费。
 ///
 /// 401 / 403 / 404 这类是**说得清的结果**，重发只会把同一个答案再拿一遍；`Cancelled`
 /// 与本地 `Io` 同理。401 的那次续期已经由 `AuthedStore` 单独处理，不在这里叠。
 fn retryable(error: &Error, method: Method) -> bool {
+    if method == Method::Post {
+        return false;
+    }
     match error {
         Error::Transport(_) => matches!(
             method,
@@ -139,7 +141,12 @@ impl<T: Transport> Transport for Retrying<T> {
             return self.inner.upload(req, source, len);
         }
         let mut body = Vec::with_capacity(len as usize);
-        source.read_to_end(&mut body)?;
+        source
+            .take(BUFFERED_UPLOAD_LIMIT + 1)
+            .read_to_end(&mut body)?;
+        if body.len() as u64 > BUFFERED_UPLOAD_LIMIT {
+            return Err(Error::Malformed("上传源超过声明的缓冲上限".into()));
+        }
         self.request(req.body(body))
     }
 }
@@ -308,9 +315,10 @@ mod tests {
         );
         for status in [408, 429, 500, 502, 503, 504] {
             assert!(
-                retryable(&Error::Unexpected { status }, Method::Post),
-                "{status} 是服务器明确没收下，POST 也该重试"
+                !retryable(&Error::Unexpected { status }, Method::Post),
+                "{status} 不能证明上游未执行 POST"
             );
+            assert!(retryable(&Error::Unexpected { status }, Method::Get));
         }
         for status in [400, 401, 403, 404, 405, 409, 422] {
             assert!(
@@ -338,5 +346,20 @@ mod tests {
         assert!(matches!(result, Err(Error::Transport(_))));
         assert_eq!(transport.inner.calls(), 1);
         assert!(sleeps.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_paid_post_is_never_replayed_after_a_gateway_error() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            let inner = Scripted::new(&[Some(status), None]);
+            let transport =
+                Retrying::with_sleep(inner, RetryPolicy::default(), |_| panic!("POST 不退避重发"));
+            let result = transport.request(Request::new(
+                Method::Post,
+                "https://example.test/chat/completions".into(),
+            ));
+            assert!(matches!(result, Err(Error::Unexpected { .. })));
+            assert_eq!(transport.inner.calls(), 1);
+        }
     }
 }

@@ -1,0 +1,332 @@
+{
+  "documents": {
+    "doc/AI.md": "architecture",
+    "doc/adr/2026-11-18-备份恢复激活与凭据.md": "adr",
+    "doc/format.md": "architecture",
+    "doc/储存.md": "architecture",
+    "doc/听书.md": "architecture",
+    "doc/地基.md": "architecture",
+    "doc/字体.md": "architecture",
+    "doc/工程规范.md": "standard",
+    "doc/数据结构.md": "architecture",
+    "doc/文档索引.md": "guide",
+    "doc/服务.md": "architecture",
+    "doc/治理使用.md": "guide",
+    "doc/渲染.md": "architecture",
+    "doc/网络.md": "architecture",
+    "doc/翻译.md": "architecture",
+    "doc/计划/2026-11-18-排版编译档位基准.md": "progress",
+    "doc/计划/2026-11-18-整体完善与AI开发治理.md": "plan",
+    "doc/软件架构.md": "architecture"
+  },
+  "product_dependencies": {
+    "folio-account": [],
+    "folio-ai": [
+      "folio-base",
+      "folio-net",
+      "folio-translate"
+    ],
+    "folio-app": [
+      "folio-core",
+      "folio-curl"
+    ],
+    "folio-base": [],
+    "folio-core": [
+      "folio-account",
+      "folio-ai",
+      "folio-base",
+      "folio-fonts",
+      "folio-format",
+      "folio-model",
+      "folio-net",
+      "folio-render",
+      "folio-search",
+      "folio-speech",
+      "folio-store",
+      "folio-translate"
+    ],
+    "folio-fonts": [
+      "folio-base",
+      "folio-format",
+      "folio-net"
+    ],
+    "folio-format": [
+      "folio-model"
+    ],
+    "folio-model": [],
+    "folio-net": [
+      "folio-account",
+      "folio-base",
+      "folio-model"
+    ],
+    "folio-render": [
+      "folio-format"
+    ],
+    "folio-search": [
+      "folio-base",
+      "folio-format"
+    ],
+    "folio-speech": [],
+    "folio-store": [
+      "folio-base",
+      "folio-format",
+      "folio-model"
+    ],
+    "folio-translate": [
+      "folio-base",
+      "folio-net"
+    ]
+  },
+  "rules": {
+    "FOLIO-ARCH-001": {
+      "enforcement": "boundaries",
+      "owner": "Folio maintainers",
+      "scope": [
+        "crates"
+      ]
+    },
+    "FOLIO-ARCH-002": {
+      "enforcement": "boundaries",
+      "owner": "Folio maintainers",
+      "scope": [
+        "crates"
+      ]
+    },
+    "FOLIO-ARCH-003": {
+      "enforcement": "boundaries",
+      "owner": "Folio maintainers",
+      "scope": [
+        "crates"
+      ]
+    },
+    "FOLIO-DATA-001": {
+      "enforcement": "targeted-tests",
+      "owner": "Folio maintainers",
+      "scope": [
+        "storage"
+      ]
+    },
+    "FOLIO-DATA-002": {
+      "enforcement": "targeted-tests",
+      "owner": "Folio maintainers",
+      "scope": [
+        "storage"
+      ]
+    },
+    "FOLIO-DOC-001": {
+      "enforcement": "review",
+      "owner": "Folio maintainers",
+      "scope": [
+        "source-comments"
+      ]
+    },
+    "FOLIO-GOV-001": {
+      "enforcement": "governance",
+      "owner": "Folio maintainers",
+      "scope": [
+        "repository"
+      ]
+    },
+    "FOLIO-GOV-002": {
+      "enforcement": "governance",
+      "owner": "Folio maintainers",
+      "scope": [
+        "repository"
+      ]
+    },
+    "FOLIO-GOV-003": {
+      "enforcement": "governance",
+      "owner": "Folio maintainers",
+      "scope": [
+        "repository"
+      ]
+    },
+    "FOLIO-GOV-004": {
+      "enforcement": "governance",
+      "owner": "Folio maintainers",
+      "scope": [
+        "repository"
+      ]
+    },
+    "FOLIO-SEC-001": {
+      "enforcement": "targeted-tests",
+      "owner": "Folio maintainers",
+      "scope": [
+        "diagnostics"
+      ]
+    },
+    "FOLIO-SKILL-001": {
+      "enforcement": "governance",
+      "owner": "Folio maintainers",
+      "scope": [
+        ".agents/skills"
+      ]
+    },
+    "FOLIO-TEST-001": {
+      "enforcement": "review",
+      "owner": "Folio maintainers",
+      "scope": [
+        "repository"
+      ]
+    },
+    "FOLIO-VCS-001": {
+      "enforcement": "review",
+      "owner": "Folio maintainers",
+      "scope": [
+        "repository"
+      ]
+    }
+  },
+  "rust_ci": "1.99.0",
+  "skills": [
+    {
+      "kind": "reference",
+      "path": ".agents/skills/animate/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/animation-performance/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/animation-vocabulary/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/apple-design/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/emil-design-eng/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/ffmpeg/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/find-animation-opportunities/SKILL.md"
+    },
+    {
+      "kind": "project",
+      "path": ".agents/skills/folio-architecture-review/SKILL.md"
+    },
+    {
+      "kind": "project",
+      "path": ".agents/skills/folio-change-workflow/SKILL.md"
+    },
+    {
+      "kind": "project",
+      "path": ".agents/skills/folio-data-integrity/SKILL.md"
+    },
+    {
+      "kind": "project",
+      "path": ".agents/skills/folio-gpui-delivery/SKILL.md"
+    },
+    {
+      "kind": "project",
+      "path": ".agents/skills/folio-network-ai/SKILL.md"
+    },
+    {
+      "kind": "project",
+      "path": ".agents/skills/folio-reading-engine/SKILL.md"
+    },
+    {
+      "kind": "project",
+      "path": ".agents/skills/folio-release-validation/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gpui-kit-design-guides/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gpui-kit/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/grill-me/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/grilling/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-core/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-frameworks/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-performance/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-plugins/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-react/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-scrolltrigger/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-timeline/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/gsap-utils/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/hyperframes/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/impeccable/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/improve-animations/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/media-use/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/oil-ui/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/refactoring-ui/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/review-animations/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/scrcpy-android/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/transitions-dev/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/transitions-polish/SKILL.md"
+    },
+    {
+      "kind": "reference",
+      "path": ".agents/skills/transitions-ui-generation/SKILL.md"
+    }
+  ],
+  "version": 1
+}

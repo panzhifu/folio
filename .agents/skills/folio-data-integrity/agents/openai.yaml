@@ -1,0 +1,3 @@
+interface:
+  display_name: "Folio 数据完整性"
+  short_description: "为 Folio 的存储、删除、恢复与同步变更验证兼容性、失败回滚和记录保全"

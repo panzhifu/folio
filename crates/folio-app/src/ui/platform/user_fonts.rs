@@ -24,9 +24,9 @@ use std::sync::Arc;
 
 use gpui_kit::{App, AppContext as _, TextSystem};
 
-use crate::ui::features::reader::note_external_registration;
 use crate::ui::services::config::ConfigHolder;
 use folio_core::text as font_primary;
+use folio_core::text::load::note_external_registration;
 use folio_core::text::{LatinCoverage, latin_by_family};
 
 /// 开机把配置里记着的自装字体再注册一遍。在 `AppShell::boot` 里调，紧挨

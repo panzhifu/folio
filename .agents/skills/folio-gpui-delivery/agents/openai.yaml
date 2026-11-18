@@ -1,0 +1,3 @@
+interface:
+  display_name: "Folio 原生界面交付"
+  short_description: "按 GPUI 规范实现状态、事件和焦点，并区分交互测试与目标平台证据"

@@ -55,11 +55,7 @@ pub(super) fn apply_in_cascade_order(
 }
 
 /// 元素的 `style="…"` 属性 → 声明列表，按书写顺序（同一属性后面那条盖前面那条）。
-///
-/// 分号落在 `url(…)` 或引号里时不是分隔符，所以复用样式表那一份 `split_top_level`；
-/// 单条声明也复用 `css::parse_declaration` —— 行内写法与样式表写法对 `!important`、
-/// 大小写、空值的处理必须一字不差，否则同一句话写在两处结果不同。
-/// 认不出的整条丢掉，由调用方在 `apply` 那一步按「不认识」计数。
+/// 分隔符与声明解析复用样式表入口，容量超限时整份忽略。
 ///
 /// `base_dir` 是**这一章文档**在容器里的目录（`ChapterImages` 手里那一个），进来先走一遍
 /// `absolutize_css_urls`。这一折不是可有可无的整洁：样式表里那句 `url(../Images/x.png)`
@@ -69,6 +65,10 @@ pub(super) fn apply_in_cascade_order(
 /// 图层表里躺着一条 `../Images/v2.jpg`，图片索引按容器路径精确查，查不到，
 /// 屏上仍是「白底上一片看不见的淡金字」，而 CSS 那一侧一切正常、`css-gap` 也报不出问题。
 pub(super) fn parse_inline_style(text: &str, base_dir: &str) -> Vec<Declaration> {
+    if !crate::css::budget::allows(text) {
+        tracing::warn!("行内 CSS 超过读取预算，忽略此属性");
+        return Vec::new();
+    }
     let text = crate::href::absolutize_css_urls(text, base_dir);
     crate::css::selector::split_top_level(&text, ';')
         .into_iter()

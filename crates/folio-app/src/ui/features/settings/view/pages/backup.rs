@@ -27,6 +27,9 @@ use crate::ui::services::backup::{self, human_bytes};
 use folio_core::backup::Entry;
 use folio_core::infra::time::{DAY, civil_from_days, local_day};
 
+#[path = "backup_restore.rs"]
+mod restore;
+
 /// 这一页。
 pub(in crate::ui::features::settings) fn backup_page(cx: &App) -> Page {
     page(
@@ -34,6 +37,10 @@ pub(in crate::ui::features::settings) fn backup_page(cx: &App) -> Page {
         IconName::Archive,
         vec![
             group(tr(cx, "group.backup_create"), create_rows(cx)),
+            group(
+                tr(cx, "backup.restore.title"),
+                vec![Row::custom(|_, cx| restore::block(cx)).keywords(LIST_FIND)],
+            ),
             group(tr(cx, "group.backup_list"), list_rows(cx)),
             group(tr(cx, "group.location"), location_rows(cx)),
         ],
@@ -159,7 +166,10 @@ fn entry_row(entry: Entry, pending: Option<PathBuf>) -> Row {
             return delete_panel(entry.clone(), cx);
         }
         let busy = backup::handle(cx).is_some_and(|view| view.read(cx).busy());
+        let restore_prepared =
+            backup::handle(cx).is_some_and(|view| view.read(cx).restore().prepared().is_some());
         let target = path.clone();
+        let restore_target = path.clone();
         let meta = if entry.include_files() {
             tf(
                 cx,
@@ -210,6 +220,14 @@ fn entry_row(entry: Entry, pending: Option<PathBuf>) -> Row {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(scope),
+            )
+            .child(
+                Button::new(format!("backup-restore-{id}"))
+                    .ghost()
+                    .small()
+                    .label(tr(cx, "backup.restore.action").to_string())
+                    .disabled(busy || restore_prepared)
+                    .on_click(move |_, _, cx| backup::restore::inspect(cx, restore_target.clone())),
             )
             .child(
                 Button::new(format!("backup-delete-{id}"))

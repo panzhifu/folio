@@ -21,6 +21,7 @@ pub mod import_queue;
 pub mod l10n;
 pub mod lansync;
 pub mod library;
+pub mod motion;
 pub mod resident;
 pub mod storage;
 pub mod sync;

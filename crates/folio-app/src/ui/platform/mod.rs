@@ -31,7 +31,9 @@ pub mod system_fonts;
 
 // 读者自装字体（下载 / 导入）的重注册：boot 时照配置清单把字节灌回文本系统，
 // 会话内装完一份也走这一脚。与 system_fonts 同一条不分档的理由。
+mod restore;
 pub mod user_fonts;
+pub(crate) use restore::CAN_QUIT_FOR_RESTORE;
 
 // ── 移动三端共用的启动 ────────────────────────────────────────────────────────
 
@@ -520,13 +522,16 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
                     None
                 }
             };
-            // 源文件不在的那些书：连数据一起删掉（理由同桌面那一处）。
-            match store.prune_missing() {
-                Ok(gone) if !gone.is_empty() => {
-                    tracing::warn!("boot: 清理了 {} 本源文件已不在的书：{gone:?}", gone.len());
+            // 缺失或暂不可读的书源只报告，进度与批注仍属于读者。
+            match store.unavailable_sources() {
+                Ok(unavailable) if !unavailable.is_empty() => {
+                    tracing::warn!(
+                        "boot: {} 本书的源文件不可用，已保留数据：{unavailable:?}",
+                        unavailable.len()
+                    );
                 }
                 Ok(_) => {}
-                Err(err) => tracing::warn!("boot: 清理失效的书失败：{err:#}"),
+                Err(err) => tracing::warn!("boot: 检查书源失败：{err:#}"),
             }
             crate::ui::services::app_store::install(store, cx)
         }

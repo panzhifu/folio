@@ -1,8 +1,8 @@
 //! 同步的 DTO：快照与各记录的 **serde 形状**（原 folio-core::sync 的数据半边，
 //! 2026-11-12 阶段二下沉——「换 crate 不换形状」：core 经模块别名沿用旧路径）。
 //!
-//! 这里只有**数据**与数据上纯函数的操作（[`Snapshot::shift_clock`]，把一份快照整体
-//! 搬到另一个钟面上）：合并算法（`merge`）、快照的 JSON 编解码、编排（`sync_once`）
+//! 这里只有**数据**与纯操作：[`Snapshot::shift_clock`] 只调整导出时间，记录版本保持原样。
+//! 合并算法（`merge`）、快照的 JSON 编解码、编排（`sync_once`）
 //! 都留在 folio-core 的 `sync` —— 它们是行为，且 `merge` 的墓碑优先级、`sync_once`
 //! 的远端握手各有各的测试盯着。
 //!
@@ -13,6 +13,7 @@
 //! position，对面**旧版本**的设备也要读得回来。
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use super::anchor::TextAnchor;
@@ -60,46 +61,9 @@ impl Snapshot {
         }
     }
 
-    /// 把这份快照里的**每一个时间**整体平移到另一个钟面上。
-    ///
-    /// 合并按「每条记录的时间谁新」取胜者，而那些时间是**各自那台设备的钟**写下的：
-    /// 一台飞行模式几小时的手机、一台从没对过表的桌面，都能让「谁改得新」变成「谁的钟快」。
-    /// 局域网是唯一能当场对表的场合 —— 握手的响应里带着对端的 UTC 秒，所以读回对面那份快照
-    /// 时先按 `本机钟 - 对端钟` 平移，再去合并。WebDAV 那条路没有这个条件，只能照旧。
-    ///
-    /// `delta` 的符号由这一条定盘：`exported_at` 就是**对端钟**在导出那一刻的读数，搬完它必须
-    /// 等于本机那一刻的读数。于是 `本机钟 - 对端钟` 是唯一说得通的方向，反着搬会把对端的
-    /// 一小时快钟放大成两小时。
-    ///
-    /// 只平移**读回来**的那一份；本机这一份永远写自己的钟。平移过的记录落库后就是本机的时间，
-    /// 下次传出去时由对面按它自己算出的偏移再搬一次。
-    ///
-    /// 每一步都是饱和加：`delta` 来自对面报文里的一个 `i64`，一个坏值不该把时间绕回 1970 之前。
+    /// 对齐快照导出时间；记录版本保持原样，避免转发与重试改变冲突顺序。
     pub fn shift_clock(&mut self, delta: i64) {
-        fn shift(value: &mut i64, delta: i64) {
-            *value = value.saturating_add(delta);
-        }
-
-        shift(&mut self.exported_at, delta);
-        for book in self.books.values_mut() {
-            if let Some(position) = &mut book.position {
-                shift(&mut position.updated_at, delta);
-            }
-            for annotation in &mut book.annotations {
-                shift(&mut annotation.created_at, delta);
-                shift(&mut annotation.updated_at, delta);
-            }
-            for bookmark in &mut book.bookmarks {
-                shift(&mut bookmark.created_at, delta);
-                shift(&mut bookmark.updated_at, delta);
-            }
-            for tombstone in &mut book.tombstones {
-                shift(&mut tombstone.deleted_at, delta);
-            }
-            if let Some(settings) = &mut book.settings {
-                shift(&mut settings.updated_at, delta);
-            }
-        }
+        self.exported_at = self.exported_at.saturating_add(delta);
     }
 }
 
@@ -156,6 +120,79 @@ pub struct BookmarkRecord {
     pub anchor: TextAnchor,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 同一条记录的确定性全序；不依赖接收方或快照转发设备。
+pub trait SyncOrder {
+    fn sync_cmp(&self, other: &Self) -> Ordering;
+}
+
+fn anchor_key(anchor: &TextAnchor) -> (u32, usize, usize, &str, &str, &str, &str) {
+    (
+        anchor.chapter,
+        anchor.start,
+        anchor.end,
+        &anchor.exact,
+        &anchor.prefix,
+        &anchor.suffix,
+        &anchor.path,
+    )
+}
+
+impl SyncOrder for PositionRecord {
+    fn sync_cmp(&self, other: &Self) -> Ordering {
+        (
+            self.updated_at,
+            &self.mode,
+            self.locator.chapter,
+            self.locator.offset,
+        )
+            .cmp(&(
+                other.updated_at,
+                &other.mode,
+                other.locator.chapter,
+                other.locator.offset,
+            ))
+    }
+}
+
+impl SyncOrder for SettingsRecord {
+    fn sync_cmp(&self, other: &Self) -> Ordering {
+        self.updated_at
+            .cmp(&other.updated_at)
+            .then_with(|| self.settings.to_column().cmp(&other.settings.to_column()))
+    }
+}
+
+impl SyncOrder for AnnotationRecord {
+    fn sync_cmp(&self, other: &Self) -> Ordering {
+        (
+            self.updated_at,
+            self.created_at,
+            anchor_key(&self.anchor),
+            &self.note,
+            &self.color,
+            &self.style,
+        )
+            .cmp(&(
+                other.updated_at,
+                other.created_at,
+                anchor_key(&other.anchor),
+                &other.note,
+                &other.color,
+                &other.style,
+            ))
+    }
+}
+
+impl SyncOrder for BookmarkRecord {
+    fn sync_cmp(&self, other: &Self) -> Ordering {
+        (self.updated_at, self.created_at, anchor_key(&self.anchor)).cmp(&(
+            other.updated_at,
+            other.created_at,
+            anchor_key(&other.anchor),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

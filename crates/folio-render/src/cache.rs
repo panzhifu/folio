@@ -127,6 +127,37 @@ impl BlockCache {
         self.entries.is_empty()
     }
 
+    /// 已拥有的块/行缓冲估算，不含 allocator、共享样式或 GPU 资源。
+    pub fn estimated_bytes(&self) -> usize {
+        self.entries
+            .values()
+            .map(|entry| {
+                entry.blocks.capacity() * std::mem::size_of::<BlockBox>()
+                    + entry
+                        .blocks
+                        .iter()
+                        .map(|block| block.text.capacity())
+                        .sum::<usize>()
+                    + entry.lines.capacity() * std::mem::size_of::<LineBox>()
+                    + entry
+                        .lines
+                        .iter()
+                        .map(|line| {
+                            line.fragments.capacity() * std::mem::size_of::<crate::LineFragment>()
+                        })
+                        .sum::<usize>()
+                    + entry.floats.capacity() * std::mem::size_of::<crate::collect::PlacedFloat>()
+            })
+            .sum()
+    }
+
+    /// 释放可再生产物及其容器容量，保留命中统计。
+    pub fn release_memory(&mut self) {
+        self.entries = HashMap::new();
+        self.order = VecDeque::new();
+        self.context = None;
+    }
+
     /// 复用范围变了就整清。返回是否有过清理。
     ///
     /// 传 [`LayoutKey::context_rev`]，不要传 `dom_hash`：后者只盖住章文本那一格，

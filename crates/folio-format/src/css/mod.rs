@@ -9,6 +9,7 @@
 //! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
 //! 是最糟的失败方式。
 
+mod budget;
 pub mod color;
 pub mod computed;
 pub mod selector;
@@ -199,7 +200,13 @@ fn snippet(text: &str) -> String {
 impl RuleSet {
     pub fn parse(text: &str, origin: Origin) -> RuleSet {
         let mut set = RuleSet::default();
-        set.consume(text, origin);
+        if !budget::allows(text) {
+            set.ignored = 1;
+            set.note_rule("budget", "CSS input budget", "", 1);
+            tracing::warn!("CSS 超过容量或嵌套预算，忽略此样式表");
+            return set;
+        }
+        set.consume(&strip_comments(text), origin);
         set
     }
 
@@ -232,8 +239,7 @@ impl RuleSet {
     }
 
     fn consume(&mut self, text: &str, origin: Origin) {
-        let text = strip_comments(text);
-        let mut rest = text.as_str();
+        let mut rest = text;
         loop {
             let Some(open) = find_unquoted(rest, '{') else {
                 return;

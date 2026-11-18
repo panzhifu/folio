@@ -7,7 +7,7 @@ use crate::ui::features::reader::model::chrome::PageMode;
 use crate::ui::features::reader::model::swipe::{FLING_SPEED, SNAP_FRACTION, fling_floor};
 use crate::ui::features::reader::motion::turn_animation::Axis;
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::NAV_TRANSITION;
+use crate::ui::services::motion::NAV_TRANSITION;
 use folio_core::ChapterExt;
 use folio_core::{Chapter, FlowDoc, Locator, PageTurn};
 use gpui_kit::{TestAppContext, TouchPhase, point, px};

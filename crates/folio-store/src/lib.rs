@@ -1,26 +1,6 @@
-//! SQLite 书库存储。原 folio-core::store（2026-11-12 阶段四拆分，「换 crate 不换形状」：
-//! core 经模块别名沿用旧路径，消费方一行不改）。[`Store`] 是 `Send + Sync` 的：连接锁
-//! 在内部的一把 [`Mutex`] 上，界面线程与后台线程（导入管线）共用同一份句柄。
-//!
-//! 锁纪律：**一次调用只上锁一次**。公开方法只负责「拿守卫 + 调对应的 `*_in(&conn, ..)`
-//! 私有助手」，助手内部绝不再碰 `conn` —— `Mutex` 不可重入，方法套方法就是自锁。
-//! 调用方那头还有一条配套纪律（见 `crate::ingest::import` 的模块文档）：拷贝与解析**不持锁**，
-//! 只有 register 那一小段持 —— 后台导一本书时，界面最多等几十毫秒。
-//!
-//! 这一层按主题拆开，一个主题一个文件，`impl Store` 分散在各自那一份里：
-//!
-//! - [`schema`] —— 迁移清单（只增不改的日志）。
-//! - [`types`] —— 对外那一行的形状。
-//! - [`books`] —— 书目与书架：入库、查询、删除、进度、分组。
-//! - [`content`] —— 正文与页表：整本落库/读回、正文压缩。
-//! - [`passphrases`] —— 读者自己那份口令（本机、按 content_hash，**刻意不进同步**）。
-//! - [`annotations`] / [`bookmarks`] / [`collections`] / [`reading`] / [`translations`] —— 批注 / 书签 / 集合 / 阅读统计 / 翻译缓存。
-//! - [`notes`] —— 跨书聚合：按书折成清单（分组、排序、封面字节），笔记屏直接摆的那份数据。
-//! - [`stats`] —— 阅读统计口径（分桶、补零、连签），统计屏直接摆的那份数据。
-//!
-//! 拆文件不拆实体：`Store` 还是一个类型、一把锁。**跨文件访问 `conn` 是允许的**
-//! （子模块看得见父模块的私有字段），但那条锁纪律在拆开之后更要紧 ——
-//! 一个公开方法只该上锁一次，`*_in` 助手只接 `&Connection`。
+//! SQLite 书库：书目、阅读记录、批注、集合与同步数据。
+//! Store 用一把连接锁跨线程共享；公开方法只上锁一次，*_in 助手不再次取锁。
+//! 拷贝、解析和文件探测放在库锁外。书文件暂不可用时保留用户记录。
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -30,10 +10,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 
 use folio_format::ext::ChapterExt;
 
-/// 书库这一层的错误：SQL、载荷 JSON、带标签的本地 I/O、集合名校验。
-///
-/// 原 core 伞枚举的 `Sql` / `EmptyCollectionName` 两格随搬迁移除，core 的伞枚举经
-/// `From<Error>` 收编整条链 —— 与 `DictError` / `FontsError` 同一条口径。
+/// 书库错误保留 SQL、JSON 与带路径的 I/O 因果链。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("sqlite: {0}")]
@@ -51,11 +28,12 @@ pub enum Error {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    /// 集合名是用户直接敲进来的东西。空名不只是「难看」：空串在 `UNIQUE` 上只容得下
-    /// 一条，第二个人再建一个空名集合会收到「名字已存在」这种看不懂的报错。
-    /// 所以在入口挡掉，而不是让它变成一条数据库错误。
+    /// 空名称在入口拒绝，避免落成误导的 UNIQUE 冲突。
     #[error("集合名不能为空")]
     EmptyCollectionName,
+
+    #[error("数据完整性：{0}")]
+    Integrity(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -84,56 +62,41 @@ mod import_log;
 pub mod notes;
 mod passphrases;
 mod reading;
+mod restore;
 mod schema;
 pub mod stats;
 mod sync;
+mod sync_order;
 mod tags;
 mod translations;
-// 类型住进了 folio-model；这里沿用旧路径，5 个查询模块的 `super::types::{…}` 一行不动。
+// 保留既有类型导出路径。
 pub use folio_model::types;
 
 #[cfg(test)]
 mod tests;
 
-pub use books::CoverBackfillRow;
-pub use books::StaleReason;
-// 导入记录那一列的形状：界面上那张卡与结清时写库那一手共用同一份类型。
-pub use import_log::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry};
-// 封面落盘与缩略图都要按「这本副本在哪儿」反推书库根，而书库位置不在 `Store` 上
-// （那是读者确认过的目录）—— 这个函数就是那条反推规则。公开它是因为界面侧也要用：
-// 缩略图缓存目录挂在书库底下，而界面手上只有副本路径。
 pub use books::book_root;
+pub use books::{CoverBackfillRow, SourceUnavailable, StaleReason, UnavailableSource};
+pub use import_log::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry};
 pub use types::*;
 
 use schema::MIGRATIONS;
 
 pub struct Store {
     conn: Mutex<Connection>,
-    /// 这一本的重扫作业**已在飞**的 `book_id`（[`folio_core::ingest::import::schedule_reindex`] 的记账）。
-    ///
-    /// 挂在 `Store` 上而不是进程级的 `static`：判据说的是「这个库里的那一本」，而测试各开
-    /// 各的内存库、`book_id` 都从 1 起 —— 放进进程级集合里，两条并发用例的同名 id 会互相
-    /// 挡掉对方的提交，那是一条绿不了也红不明的假门。
+    /// 按库记录在飞作业；不同 Store 的 book_id 可以相同，不能改为全局集合。
     reindex_queued: Mutex<HashSet<i64>>,
-    /// 试过且**失败**的那些 `book_id`：不再自动重投。
-    ///
-    /// 判据只看库里的 `index_version`，所以一本注定重扫失败的书，没有这一格就要每次点开
-    /// 都重付一次全量重读（重扫必然读完整本，见 `plans/导入管线.md` §八 第 3 条）。
-    /// 只在这一进程内记，不落库：下次启动该再给它一次机会。
+    /// 本进程内失败的作业不自动重投，下次启动允许重试。
     reindex_failed: Mutex<HashSet<i64>>,
 }
 
-// 这条断言是「Store 可跨线程」的承诺本身：后台线程（导入管线）能拿着 `&Store`
-// 直接落库。将来谁要把 `Store` 改回非 `Sync`，编译器在这里拦住。
+// 编译期保证后台作业可共享书库句柄。
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Store>();
 };
 
-/// 当前 Unix 秒。全库只走这一个时钟,测试要改也只改一处。
-///
-/// 实现搬到 [`folio_base::time::now`]：界面侧记阅读会话的起止要读**同一个**钟,否则
-/// 「库里那一段的时长」和「屏幕上算出来的」会差出几十秒,而那没有任何报错。
+/// 与界面会话共用的 Unix 秒时钟。
 pub(crate) use folio_base::time::now;
 
 pub fn default_db_path() -> PathBuf {
@@ -145,12 +108,7 @@ impl Store {
         Self::open_at(&default_db_path())
     }
 
-    /// 打开（必要时建）库文件并跑迁移。
-    ///
-    /// **一份打不开的库只报错，绝不删掉重来**（`plans/基础设施.md` §5.2）：进度、批注、
-    /// 集合都只在这里，损坏的库被自动重建等于丢数据。`Connection::open` 对已存在的坏文件
-    /// 不会覆写，迁移失败会把错误原样抛上来 —— 怎么提示是入口的事，这层保证**磁盘上那个
-    /// 文件一个字节都不动**（`a_corrupt_database_is_reported_not_overwritten` 钉住这条）。
+    /// 打开数据库并运行迁移；损坏只报错，绝不删除或重建已有库。
     #[tracing::instrument(level = "debug", skip_all, fields(path = %path.display()))]
     pub fn open_at(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
@@ -167,14 +125,7 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        // `auto_vacuum` **必须在建表之前**设，此时不生效。
-        //
-        // 它管的是「删掉的行把页还给系统，而不是留在 freelist 里等复用」。重导入一整本
-        // （`save_flow` 先删光再重插）与删书都是大块删，不开这个开关库文件就只会一路涨到
-        // 历史最高水位 —— 实测那台机器上 5.47 MB 的库里 1.96 MB 是这种没人要的空页。
-        //
-        // `INCREMENTAL` 而不是 `FULL`：全量模式下每次提交都要挪页，重导入一本书会变成
-        // 几千次搬动；增量模式把「什么时候还」交给调用方，见 [`Store::reclaim`]。
+        // 建表前设置增量回收；避免每次提交搬页，实际回收由 reclaim 触发。
         let was_auto_vacuum: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
         if was_auto_vacuum == 0 {
             conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
@@ -185,16 +136,8 @@ impl Store {
             if current >= target {
                 continue;
             }
-            // 每条迁移各自一句：`execute_batch` 中间失败时，日志里最后一条「完成」的就是
-            // 该看的那条 —— 库停在 v3 还是 v4，决定的是后面怎么修。
             tracing::debug!("store: 应用迁移 v{target}");
-            // **一条迁移 = 一笔事务**：DDL、v8 那半 Rust 回填、`user_version` 同生同死。
-            //
-            // 从前是 `execute_batch` 之后**另写**一次 `pragma user_version`，而 v8 还把版本
-            // 写在回填**之前** —— 中间被杀（Android 杀进程是日常，不是边角）留下两种半套：
-            // 表已建、版本没升 ⇒ 下次重跑 `CREATE TABLE` 当场失败，库**永远打不开**；
-            // 或版本已升、回填没跑 ⇒ 下次直接跳过这一条，缺一截数据的库被当好的接着用。
-            // 两种都比「停在上一版」难修：前者要人手工改库头，后者是一路读下去才发现。
+            // DDL、Rust 回填和 user_version 同一事务，避免崩溃留下半次迁移。
             let tx = conn.unchecked_transaction()?;
             tx.execute_batch(sql)?;
             // v8 的 Rust 那半必须在 v9 之前跑：v9 要删掉 `chapters.spine_href`，
@@ -220,20 +163,8 @@ impl Store {
         })
     }
 
-    /// v8 的 Rust 那半：给老库的章行算出位置，然后把 `chapter_text` 丢掉。
-    ///
-    /// **必须在 v9 之前跑**（`from` 里就卡在 v8 之后）：v9 会删掉 `chapters.spine_href`，
-    /// 而这里正是按它算位置。
-    ///
-    /// 两件事 SQL 都做不干净：
-    ///
-    /// - 位置得按 `books.format` 分派（名单式的按 `spine_href` 认条目，单文件的按序号），
-    ///   而位置是 JSON，在 SQL 里拼字符串要自己处理转义；
-    /// - 删表要等回填完。
-    ///
-    /// **可重入**：位置非空的行不动，`chapter_text` 不在了就直接返回。
-    /// 回填不出来的（格式不认识、EPUB 又没 href）留空 —— 空位置在打开时会被当作
-    /// 「回容器重读一遍」，而不是「这一章是空的」。
+    /// v8 按格式回填章节位置后删除旧正文表，必须早于 v9 删除 spine_href。
+    /// 可重入；未知位置留空，让打开流程回容器读取，不能当作空章节。
     fn finish_v8(conn: &Connection) -> Result<()> {
         if Self::table_exists(conn, "chapter_text")? {
             let rows: Vec<(i64, String, String, i64)> = {
@@ -272,11 +203,7 @@ impl Store {
         Ok(found > 0)
     }
 
-    /// 把已经在 freelist 里的页还给系统。
-    ///
-    /// 开了 `auto_vacuum = INCREMENTAL` 之后，删除本身只把页标成空闲；要真正吐出去
-    /// 得主动叫一次。重导入与删书都是「整本正文一起没」的大块删，正好在这里收。
-    /// **必须在事务外调**：`VACUUM` 系列不能在事务里跑。
+    /// 回收 freelist 空页；须在事务外调用。
     fn reclaim(conn: &Connection) -> Result<()> {
         let empty: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
         if empty > 0 {
@@ -291,10 +218,7 @@ impl Store {
         Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
-    /// 读一个数字型的一次性标记。`prefs` 表 v1 就建好了，缺键 = 从没跑过。
-    ///
-    /// 认不出来的值（手改过的库、将来换了形状）当「没跑过」—— 宁可多跑一趟
-    /// 幂等的补齐，也不要因为一个读不动的记号永远不修。
+    /// 读取一次性标记；缺键或无效值返回 None，允许幂等补齐重试。
     pub fn pref_number(&self, key: &str) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let raw: Option<String> = conn
@@ -316,26 +240,14 @@ impl Store {
         Ok(())
     }
 
-    /// 库里**空闲着没人用**的那几页折成字节（`freelist_count × page_size`）。
-    ///
-    /// `auto_vacuum = INCREMENTAL` 之下删书与重导入只把页标成空闲，所以库文件可以占着几百
-    /// MB 而其中一行都没有。设置里「存储」那一格「其中空闲」报的就是这个数。
-    ///
-    /// 它**不等于** [`Self::vacuum`] 能拿回来的量，也只当「增量回收值不值」这一格用：
-    /// 实测一次 `DROP` 掉 500 页之后 `PRAGMA incremental_vacuum` 只还回 1 页（freelist 的
-    /// trunk 页正好占着文件末尾，而增量回收只会从末尾截），所以要真还回去得整库重写。
+    /// freelist_count × page_size；这是空闲页总量，不保证增量回收能全部释放。
     pub fn freeable_bytes(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         Self::freeable_in(&conn)
     }
 
-    /// 整库重写（`VACUUM`）：没人用的页与碎片一起吐掉，返回**实际**少掉的字节数。
-    ///
-    /// 走这一条而不是 [`Self::reclaim`] 那条增量路子，理由写在 [`Self::freeable_bytes`] 里。
-    ///
-    /// 两条代价要说给界面：它**不能在事务里跑**（与 `VACUUM` 系列一样），而且过程要在同
-    /// 一个目录里写一份临时副本 —— 库多大就临时多占多少，跑完才收回去。所以它属于「点一下
-    /// 等几秒」那一类动作，得跑在后台线程上，确认话里要提那一截临时占用。
+    /// 整库 VACUUM，返回实际减少的字节数。
+    /// 不可在事务内调用；应在后台运行，并预留约一份数据库大小的临时空间。
     pub fn vacuum(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let before = Self::file_bytes(&conn)?;
@@ -344,11 +256,8 @@ impl Store {
         Ok(before.saturating_sub(after))
     }
 
-    /// 把这一份库写成一份**一致的单文件副本**（SQLite 的 `VACUUM INTO`）。
-    ///
-    /// 为什么不是 `fs::copy`：WAL 模式下主文件里可能还缺最后一截，热备份更可能读到
-    /// 半页；`VACUUM INTO` 走的是同一条读事务，读者继续翻页也不会写出一个坏包。
-    /// 目标文件必须不存在 —— 调用方先删掉上一次的同名临时文件。
+    /// 用 VACUUM INTO 生成一致快照；WAL 模式不能直接复制数据库主文件。
+    /// 已存在的目标会被替换，调用方必须传专用备份路径。
     pub fn backup_to(&self, path: &Path) -> Result<()> {
         if path.exists() {
             std::fs::remove_file(path).map_err(|err| crate::Error::Io {
@@ -367,10 +276,7 @@ impl Store {
         Ok(pages.max(0) as u64 * Self::page_size(conn)? as u64)
     }
 
-    /// 库文件按页算出来的大小（`page_count × page_size`）。
-    ///
-    /// 用它而不是 `fs::metadata`：`Store` 不知道自己被开在哪个路径上（`open_at` 收路径而
-    /// 不记），而这一份大小与文件字节在 WAL  checkpoint 之后就是同一个数。
+    /// page_count × page_size；与 WAL checkpoint 后的主文件大小对应。
     fn file_bytes(conn: &Connection) -> Result<u64> {
         let pages: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
         Ok(pages.max(0) as u64 * Self::page_size(conn)? as u64)

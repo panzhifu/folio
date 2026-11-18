@@ -5,7 +5,7 @@
 //! 所以它们能单独被断言（见 `columns_for` 的那三条）。
 
 use super::super::components::book_card::COVER_RATIO;
-use crate::ui::shell::navigation::{SizeClass, reserved_width};
+use crate::ui::foundation::navigation::{SizeClass, reserved_width};
 
 pub(in crate::ui::features::shelf) const COLUMNS: u16 = 3;
 

@@ -82,9 +82,9 @@ pub fn percent_decode(input: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(n) = u8::from_str_radix(&input[i + 1..i + 3], 16)
+            && let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
         {
-            out.push(n);
+            out.push(high * 16 + low);
             i += 3;
             continue;
         }
@@ -94,6 +94,15 @@ pub fn percent_decode(input: &str) -> String {
     // href 按 UTF-8 百分号编码；解出来的字节流不一定落在字符边界上，
     // 那种情况保留替换字符而不是整本读失败。
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// 把一份 CSS 里的 `url(…)` 按**那份 CSS 自己的目录**解成容器绝对路径。
@@ -188,4 +197,20 @@ fn find_close_paren(text: &str) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod percent_tests {
+    use crate::href::percent_decode;
+
+    #[test]
+    fn malformed_percent_before_unicode_never_slices_a_character() {
+        for input in ["%中", "%界a", "a%é", "%🦀", "%", "%A"] {
+            assert_eq!(percent_decode(input), input);
+        }
+        for byte in 0..=255u8 {
+            let encoded = format!("%{byte:02X}");
+            assert_eq!(percent_decode(&encoded), String::from_utf8_lossy(&[byte]));
+        }
+    }
 }

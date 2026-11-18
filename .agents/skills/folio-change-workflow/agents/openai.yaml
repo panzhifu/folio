@@ -1,0 +1,3 @@
+interface:
+  display_name: "Folio 变更工作流"
+  short_description: "按 Folio 的变更范围、注释约束与定向验证规则完成可审阅的交付"

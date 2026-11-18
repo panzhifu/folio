@@ -95,8 +95,7 @@ pub(in crate::ui::features::reader) trait PageTurnStyle:
     /// 原地跳变 —— 读者那句「左右覆盖只能覆盖双页其中一页」量的就是这个。所以那几档在双页里按
     /// 整块版心走，两栏作为同一张纸一起动。
     ///
-    /// 答在**档**上而不是配置上：Metal / DirectX 那两条路把折页落到滑动（见 [`of`]），跟着配置判
-    /// 就会给一份滑动用的几何套上 leaf 那把尺。
+    /// 几何契约由实际动画实现给出，手势、捕获与绘制共用同一把尺。
     fn turns_one_leaf(&self) -> bool {
         false
     }
@@ -121,7 +120,6 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
     static SLIDE: Slide = Slide;
     static SLIDE_UP: SlideUp = SlideUp;
     static COVER: Cover = Cover;
-    #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
     static CURL: Curl = Curl;
     static SCROLL: Scroll = Scroll;
     static IMMEDIATE: Immediate = Immediate;
@@ -129,11 +127,6 @@ pub(in crate::ui::features::reader) fn of(turn: PageTurn) -> &'static dyn PageTu
         PageTurn::Slide => &SLIDE,
         PageTurn::SlideUp => &SLIDE_UP,
         PageTurn::Cover => &COVER,
-        // Metal 与 DirectX 两条渲染路径还没实现 page_curl 的绘制（渲染器收到该批次
-        // 只会跳过），这两个平台上把卷页落到滑动 —— 真实现进 fork 时拆掉这条 cfg。
-        #[cfg(any(target_vendor = "apple", target_os = "windows"))]
-        PageTurn::Curl => &SLIDE,
-        #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
         PageTurn::Curl => &CURL,
         PageTurn::Scroll => &SCROLL,
         PageTurn::None => &IMMEDIATE,
@@ -281,8 +274,7 @@ mod tests {
     /// 双页里哪一档揭「靠手指那半张 leaf」、哪一档按整块版心走 —— 一张表钉住这两个答案。
     ///
     /// 这两问的答案决定了四件事（纸的位移、手的归一化、逐栏谁在纸上、网格的裁剪框）用哪把尺，
-    /// 串一档就是「双页里只有一半在动」。按具体的档问，不按 [`of`] 的映射问：Metal / DirectX
-    /// 那两条路把折页落到滑动，用配置值来问会在那两个平台上得到一个自相矛盾的答案。
+    /// 串一档就是「双页里只有一半在动」。映射处的行为另由手势与捕获用例验证。
     #[test]
     fn in_a_spread_only_the_curl_turns_one_leaf() {
         use PageMode::{Continuous, Paged, Spread};

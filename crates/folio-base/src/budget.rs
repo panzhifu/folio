@@ -1,14 +1,4 @@
-//! 内存预算与降级顺序（`plans/基础设施.md` §5.3）。
-//!
-//! 三条缓存各有自己的封顶（章的解析产物、shaping、图片纹理），但**没有总上限、也没有
-//! 降级顺序** —— 本模块给这两样一个说法。桌面端会一直不回答「内存不够怎么办」直到被系统
-//! 杀掉；移动端则有内存压力回调，是唯一一个会强制你回答这件事的地方。
-//!
-//! **现状（诚实说明）**：这里只落**策略** —— 总上限怎么算、压力来了按什么顺序丢多少。
-//! 真要执行，得各缓存先能报「我占了多少字节」，而它们目前报不出来：排版那层的块缓存按
-//! **块数**封顶、图片在 gpui 的纹理 atlas 里、章源文本缓存是个没有账的 `HashMap`。所以
-//! 这份策略**还没接到执行端**，接法是给每类缓存加一个 `bytes()` 与一个 `evict(fraction)`，
-//! 再按 [`EvictStep::order`] 依次调用。
+//! 可再生缓存预算与降级顺序。阅读会话负责统计和执行；不是进程 RSS 上限。
 
 /// 物理内存里划给缓存的比例（§六待决 #4：按比例 + 绝对上限，两条取小）。
 const PHYSICAL_RATIO: f64 = 0.1;
@@ -27,9 +17,19 @@ pub struct MemoryBudget {
 }
 
 impl MemoryBudget {
+    /// CPU 实测与缓存估算超过软预算时请求回收；当前内容仍由消费方保护。
+    pub fn pressure_for(&self, estimated_bytes: u64) -> Pressure {
+        if estimated_bytes > self.total.saturating_mul(2) {
+            Pressure::Critical
+        } else if estimated_bytes > self.total {
+            Pressure::Moderate
+        } else {
+            Pressure::Normal
+        }
+    }
     /// 按设备的物理内存算一份预算。
     ///
-    /// `physical_bytes` 由平台层给（Android 从 `ActivityManager` 读、桌面可给 `None`）：
+    /// `physical_bytes` 由平台层读取；系统查询失败时给 `None`：
     /// `ratio × 物理内存` 与 [`ABSOLUTE_CAP`] **取小**；给不出物理内存就用 [`FALLBACK`]。
     pub fn for_device(physical_bytes: Option<u64>) -> Self {
         let by_ratio = physical_bytes
@@ -58,7 +58,7 @@ impl MemoryBudget {
     }
 }
 
-/// 内存压力的档位。Android 的 `onTrimMemory` 粗粒度映射过来；桌面端不给，就一直是 `Normal`。
+/// 缓存占用相对软预算的压力档位；系统告警可另行触发回收。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pressure {
     /// 没压力：什么都不用丢。
@@ -111,7 +111,7 @@ impl EvictStep {
 
 #[cfg(test)]
 mod tests {
-    use super::{ABSOLUTE_CAP, EvictStep, FALLBACK, MemoryBudget, Pressure};
+    use crate::budget::{EvictStep, MemoryBudget, Pressure};
 
     /// 预算 = min(比例 × 物理内存, 绝对上限)；小内存机器走比例那一条。
     #[test]
@@ -124,7 +124,7 @@ mod tests {
         // 16 GiB 物理内存 → 撞绝对上限。
         assert_eq!(
             MemoryBudget::for_device(Some(16 * 1024 * 1024 * 1024)).total,
-            ABSOLUTE_CAP
+            256 * 1024 * 1024
         );
         // 物理内存报得极小也别给 0。
         assert!(MemoryBudget::for_device(Some(1)).total >= 1);
@@ -133,7 +133,20 @@ mod tests {
     /// 拿不到物理内存就退回兜底值。
     #[test]
     fn a_missing_physical_size_falls_back() {
-        assert_eq!(MemoryBudget::for_device(None).total, FALLBACK);
+        assert_eq!(MemoryBudget::for_device(None).total, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn pressure_thresholds_are_exact_and_do_not_overflow() {
+        let budget = MemoryBudget::for_device(None);
+        assert_eq!(budget.pressure_for(budget.total), Pressure::Normal);
+        assert_eq!(budget.pressure_for(budget.total + 1), Pressure::Moderate);
+        assert_eq!(budget.pressure_for(budget.total * 2), Pressure::Moderate);
+        assert_eq!(
+            budget.pressure_for(budget.total * 2 + 1),
+            Pressure::Critical
+        );
+        assert_eq!(budget.pressure_for(u64::MAX), Pressure::Critical);
     }
 
     /// 压力越大丢得越多，且 `Normal` 一点不丢。

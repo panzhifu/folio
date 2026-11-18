@@ -1,16 +1,10 @@
-//! 排版引擎的**回归基准**：每次优化前后跑同一个数，看有没有真的变快。
+//! 固定合成语料与假度量的排版基准；不包含真实字体或 GPU 绘制。
+//! 每批 20 次，预热 3 批后记录 30 批的 p50/p95，另报最佳值。
+//! 比较编译档位时，除 folio-render 的 opt-level 外保持构建条件相同。
 //!
-//! 跑法：
 //! ```text
 //! cargo run -p folio-core --release --example bench-layout
 //! ```
-//!
-//! 用**固定语料 + 固定假度量**，所以两次运行之间的差异只可能来自代码改动。
-//! 度量与 `layout::tests` 同一套（汉字 1 em、拉丁 0.5 em、空格 0.25 em）：
-//! 不是真字体，但两边同源，比值就是那层优化的真实收益。
-//!
-//! **稳定性**：每个用例跑 `RUNS` 轮取**中位数**，并在前面加一轮预热。
-//! 单次 `Instant` 在 release 下抖动可达 ±20%，中位数比平均值稳。
 
 use std::time::{Duration, Instant};
 
@@ -25,7 +19,7 @@ use folio_core::layout::{
 
 /// 每批跑多少次。批内取平均，摊平单次中断。
 const BATCH: usize = 20;
-/// 跑多少批，取最快的批。
+/// 计时批数；p95 使用 nearest-rank。
 const BATCHES: usize = 30;
 /// 预热多少批。
 const WARMUP: usize = 3;
@@ -58,18 +52,26 @@ impl Measure for Mock {
     }
 }
 
-/// 中位数（保留给需要时用）
-#[allow(dead_code)]
-fn median(mut samples: Vec<Duration>) -> Duration {
-    samples.sort();
-    samples[samples.len() / 2]
+#[derive(Clone, Copy)]
+struct Timings {
+    best: Duration,
+    p50: Duration,
+    p95: Duration,
 }
 
-/// 最小值（保留给需要时用）
-#[allow(dead_code)]
-fn best(mut samples: Vec<Duration>) -> Duration {
-    samples.sort();
-    samples[0]
+impl Timings {
+    fn new(mut samples: Vec<Duration>) -> Self {
+        samples.sort_unstable();
+        Self {
+            best: samples[0],
+            p50: samples[samples.len().div_ceil(2) - 1],
+            p95: samples[(samples.len() * 95).div_ceil(100) - 1],
+        }
+    }
+
+    fn as_secs_f64(self) -> f64 {
+        self.p50.as_secs_f64()
+    }
 }
 
 /// 语料：`paragraphs` 段，每段约 `chars` 个汉字。
@@ -125,17 +127,13 @@ fn setup(html: &str) -> (Dom, StyledDom, NodeId) {
     (dom, styles, root)
 }
 
-/// 排一遍 `options`，返回**每批平均**的最快值，以及行数。
-///
-/// 方法：先预热几批（让 CPU 频率与分支预测稳定），再逐批计时，
-/// 每批 `BATCH` 次取平均，最后取**最快的批** —— 机器上有别的负载时只会让某批变慢，
-/// 所以最快的那批最接近「这段代码本身有多快」。
+/// 分位数基于每批平均耗时，包含丢弃排版结果的成本。
 fn time_layout(
     dom: &Dom,
     styles: &StyledDom,
     root: NodeId,
     options: LayoutOptions,
-) -> (Duration, usize) {
+) -> (Timings, usize) {
     let measure = Mock;
     let lines = layout(dom, styles, root, options, &measure, &NoImages)
         .lines
@@ -152,30 +150,39 @@ fn time_layout(
     for _ in 0..WARMUP {
         run_batch();
     }
-    let mut fastest = run_batch();
-    for _ in 1..BATCHES {
-        let d = run_batch();
-        if d < fastest {
-            fastest = d;
-        }
-    }
-    (fastest, lines)
+    let samples = (0..BATCHES).map(|_| run_batch()).collect();
+    (Timings::new(samples), lines)
 }
 
-fn report(label: &str, d: Duration, extra: &str) {
+fn report(label: &str, d: Timings, extra: &str) {
     println!(
-        "  {label:<34} {:>8.2} ms   {extra}",
-        d.as_secs_f64() * 1000.0
+        "  {label:<34} p50 {:>8.2} ms / p95 {:>8.2} ms / best {:>8.2} ms   {extra}",
+        d.p50.as_secs_f64() * 1000.0,
+        d.p95.as_secs_f64() * 1000.0,
+        d.best.as_secs_f64() * 1000.0,
+    );
+    println!(
+        "BENCH {}",
+        serde_json::json!({
+            "case": label, "p50_ms": d.p50.as_secs_f64() * 1000.0,
+            "p95_ms": d.p95.as_secs_f64() * 1000.0,
+            "best_ms": d.best.as_secs_f64() * 1000.0, "detail": extra,
+        })
     );
 }
 
 fn main() {
-    println!("== 排版基准（每批 {BATCH} 次取平均，{BATCHES} 批取最快）==\n");
+    println!("== 排版基准（每批 {BATCH} 次取平均，{BATCHES} 批记录分位数）==\n");
 
     // ---- 中文：CJK 每字可断，走「直接落在 k」那一支 ----
     let src = chapter(600, 800);
     let (dom, styles, root) = setup(&src);
-    println!("中文章：{} 字节、{} 节点", dom.nodes.len(), dom.nodes.len());
+    println!(
+        "中文章：{} 字节、{} 节点、内容键 {:?}",
+        src.len(),
+        dom.nodes.len(),
+        content_hash(&src)
+    );
     let (full, lines) = time_layout(
         &dom,
         &styles,
@@ -323,9 +330,9 @@ fn main() {
         report("改一段后整章重排（无缓存）", full_hot, "");
 
         let mut cache = BlockCache::new();
-        let mut best = Duration::MAX;
+        let mut samples = Vec::new();
         let (mut hits, mut misses) = (0u64, 0u64);
-        for _ in 0..10 {
+        for _ in 0..BATCHES {
             // 不计时：把缓存填成「改之前」的那一版。
             cache.clear();
             layout_with_blocks(
@@ -337,13 +344,13 @@ fn main() {
                 &mut cache, &key_b, &dom_b, &hot, root_b, opts, &Mock, &NoImages,
             );
             std::hint::black_box(out.height);
-            best = best.min(t.elapsed());
+            samples.push(t.elapsed());
             hits = cache.hits - h0;
             misses = cache.misses - m0;
         }
         report(
             "改一段（块级缓存）",
-            best,
+            Timings::new(samples),
             &format!("重排 {misses} 块 / 命中 {hits} 块"),
         );
     }

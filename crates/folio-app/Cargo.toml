@@ -8,200 +8,71 @@ publish = false
 
 [lib]
 name = "folio_app"
-# rlib：桌面 bin 与 tests 链接；cdylib：Android / HarmonyOS 宿主 dlopen；
-# staticlib：iOS 由 Xcode 链接。三项都列，因为 crate-type 不能按 target 门控。
+# 桌面用 rlib，Android/OHOS 用 cdylib，iOS 用 staticlib；crate-type 不能按目标门控。
 crate-type = ["rlib", "cdylib", "staticlib"]
 path = "src/lib.rs"
 
 [[bin]]
 name = "folio"
 path = "src/main.rs"
-# `cargo test` 的默认 target 选择里有「bins as unit tests」这一条：它还给每个 bin 再链一份
-# 带 test 跑器的可执行文件。`src/main.rs` 里只有三个按 cfg 分开的 `fn main`，`#[test]` 与
-# `#[cfg(test)]` 各 0 个，那一份就是白写一次 820 MB（其中 656 MB 是 DWARF）。测试本来就住在
-# lib 里，日常那条 `cargo test -p folio-app --lib` 不受影响。
+# 测试位于 lib；bin 仅负责入口，避免重复链接测试可执行文件。
 test = false
 
 [dependencies]
 folio-core.workspace = true
-# 解出来的那一本像素要按水墨那一档压成半灰（`reader::model::image_atlas::desaturate`），
-# 而 `gpui::RenderImage::new` 收的是 `image::Frame` —— 像素层的重建绕不开这个类型。
-# 从前它只挂在移动目标上（离屏那一帧要编码成 PNG 才递得出去）；这一档三端都要，所以
-# 挪到公共那一段。版本与锁里那一份一致（folio-core 已在用），不引入新 crate、不产生
-# 双版本；PNG 那一档由 workspace 根的 feature 统一打开。
+# 水墨模式需重建 image::Frame，移动离屏分享也使用图像编码。
 image.workspace = true
-# 网络导入卡：地址 → 二维码位图。见根 Cargo.toml 那条注释（同一份 image 0.25）。
 qrcode.workspace = true
-# 仿真翻页那一档的页面网格与 uniform 的纯 CPU 定义：这里只拿数据，不拿 GPU 类型。
-# 它住在 `panzhifu/gpui-folio` 那个 workspace 里，rev 必须跟根
-# `[patch.crates-io]` 那五条同一个数 —— 一份 fork 六个成员，钉成两个 rev 就是两份代码。
+# 纯 CPU 网格与 uniform；rev 须与根清单的五条 gpui-folio patch 一致。
 folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "2df4612cf803395cc8dafbb76f62e8003fe2a70b" }
+# 统一通过 gpui_kit 门面使用 GPUI。
 gpui-kit.workspace = true
-# 曾经有一条 `ely-gpui-component`：全仓库只用它的 `typography::format` 写两个纯函数
-# （千位分组、定小数位），它却独占 78 个包 —— 终端模拟器、LaTeX、Mermaid、QR 解码、
-# 邮件 / 日历 / 财务组件全在依赖图里。2026-11-04 把那二十行抄进
-# `ui/services/l10n.rs` 之后删掉。不要为「就一个格式化函数」再把它加回来。
-# 只依赖 gpui-kit 一个门面：它顶层 `pub use ::gpui::*`，把移动端那份 `gpui-pre` 整个
-# 转了出来，所以两端都用 `use gpui_kit::…`，不再单独声明一条 `gpui` 依赖。
-# 以前移动端要显式引 `gpui-pre` 是因为它是独立 workspace、拿不到 gpui-kit。
-# 日志走 `tracing` 那一套（装配在 `folio_core::logging`），app 侧要直接引两个：
-# 宏用它，`Layer` 类型是用来递 logcat 那一层的。
-# `log` 留着只为 Android：`android_logger` 是它的后端，logcat 那层通过它落地。
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Android 的 logcat 桥由 android_logger 接收。
 log.workspace = true
-# 界面侧的错误一律收成 `anyhow`（约定与那个 `report` 助手见 `ui::shared::error`）。
-# 后端那层的 `thiserror` 枚举不需要在这里被认识：`folio_core::Error` 是个标准的
-# `std::error::Error`，`?` 自动把它接进 anyhow 的链，`{err:#}` 于是能一路看到底。
 anyhow.workspace = true
-# 水墨那一档要把主题里一百多个颜色 token 统一去饱和。`ThemeColor` 只有 Serde 一条
-# 批量遍历的路（没有字段迭代口），所以这里拿 `serde_json` 走一趟 Value。
+# ThemeColor 没有字段遍历接口，水墨模式经 Serde 批量转换颜色。
 serde_json.workspace = true
-# 导入作业的事件从 `folio_core::task` 的工作线程搬回界面线程（用它的原因见 workspace 根
-# 那段说明：`std::sync::mpsc` 的 `recv` 只能阻塞，界面线程不能阻塞）。挂在
-# `ui::features::shelf::view` 的导入链上。
+# 后台事件异步转入 UI，不能阻塞接收。
 async-channel.workspace = true
-# Android 入口在 Activity 结束时把进程带走，要的是不跑 atexit 的那一种退出（理由与实测到的
-# 那个 HWUI abort 都写在 workspace 根那条说明里）。只用这一个符号，且只在
-# `ui::platform::android` 那一臂里 —— 桌面与 iOS 都不读它。
+# Android 退出需要不执行 atexit 的 _exit。
 libc.workspace = true
-# 只用来问一次「这台设备此刻的本地时区偏移是多少秒」（`ui::host::local_offset_secs`）。
-# 为什么不让 core 自己问：`folio_core` 零进程环境依赖是硬约束（它的时区一律是参数），
-# 而「读者在哪个时区」本来就是界面侧才知道的事。为什么不是新依赖树见 workspace 根那条。
+# 时区由 host 读取，core 只收偏移参数。
 chrono.workspace = true
-# 开书注册内嵌字体那一趟要读字体自己的 cmap，判它有没有拉丁 `m` —— gpui 的
-# `CosmicTextSystem::load_family` 会把没有 `m` 的脸从 primary 候选里剔掉，剔空了
-# `resolve_font` 就 panic（桌面有 fontconfig 回退表接着，Android 上一个都没有，直接
-# SIGABRT）。为什么不是新依赖树见 workspace 根那条。
+# GPUI primary 字体需要拉丁 m；缺少候选在 Android 上可能 panic。
 ttf-parser.workspace = true
-# 内嵌字体子集化：Google fontations 的 skera（纯 Rust、TTF/CFF/TTC，GSUB/GPOS 与
-# 竖排 metrics 都跟着字形走）。自己只剪 glyf 还要重映射布局表与复合字形，等于重写它。
+# 子集化需保留布局表、复合字形和竖排 metrics。
 skera.workspace = true
-# skera 的输入类型与「每书唯一家族名」的 name 表重建用这两份（已在 skera 的依赖树里）。
 read-fonts.workspace = true
 write-fonts.workspace = true
 
-
-# ── 移动端平台层：只在移动目标上链，桌面端根本不编译它 ──
-# 包名是 `gpui-pre-mobile`，lib 名仍是 `gpui_mobile`，所以 `use gpui_mobile::…` 不变。
-#
-# 走 git 而不是 `path = "../../../gpui-mobile"`：path 那条把仓库外同级目录变成了构建前提，
-# 全新克隆里 `cargo metadata` 直接失败（实测退出 101：failed to load manifest for
-# dependency gpui-pre-mobile），CI 也因此无法自洽 —— `actions/checkout` 不许往 workspace
-# 外面检出（报 "Repository path ... is not under ..."）。钉 rev 之后 Cargo.lock 记下
-# 的就是这一个 commit，比跟分支头走更可复现。
-#
-# 要改 fork 本身而不先推上去：在 `~/.cargo/config.toml` 里加
-# `paths = ["/home/noke/Code/gpui-mobile"]`，cargo 会用那个目录替换同名的 git 依赖，
-# 不用动这里的 rev。（这个覆盖只对本地生效，CI 永远按锁里的 commit 取。）
-#
-# TODO：这条依赖默认挂着 30 多个平台插件 feature，开发方案 §2.2b 要求关掉
-#       （`default-features = false`），还没落实。
+# 移动端使用固定 fork，升级须与 gpui-kit 使用的 gpui-pre 快照对齐。
+# 不提交仓库外 path 依赖；本地覆盖只放在用户 Cargo 配置中。
+# 默认平台插件尚未裁剪，关闭 default-features 前需核对实际使用能力。
 [target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
-# rev 取的是 fork 的 `line/gpui-pre`：在 `5843b657`（延迟退出重试）之上多了
-# `057c103`（`prompt_for_paths{directories:true}` 走 ACTION_OPEN_DOCUMENT_TREE，路径提示能选文件夹）、
-# `c694ec8`（rustfmt 收尾）与 `29f19d3`（permission_handler 增加 MANAGE_EXTERNAL_STORAGE，
-# 「所有文件访问」—— 整机扫描在 Android 上要先拿它）；再到
-# `5079a7c`/`1b022b0`（sensors：polling API 的读数与 subscribe 那条活路）、
-# `0f93c86`/`b503c39`（合进上游的 one-window-per-host + GL fallback、系统剪贴板与 example 修复）、
-# `8f60e48`（pinch_guard：第二根手指成缩放而不是第二个 pan，缩放期间不产滚动也不武装惯性）、
-# `885abd8`（音量键不再被 keyboard.rs 丢掉，翻成 `volumeup`/`volumedown` —— 音量键翻页靠它）、
-# `2956607`（`set_screen_brightness`：写窗口自己的 `screenBrightness` 压暗 / 把背光交还系统
-# —— 「界面亮度」靠它）、
-# `78384e0`（跟到上游的 `gpui-pre = 0.3.9`；补上 `refresh_interval`、`on_displays_changed`
-# 与 `on_display_changed` 三个新 trait 方法）、
-# `522551b`（合进 longbridge 那三条 Android：`426cc54` 随包 emoji 字体的装载时机、
-# `4ab10c3` 把 GPUI 的 AccessKit 树交给 TalkBack（读屏）、`c24a130` 跟随系统夜间模式
-# —— 后者顺手修掉「窗口 appearance 初值硬编码 Light，所以冷启动时「跟随系统」恒为浅色」
-# 这一格，`Platform::window_appearance()` 也第一次被真实现；另加 `e151036`，只取那条
-# 0.3.9 bump 里 iOS 侧的三个方法，因为我们的 line 先前只补了 Android）、
-# `095c9b3`（合进 longbridge 的 offscreen 三条 `d04e1b3`/`b28e203`/`4411403`：开一个真的
-# GPUI 窗口、把它渲成图而不是画上屏（`gpui_mobile::offscreen`）。它按上游原样带着自己
-# 那份 `vendor/gpui-pre-wgpu` 与 `[patch.crates-io]` —— 那条 patch 在我们这侧**不生效**
-# （cargo 只认工作区根上的 patch），生效的是根上那三条指向 `panzhifu/gpui-folio` 的；
-# 留着它只为与上游那三条零冲突，并让他们自己的 example 仍能开 offscreen）。
-# `4ea3dea`（在 `095c9b3` 之上只多一条：把 `feat/harmonyos-support` 那份 ohos 后端移植到
-# gpui-pre 0.3.9 这条线上 —— `src/ohos/` 十个文件、ArkTS 宿主工程 `example/ohos/`，加上
-# 三个只有真跑一遍才暴露出来的修复：hilog 的 `LOG_APP` 在现在的 SDK 里是 0 不是 1（传 1
-# 会把 native 每一条日志静默丢掉）、那 29 个 `extern "C"` 块缺 `#[link]` 所以 cdylib 只
-# 带着 `libc.so` 就链上了、装载时才在 `OH_LOG_Print` 上 relocation 失败，以及 `build.sh`
-# 写死 aarch64 而 x86_64 那台模拟器只认 `x86_64`。移植量全是 trait 签名漂移，每一条都照
-# 这条线上 Android 臂已有的做法对齐）。
-# `949536e`（把上面那份 `vendor/gpui-pre-wgpu` 删了：与 `panzhifu/gpui-pre-wgpu@617a933` 逐
-# 文件相同、只差一个 `.gitignore`，而树里的第二份副本不会自己更新 —— 忘了同步的那一版是
-# 静默的，症状只有像素。根上那条 patch 换成钉死 rev 的 git 源，理由是它换的是**所有**平台的
-# 渲染器，不只有移动那几头，跟着分支头漂就是画面在漂）。
-# `2beb14c`（OHOS 的入口补上 hilog logger 与 panic hook —— 另两个移动臂都装了，只它没有。
-# 没装时 `src/ohos` 里每一条 `log::*` 都被丢掉，native 侧看着全死，而同进程 ArkTS 的
-# `hilog.info` 照打，正好把人指离真因；panic hook 是为 `-Z build-std=std,panic_abort` 那
-# 一种构建，默认 hook 写 stderr，faultlog 里只剩裸 PC）。
-# `ab13184`（鸿蒙那条臂第一次真的跑起帧循环。两格都是装机才看得见的：一是
-# `OH_NativeVSync` 的回调落在平台自选的 vsync 线程，而 `App` 属于收 XComponent 回调的那根
-# —— `gpui-pre-scheduler` 给每个 local task 盖上 spawn 线程的 `ThreadId` 并在每次 poll 比对，
-# 所以启动后第一个前台任务就把进程打死；现在 vsync 只投递不执行，一跳走
-# `ohos::main_thread`（`napi_threadsafe_function`），与 Android 那边「Choreographer 只标记
-# 有帧到期」同形。二是 `Application::run` 的返回值在这里就是 App 的命：`Platform::run` 在
-# 鸿蒙上是 non-blocking，手柄一丢 `Rc<AppCell>` 就没了持有者，而运行时会为了绑 XComponent
-# 再调一遍模块初始化、第二次 `run` 覆盖掉第一次还在等的 launch 回调 —— 换成 `run_embedded`
-# 并把柄存进进程级 static、只启动一次。修完的样子：帧在 UI 线程上稳定 tick，GPUI 每帧摆出
-# 场景，只剩那台模拟器的 GLES 3.0 没有 SSBO 画不出像素（真机仍未验）。根上的 patch 同时
-# 改指 `panzhifu/gpui-folio`：那条独立快照缺 `adapter.limits()` 那一格，会把「驱动没有
-# compute」报成「没有可用 GPU」。
-# 屏还是黑的，卡在那台模拟器的 GLES 3.0 没有 SSBO —— 那一格由 `c261858` 解决，见根上那条。
-# `6b4cfa6`（字体探测表按当前镜像发的名字重排：裸名字在前，带字重的猜测留在后面。装机第一帧
-# 画出来之后中文是一整屏 `.notdef` 豆腐块 —— 那份表十八个路径只有 `HarmonyOS_Sans_Italic.ttf`
-# 碰巧对上，中文唯一有字形的 `HarmonyOS_Sans_SC.ttf` 从没被读过，而 Latin 照常出，所以静默。
-# 另剔掉 `HMOSColorEmojiCompat.ttf`：它一进 fontdb，gpui 就拿它的家族名去 resolve emoji，
-# 那份面没有期待的 style，第一次画字就 panic。鸿蒙的 emoji 与 Android 同解 —— 随包带一份）。
-# `4a7e29a`（OHOS 补一条 `install_with_assets` —— Android 有 `start_with_assets`，iOS 与
-# OHOS 都没有：`Application` 在库内部构造，宿主只拿到闭包里的 `&mut App`，而 `with_assets`
-# 消费的是 builder 本身，从那个位置够不着。后果不是报错是**静默空白**：`svg().path("icons/…")`
-# 解析不出字节。装机实测过这条链：接上之后 debug 构建仍报 `could not find asset at path
-# "icons/library.svg"`，那不是接线没通（那条错误正是 `AllAssets::load` 发的），而是
-# rust-embed 的字节只在 `#[cfg(not(debug_assertions))]` 下嵌进二进制，debug 构建是按编译期
-# 的 checkout 路径去读盘 —— 设备上没那个目录。换 release 构建（46 MB，debug 是 1.3 GB）后
-# 放大镜、⋮、底部四个 tab 图标全画出来了，`could not find asset` 归零。
-# 也就是说：**鸿蒙的调试期看不到任何嵌入资源，这不是鸿蒙的坑，是 debug profile 的坑**。
-# 这条 sha 是 amend 出来的：原来那条 `52f06cc` 正文末尾混进了一个字面 `EOF`（heredoc 多写了
-# 一行），清理只能改写 `fork/main` 顶端那一条，所以 pin 跟着换 —— `b1744b40` 的提交信息里
-# 写的 `52f06cc` 已经不在分支上了，以这里钉住的数为准。）
-# `5e39b46`（鸿蒙的「选择文件夹」第一次是真问：`prompt_for_paths` 从前直接答 `Ok(None)`，
-# 也就是「用户按了取消」，folio 的 `choose_dir` 把取消当无事发生，那颗按钮按下去连一句错都不
-# 留。NDK 没有 picker（`@ohos.file.picker` 只活在 ArkTS），所以形状只能是转发：ArkTS 用
-# `nativeSetFolderPicker` 注册一个函数，问走 request id + mode，答案从 `nativeDeliverPick` /
-# `nativeFailPick` 回来。顺带修掉一条错了很多年的枚举值 —— `NAPI_FUNCTION` 写的 6 其实是
-# `napi_object`（`undefined=0 … object=6, function=7`），于是每个 JS 函数参数都比成 object，
-# 两个收函数的入口一起回「argument is not a function」；键盘那条也是这一笔通的。）
-# `ad8fb25`（帧循环改按需，这条是 picker 能在模拟器上验完的前提：faultlog 里 10 份
-# `THREAD_BLOCK_6S`，主线程每次停在 `eglSwapBuffers → RequestBuffer → binder
-# WaitForCompletion` —— 缓冲区队列归合成器，它不消费就不返回，而 picker 一开正盖住我们的
-# XComponent。原先每帧无条件 re-arm，等于按 60Hz 撞满那条队列。现在 `demand` / `armed` 两格
-# 说了算，GPUI 那头本来就按这套契约升 demand（`frame_waker` / `schedule_frame` /
-# `wake_platform`）。）
+# fork 承载移动输入、系统能力与 OHOS 适配；patch 由 workspace 根统一提供。
 gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "dd5b187a4600d783f6fbc34c519eefac3e241e88", features = [
     "permission_handler",
-    # 把视图渲成图（分享卡片那一格的地基）。要的是打了补丁的渲染器，见根上那条 patch。
+    # 依赖根清单中支持页面捕获的渲染器。
     "offscreen",
-    # 网盘授权的回跳：授权页回到应用时那条 `folio://aliyun/callback?code=…` 要能
-    # 递到 Rust（`services::cloud_link` 接这一手）。没有它，阿里云盘那条授权链
-    # 到「页面回来了」就断了 —— 码拿不到，界面一直等。
+    # 阿里云盘授权回跳必须把 code 送回 services::cloud_link。
     "deeplink",
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.15"
 android-activity = { version = "0.6", features = ["native-activity"] }
-# 只为一件事：从 Rust 调我们自己的 Java（`GpuiSystemUi` 藏系统栏）。fork 里那份
-# `gpui_mobile::android::jni` 给的是 `&mut jni::Env`，要构造实参与签名字面量就得直接
-# 用 `jni` 这个 crate。版本与 `gpui-pre-mobile` 依赖的那一份对齐（锁里只有 0.22.4），
-# 对不上就会链进第二个 jni。
+# 与 gpui-pre-mobile 的 jni 版本对齐，避免两套 Env 类型。
 jni = "0.22"
+
+# Windows 的 exe 图标资源在链接期嵌进去（见 build.rs）。版本钉到 lock 里已有的 3.0.12：
+# 重新解析一份新版本会把整份 lock 再解一遍，钉住的 GPUI 快照有被挪动的风险。
+[target.'cfg(target_os = "windows")'.build-dependencies]
+embed-resource = "=3.0.12"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-# 删书那条测试要真的建文件、真的看它有没有被 unlink，所以需要临时目录。
 tempfile = "3"
-# 图集那一格的生命周期测试要自己造一份 `RenderImage`，而它的构造参数类型
-# `image::Frame` 没有被 gpui 重导出（`src/gpui.rs` 的 `pub use` 里没有 `image`）。
-# 版本与锁里那份一致（folio-core 已在用），不引入新 crate、不产生双版本。
+# 测试构造 RenderImage 需要未被 GPUI 重导出的 image::Frame。
 image = "0.25.10"

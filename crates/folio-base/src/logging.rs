@@ -160,7 +160,7 @@ pub enum Directive {
     Default(LevelFilter),
     /// `前缀=级别`：管这一支，以及以它为前缀的更深的模块。
     Target(String, LevelFilter),
-    /// 认不出。留着原文是为了把话说清楚，而不是静默吞掉一条配置。
+    /// 无效输入；保留供调用方判断，日志不得回显原文。
     Junk(String),
 }
 
@@ -256,8 +256,8 @@ fn apply<'a>(mut out: Targets, pieces: impl IntoIterator<Item = &'a str>) -> Tar
         match Directive::parse(piece) {
             Directive::Default(level) => out = out.with_default(level),
             Directive::Target(target, level) => out = out.with_target(target, level),
-            Directive::Junk(text) => {
-                eprintln!("日志配置里「{text}」看不懂，跳过那一条（要的是 `级别` 或 `前缀=级别`）")
+            Directive::Junk(_) => {
+                eprintln!("日志配置含无效指令，已跳过（要的是 `级别` 或 `前缀=级别`，不回显输入）")
             }
         }
     }
@@ -428,14 +428,14 @@ fn report_startup(logging: &Logging) {
         Some(path) => tracing::info!("日志文件 {}", path.display()),
         None => tracing::info!("不落盘（logging.file = false）"),
     }
-    if !logging.targets.is_empty() {
-        tracing::info!("按模块覆盖 {:?}", logging.targets);
-    }
-    if let Ok(spec) = std::env::var(LEVEL_ENV)
-        && !spec.trim().is_empty()
-    {
-        tracing::info!("{LEVEL_ENV}={spec} 压过配置");
-    }
+    let environment_override = std::env::var(LEVEL_ENV)
+        .ok()
+        .is_some_and(|spec| !spec.trim().is_empty());
+    tracing::info!(
+        target_overrides = logging.targets.len(),
+        environment_override,
+        "日志覆盖状态（不输出原文）"
+    );
 }
 
 /// 日志文件的输出口。

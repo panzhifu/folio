@@ -52,6 +52,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Validate release sources
+        run: cargo xtask release-check
+
       - id: check
         shell: bash
         env:
@@ -585,6 +589,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@1.99.0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -596,6 +602,9 @@ jobs:
         # （`folio_<版本>_amd64.deb`），带横杠的那一条**安静地漏掉它**，于是清单里少一行、
         # 读者拿到的包验不了，而 sha256sum 自己不会报任何错。本机实测两条通配的差集就是它。
         run: sha256sum folio* > sha256sums.txt && cat sha256sums.txt
+
+      - name: Verify downloaded release artifacts
+        run: cargo xtask release-check --artifacts dist
 
       - name: 取 CHANGELOG 里对应那一段当 release 正文
         shell: bash

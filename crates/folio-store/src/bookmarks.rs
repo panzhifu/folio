@@ -19,7 +19,7 @@ impl Store {
     /// 存储层不参与坐标换算 —— 与 [`Store::add_annotation`] 同一条分工。
     pub fn add_bookmark(&self, book_id: i64, anchor: &TextAnchor) -> Result<i64> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let stamp = now();
+        let stamp = super::sync_order::next_version(0, now())?;
         conn.execute(
             "INSERT INTO bookmarks (uid, book_id, anchor_json, created_at, updated_at)
              VALUES (lower(hex(randomblob(16))), ?1, ?2, ?3, ?3)",
@@ -108,20 +108,27 @@ impl Store {
     /// 拔一枚书签，并记一条同步墓碑（理由与 [`Store::delete_annotation`] 同）。
     pub fn delete_bookmark(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(Option<String>, Option<String>)> = conn
+        let row: Option<(Option<String>, Option<String>, i64)> = conn
             .query_row(
-                "SELECT s.uid, b.content_hash
+                "SELECT s.uid, b.content_hash, s.updated_at
                  FROM bookmarks s JOIN books b ON b.id = s.book_id
                  WHERE s.id = ?1",
                 params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some((uid, hash)) = row else {
+        let Some((uid, hash, observed)) = row else {
             return Ok(());
         };
         // 同 [`Store::delete_annotation`]：两写一账，必须一笔事务。
         let tx = conn.unchecked_transaction()?;
+        let stamp = super::sync_order::next_mark_version(
+            &tx,
+            "bookmark",
+            uid.as_deref().unwrap_or(""),
+            observed,
+            now(),
+        )?;
         tx.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
         if let (Some(uid), Some(hash)) = (uid, hash) {
             super::sync::record_tombstone(
@@ -129,7 +136,7 @@ impl Store {
                 folio_model::sync::TombstoneKind::Bookmark,
                 &uid,
                 &hash,
-                now(),
+                stamp,
             )?;
         }
         tx.commit()?;
@@ -138,12 +145,14 @@ impl Store {
 
     /// 撤销拔除：按原行插回，`id`、`uid`、`created_at` 都不变。
     ///
-    /// `updated_at` 抬到现在并清掉墓碑 —— 与 [`Store::restore_annotation`] 同一条理由：
+    /// `updated_at` 超过已观察版本并清掉墓碑 —— 与 [`Store::restore_annotation`] 同一条理由：
     /// 删除可能已经同步出去，照抄旧时间戳会让下一次同步又把这一枚拔掉。
     pub fn restore_bookmark(&self, row: &Bookmark) -> Result<()> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         // 同 [`Store::restore_annotation`]：插回与撤墓碑一笔事务。
         let tx = conn.unchecked_transaction()?;
+        let stamp =
+            super::sync_order::next_mark_version(&tx, "bookmark", &row.uid, row.updated_at, now())?;
         tx.execute(
             "INSERT OR REPLACE INTO bookmarks (id, uid, book_id, anchor_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -153,7 +162,7 @@ impl Store {
                 row.book_id,
                 row.anchor.to_json(),
                 row.created_at,
-                now()
+                stamp
             ],
         )?;
         tx.execute(
@@ -296,17 +305,25 @@ mod tests {
         assert_eq!(store.bookmarks(b).unwrap().len(), 1);
     }
 
-    /// 撤销拔除 = 原行插回：id 与时间戳都照旧。恢复之后那一条还按原顺序排在原地。
+    /// 撤销保留身份、创建时间与顺序，逻辑版本单调推进。
     #[test]
     fn restoring_puts_the_very_row_back() {
         let (_dir, store) = store();
         let book = store.add_book(&path("a.epub"), &meta("书甲")).unwrap();
+        let hash = "b".repeat(64);
+        store.set_content_hash(book, &hash, "sha256").unwrap();
         let first = store.add_bookmark(book, &line_anchor(0, 0, 4)).unwrap();
         let second = store.add_bookmark(book, &line_anchor(0, 10, 14)).unwrap();
 
         let row = store.bookmark(first).unwrap().unwrap();
         store.delete_bookmark(first).unwrap();
         assert!(store.bookmark(first).unwrap().is_none());
+        let deleted_at = store.collect_sync("fixture", 0).unwrap().snapshot.books[&hash]
+            .tombstones
+            .iter()
+            .find(|t| t.uid == row.uid)
+            .unwrap()
+            .deleted_at;
 
         store.restore_bookmark(&row).unwrap();
         let back = store.bookmark(first).unwrap().expect("原 id 要回来");
@@ -315,8 +332,8 @@ mod tests {
         assert_eq!(back.created_at, row.created_at, "钉下的时间不动");
         assert_eq!(back.anchor, row.anchor);
         assert!(
-            back.updated_at >= row.updated_at,
-            "撤销要把 updated_at 抬到现在，下一次同步才压得过远端墓碑"
+            back.updated_at > deleted_at,
+            "撤销版本必须严格超过删除版本，下一次同步才压得过远端墓碑"
         );
         let ids: Vec<i64> = store
             .bookmarks(book)

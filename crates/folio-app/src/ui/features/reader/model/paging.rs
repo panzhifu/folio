@@ -15,7 +15,7 @@ use crate::ui::features::reader::model::session::{
 use crate::ui::features::reader::model::swipe::SwipeStep;
 use crate::ui::features::reader::model::turn::{PagingFacts, TurnIntent, TurnPlan};
 use crate::ui::services::config::ConfigHolder;
-use crate::ui::shell::turn_duration;
+use crate::ui::services::motion::turn_duration;
 
 /// 自动前进那一帧的在途状态：上一帧的时刻、分页档攒下的间隔债、滚动档攒下的
 /// 不足 1px 的余数。

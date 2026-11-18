@@ -22,12 +22,12 @@ use folio_core::net::remote::Cancel;
 use folio_core::{FontEntry, Priority};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, WeakEntity};
 
-use crate::ui::features::reader::note_external_registration;
 use crate::ui::platform::user_fonts;
 use crate::ui::services::config::ConfigHolder;
 use crate::ui::services::resident;
 use crate::ui::services::update;
 use folio_core::text as font_primary;
+use folio_core::text::load::note_external_registration;
 
 /// 一趟装 / 删的状态。设置页 observe 它；`Downloading` 带着 id，清单页好知道
 /// 哪张卡在动（同一时刻只有一趟，见模块注释）。

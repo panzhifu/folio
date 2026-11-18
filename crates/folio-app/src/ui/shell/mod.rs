@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use folio_core::Library;
 use folio_core::infra::config::Appearance;
-use gpui_kit::base::motion::{
-    Easing, Presence, PresencePhase, PresenceSample, Transition, TransitionId,
-};
+use gpui_kit::base::motion::{Presence, PresencePhase, PresenceSample, TransitionId};
 use gpui_kit::base::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, NavStackState};
 use gpui_kit::component::{ActiveTheme, ThemeMode, h_flex, v_flex};
 use gpui_kit::{
@@ -29,8 +27,10 @@ use gpui_kit::{
 };
 
 use crate::ui::components::ScrollShields;
+use crate::ui::features::cloud::{CloudEvent, CloudView};
 use crate::ui::features::notes::{NotesEvent, NotesView};
-use crate::ui::features::reader::{Arrow, ReaderSession, ReadingPage, Reserve};
+use crate::ui::features::opds::{OpdsEvent, OpdsView};
+use crate::ui::features::reader::{Arrow, ReaderSession, ReadingPage, ReadingPageEvent, Reserve};
 use crate::ui::features::settings::{CompactSettings, SettingsPage, SettingsView};
 use crate::ui::features::shelf::{ShelfEvent, ShelfView};
 use crate::ui::features::stats::StatsView;
@@ -163,96 +163,9 @@ pub fn reading_reserve(_safe: &host::Insets) -> Reserve {
     Reserve::ZERO
 }
 
-/// 一次 push / pop 走这么久。与底部弹层那根弹簧的响应时间同一档（`widgets::bottom_sheet`），
-/// 两处不同步的话，同一只手在两屏之间会感到两种快慢。
-///
-/// `pub(crate)` 只因为门的测试要按这一个数推进时钟（正文翻页那几条门用的是配置默认档，
-/// 而那一个档与这一个数相等，等式由 `tests` 里的门钉住），不是给谁另起一个时长用的口子 ——
-/// 读者的那一格是 [`turn_duration`]。
-pub(crate) const NAV_TRANSITION: Duration = Duration::from_millis(280);
-/// 一次进出的时钟：栈里的每一页与阅读层自己都走这一口，两端不该有两种快慢。
-///
-/// 正文翻页**不**共用这一口了（2026-10-20 起）：读者要调的是那一张纸怎么走，见
-/// [`turn_duration`]。没调过的读者用的就是这同一个数 —— 等式由 `tests` 里一条门钉住，
-/// 不靠注释里那句「同一档」不走偏。
-///
-/// 减动效那一档给零时长 —— `NavStack` 内部本来就是这个判据（它的 `immediate` 那一条），
-/// 阅读层在这里跟着同一件事，才不会出现在「系统不许动」的时候还硬滑 280 毫秒。
-/// 墨水屏那一档同理（[`theme::calm_motion`]：设备是墨水屏、或读者选了水墨）—— 电子纸
-/// 上每一帧重绘都看得见，转场在那一端不是动效是闪烁。
-pub(crate) fn nav_transition(cx: &App) -> Transition {
-    let over = nav_duration_for(cx.reduce_motion(), theme::calm_motion());
-    build_transition(over)
-}
-
-/// [`nav_transition`] 的纯函数芯：判据递进来，测试不碰全局旗。
-fn nav_duration_for(reduce_motion: bool, calm: bool) -> Duration {
-    if reduce_motion || calm {
-        Duration::ZERO
-    } else {
-        NAV_TRANSITION
-    }
-}
-
-/// 零时长裸给（`NavStack` 的 `immediate` 那条路认它），非零带整屏进出同一条曲线。
-fn build_transition(over: Duration) -> Transition {
-    if over.is_zero() {
-        Transition::new(over)
-    } else {
-        Transition::new(over).easing(Easing::EaseInOut)
-    }
-}
-
-/// 正文一次翻页走多久，来自读者那一格（`appearance.turn_duration`；界面是阅读面板里
-/// 「翻页时长」那条滑条）。
-///
-/// 它**故意不**带着整屏进出一起走：那一屏盖过来的是整片界面，没有一张纸可看，放慢它读出来
-/// 的不是从容而是卡顿，而它的 280 ms 是照底部弹层那根弹簧定的、和纸没有约定。
-///
-/// 管到的那两腿是点屏 / 按键 / 滚轮起的那一趟，以及松手惯性那一腿的**上限**（那一腿按剩余
-/// 行程与手指速度自己算，见 `reader::model::swipe::release_duration`）。跟手那一截不在这里：
-/// 它 1:1 跟着手指，没有时长可言。
-///
-/// 墨水屏那一档给零时长（[`theme::calm_motion`]）：纸上落定不该在电子纸上滑。
-pub(crate) fn turn_duration(cx: &App) -> Duration {
-    turn_duration_for(
-        ConfigHolder::appearance(cx).turn_duration,
-        theme::calm_motion(),
-    )
-}
-
-/// [`turn_duration`] 的纯函数芯：配置里的数与墨水屏判据递进来，测试不碰全局旗。
-fn turn_duration_for(configured: f32, calm: bool) -> Duration {
-    if calm {
-        return Duration::ZERO;
-    }
-    // 取整毫秒而不是 `from_secs_f32`：`280 / 1000` 在 f32 里不是 0.28，绕一圈回来会变成
-    // 280.000001 ms —— 动画上没人看得出差一微秒，但默认档与 `NAV_TRANSITION` 那一条等式
-    // 就是靠逐毫秒相等钉住的。
-    Duration::from_millis(configured.round() as u64)
-}
-
-/// 翻页那一趟的时钟：时长由读者那一格给，曲线与整屏进出同一条。
-///
-/// 时长是**起那一趟时快照**下来的 `Turn::over` 而不是每帧现读：一趟只有两三百毫秒，而拖滑条
-/// 每一帧都在写配置 —— 现读就是每帧重新瞄准那个正在走的时钟，读者看见纸停在半路。档位
-/// （[`nav_transition`] 那条注释里的同一个理由）中途换档会让轴与两张纸的入树顺序同时改。
-///
-/// 减动效那一档照旧给零时长，判据与 [`nav_transition`] 完全一致：系统不许动的时候两端都不该
-/// 硬滑。墨水屏同一档（[`theme::calm_motion`]）。
-pub(crate) fn turn_transition(over: Duration, cx: &App) -> Transition {
-    let over = turn_over_for(over, cx.reduce_motion(), theme::calm_motion());
-    build_transition(over)
-}
-
-/// [`turn_transition`] 的纯函数芯：纸上落定该不该滑，判据递进来。
-fn turn_over_for(over: Duration, reduce_motion: bool, calm: bool) -> Duration {
-    if reduce_motion || calm {
-        Duration::ZERO
-    } else {
-        over
-    }
-}
+use crate::ui::services::motion::{NAV_TRANSITION, nav_transition};
+#[cfg(test)]
+use crate::ui::services::motion::{nav_duration_for, turn_duration_for, turn_over_for};
 
 /// 画在上面那一张在转场里走的距离，按视口宽的比例。
 const LEAVE: f32 = 0.35;
@@ -293,6 +206,7 @@ struct ReadingLayer {
     stack: Entity<NavStackState>,
     /// 那条子栈一变就敲一下外壳重画：`NavStack` 是个元素而不是视图，栈顶换了没人替它重画。
     _stack_watch: Subscription,
+    _page_watch: Subscription,
     /// 是不是正在退场：读者已经离开、位置已经落库，画面还在往外走。由
     /// [`AppShell::close_reading`] 翻成 `true`，走完那一步由 [`Presence`] 的采样决定放手。
     closing: bool,
@@ -424,6 +338,7 @@ pub struct AppShell {
     _config_watch: Subscription,
     /// 书架「打开一本书」的订阅。
     _shelf_watch: Subscription,
+    _remote_watch: Option<Subscription>,
     /// 「笔记」那一屏「点开某一条」的订阅：开书并把落点递进去。
     _notes_watch: Subscription,
     /// 书架栈的 `Popped` 订阅：pop 出阅读页时把位置落库。
@@ -522,15 +437,17 @@ impl AppShell {
 
         // 移动端生命周期与内存告警：事件只有移动平台会发（桌面平台是空实现，永远不会响）。
         // 只转给当前打开着的那本书；没在读书时什么都不做。
-        let shell = cx.entity().downgrade();
-        let _lifecycle_watch = cx.on_app_lifecycle({
-            let shell = shell.clone();
-            move |phase, cx| {
-                let _ = shell.update(cx, |this, cx| this.on_app_lifecycle(phase, cx));
+        let weak_shell = cx.weak_entity();
+        let _lifecycle_watch = cx.on_app_lifecycle(move |phase, cx| {
+            if let Some(shell) = weak_shell.upgrade() {
+                shell.update(cx, |this, cx| this.on_app_lifecycle(phase, cx));
             }
         });
+        let weak_shell = cx.weak_entity();
         let _memory_watch = cx.on_memory_warning(move |cx| {
-            let _ = shell.update(cx, |this, cx| this.on_memory_warning(cx));
+            if let Some(shell) = weak_shell.upgrade() {
+                shell.update(cx, |this, cx| this.on_memory_warning(cx));
+            }
         });
 
         // 先把主题的应用字体换成这台设备真能解析出的家族，再建任何用文字的视图：
@@ -633,6 +550,8 @@ impl AppShell {
         // 报那两条 warn —— 那一段没记上账这件事，正该留下一行声响，而不是消音。
         let _shelf_watch = cx.subscribe(&shelf, move |this, _, event, cx| match event {
             ShelfEvent::Open(book_id) => this.open_reading(*book_id, cx),
+            ShelfEvent::OpenOpds => this.open_opds(cx),
+            ShelfEvent::OpenCloud => this.open_cloud(cx),
             ShelfEvent::Deleted(book_id) => {
                 let open = this
                     .reading
@@ -774,6 +693,7 @@ impl AppShell {
             onboarding,
             _config_watch,
             _shelf_watch,
+            _remote_watch: None,
             _notes_watch,
             _stack_watch,
             _appearance_watch,
@@ -832,6 +752,28 @@ impl AppShell {
         }));
     }
 
+    fn open_opds(&mut self, cx: &mut Context<Self>) {
+        let stack = self.stacks[Destination::Shelf.index()].clone();
+        let page = cx.new(|cx| OpdsView::new(stack.downgrade(), cx));
+        self._remote_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
+            if matches!(event, OpdsEvent::Imported) {
+                this.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+            }
+        }));
+        stack.update(cx, |state, cx| state.push(page, NavMotion::Animated, cx));
+    }
+
+    fn open_cloud(&mut self, cx: &mut Context<Self>) {
+        let stack = self.stacks[Destination::Shelf.index()].clone();
+        let page = cx.new(|cx| CloudView::new(stack.downgrade(), cx));
+        self._remote_watch = Some(cx.subscribe(&page, |this, _, event, cx| {
+            if matches!(event, CloudEvent::Imported) {
+                this.shelf.update(cx, |shelf, cx| shelf.force_reload(cx));
+            }
+        }));
+        stack.update(cx, |state, cx| state.push(page, NavMotion::Animated, cx));
+    }
+
     /// 打开一本书：已经开着就换书，否则把那一层盖上来。
     ///
     /// 换书**不重走动画**：那一层还在，只是里面的会话换了另一本 —— 读者从架上点另一本书时
@@ -844,7 +786,6 @@ impl AppShell {
         }
         // 这一层自己的返回栈：正文是栈底，从正文压进去的那一屏（设置）叠在它上面。
         let stack = cx.new(|_| NavStackState::new());
-        let shell = cx.entity().downgrade();
         // 书的打开放在阅读页构造之前：`has_book()` 为假就不建这一层，
         // `Source::Empty` 不允许变成一屏。
         let reader = cx.new(|cx| {
@@ -856,7 +797,7 @@ impl AppShell {
             tracing::warn!(book_id, "ReaderSession: 书没打开，不构造阅读页");
             return;
         }
-        let page = cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), shell, cx));
+        let page = cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), cx));
         // 栈底那一次压入不给动画：这一层的进场由 [`Presence`] 那口时钟管，两层各动一次是套娃。
         stack.update(cx, |state, cx| {
             state.push(page.clone(), NavMotion::Immediate, cx)
@@ -865,10 +806,14 @@ impl AppShell {
         // 变化，所以这条栈的每一动作用敲一下外壳收尾（层里不需要冻导航栏：那一层的盒子本来就
         // 不因栈的形状而变）。
         let _stack_watch = cx.subscribe(&stack, |_, _, _, cx| cx.notify());
+        let _page_watch = cx.subscribe(&page, |this, page, event, cx| {
+            this.reading_event(page, *event, cx)
+        });
         self.reading = Some(ReadingLayer {
             page,
             stack,
             _stack_watch,
+            _page_watch,
             closing: false,
         });
         cx.notify();
@@ -891,6 +836,31 @@ impl AppShell {
         }
         layer.page.update(cx, |page, cx| page.close(cx));
         self.dismiss_reading(cx);
+    }
+
+    fn reading_event(
+        &mut self,
+        page: Entity<ReadingPage>,
+        event: ReadingPageEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(stack) = self
+            .reading
+            .as_ref()
+            .filter(|layer| layer.page == page && !layer.closing)
+            .map(|layer| layer.stack.clone())
+        else {
+            return;
+        };
+        match event {
+            ReadingPageEvent::Closed => self.dismiss_reading(cx),
+            ReadingPageEvent::OpenSettings => {
+                let settings = cx.new(CompactSettings::new);
+                stack.update(cx, |state, cx| {
+                    state.push(settings, NavMotion::Animated, cx)
+                });
+            }
+        }
     }
 
     /// `close_reading` 的**后半步**：只翻「正在退场」这一格、重取统计、重画 —— 一根手指都
@@ -948,18 +918,21 @@ impl AppShell {
         cx: &mut Context<Self>,
     ) {
         let stack = cx.new(|_| NavStackState::new());
-        let shell = cx.entity().downgrade();
         let session = ReaderSession::with_document(doc, prefs, None, None, locator, cx);
         let reader = cx.new(|_| session);
-        let page = cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), shell, cx));
+        let page = cx.new(|cx| ReadingPage::new(reader, stack.downgrade(), cx));
         stack.update(cx, |state, cx| {
             state.push(page.clone(), NavMotion::Immediate, cx)
         });
         let _stack_watch = cx.subscribe(&stack, |_, _, _, cx| cx.notify());
+        let _page_watch = cx.subscribe(&page, |this, page, event, cx| {
+            this.reading_event(page, *event, cx)
+        });
         self.reading = Some(ReadingLayer {
             page,
             stack,
             _stack_watch,
+            _page_watch,
             closing: false,
         });
         cx.notify();
@@ -1131,7 +1104,9 @@ impl AppShell {
     ///   （`navigation` 那一头同样传 `false`，这里连攒都不攒，免得白敲重画）。
     /// - **减动效档**：让位是一次空间变化，不是必须传达的信息 —— 交回 tracker 处理。
     fn note_scroll(&mut self, delta_y: f32, window: &Window, cx: &mut Context<Self>) {
-        if self.reading.is_some() || matches!(SizeClass::of(window), SizeClass::Expanded) {
+        if self.reading.is_some()
+            || matches!(crate::ui::host::size_class(window), SizeClass::Expanded)
+        {
             return;
         }
         if self.nav.scroll(delta_y, cx.reduce_motion()) {
@@ -1414,7 +1389,7 @@ impl Render for AppShell {
             self.applied = Some((appearance, resolved));
         }
 
-        let size = SizeClass::of(window);
+        let size = crate::ui::host::size_class(window);
         let safe = host::safe_area(window, cx);
         // 架面的多选态：底部那一条不画导航、改画这一批书的工具栏（见 [`AppShell::selection_bar`]）。
         // 只跟着书架这一个目的地 —— 侧栏两档的导航在多选态里照常能按，切去统计再切回来时
@@ -1581,8 +1556,7 @@ impl Render for AppShell {
         // 所以最上面补一条 `TitleBar`。移动端没有窗口 chrome，走 `cfg`。
         // 正文那一格给 `flex_1` 而不是让它自己 `size_full`：标题栏已经占掉一段高，
         // 再按 100% 算就会把页面底边（连同底栏）挤出窗口外。
-        #[cfg(not(mobile))]
-        let body = {
+        let body = if host::has_window_chrome() {
             // 沉浸态连这条自绘标题栏一起收起：窗口 chrome 本来就是应用自己画的
             // （窗口选项声明了透明自定义标题栏），收掉那一段高就还给正文；读者回到
             // 任何一个目的地它都会跟着回来。拖窗与最大化在读书这几十分钟里不需要。
@@ -1598,6 +1572,8 @@ impl Render for AppShell {
             stack
                 .child(div().flex_1().min_h_0().child(body))
                 .into_any_element()
+        } else {
+            body
         };
 
         // 阅读层最后挂：谁在上面由入树的先后定，而这一层要盖住导航栏与架面（见 [`ReadingLayer`]）。

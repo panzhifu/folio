@@ -1,13 +1,5 @@
-//! 「一章的 XHTML → `folio_core::layout::Layout`」这一段，桌面与移动共用。
-//!
-//! 分成两件事：**怎么排、切成几片**在这里，**怎么摆上屏**在视图层
-//! （`ui/features/reader`，两端一份实现）。这样同一本书在两端得到的是同一份
-//! `Layout` 与同一套分片，屏幕上看到的行只可能因为视口尺寸不同而不同，不会因为
-//! 「两端各实现了一遍层叠与断行」而不同。
-//!
-//! 入口的 `Chapter::source` **一定是引擎就绪的 XHTML**（契约见 `format::Chapter`）。
-//! 纯文本的包装已经在 provider 里做完（`folio_core::content::format::xhtml`），所以这里
-//! 没有「这个格式要不要先包一下」的分支 —— `Format` 不参与排版链。
+//! 共享的章节排版与分片；元素摆放归视图层。
+//! `Chapter::source` 必须是引擎就绪的 XHTML；纯文本包装由 provider 完成，排版不判断格式。
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -39,13 +31,8 @@ use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob, Tex
 use crate::ui::features::reader::model::measure::GpuiMeasure;
 use crate::ui::foundation::images::ChapterImages;
 
-/// 打开一个文档，返回统一接口。
-///
-/// 走 `folio_core::content::document::open`：`Content` 的两个家族都从那里出去，界面这一层只按
-/// `kind()` 分流，不看扩展名，也不再有第二个「按格式查 provider」的入口。
-///
-/// 返回 `Arc` 而不是 `Box`：`Book` / `FixedBook` 与绘制那条链（图片字节来源）要共用
-/// 同一份文档，而字节按需取用的是它手里那个 provider。
+/// 打开统一文档接口；界面按 `kind()` 分流，不再按格式查 provider。
+/// `Arc` 供书本状态与图片字节来源共用文档。
 pub fn open(path: &Path) -> folio_core::Result<Arc<dyn folio_core::content::document::Document>> {
     Ok(Arc::from(folio_core::content::document::open(path)?))
 }
@@ -59,24 +46,12 @@ pub fn body_of(dom: &Dom) -> NodeId {
         .unwrap_or(dom.document)
 }
 
-/// 一章正文的**来路**。排版作业的第一步就是把它变成文本。
-///
-/// 两条来路都有真实用处，`Text` 那一支不是兼容垫：
-///
-/// - [`ChapterSource::Fetch`]：正文还躺在容器里，**由作业自己取**。这是这一格存在的全部
-///   理由：取一章 = 一次解压 + 一次解码（实测 7–9.5 ms），2026-10-15 之前那笔钱在 UI 线程
-///   的渲染帧里付（`Book::ensure_window_spans` → `make_span` → `chapter_text_at`）。
-///   塞进同一个作业就是一次往返；把它拆成独立的一趟预取会是**两次**往返（文本回到界面
-///   才能投排版作业），而排版队列本来就是单线程 FIFO、每个 `Document` 至多一个在飞作业。
-/// - [`ChapterSource::Text`]：文本已经在手上 —— 测试替身、`ChapterLocator::Inline`
-///   那种内联正文。这一支不走容器。
+/// 章节正文来源。`Fetch` 在排版作业内取字节、解压和解码，避免阻塞渲染帧及二次往返；
+/// `Text` 用于内联正文和测试，不访问容器。每个 `Document` 至多一个在飞排版作业。
 pub enum ChapterSource {
     Text(String),
     Fetch {
-        /// 打开着的这份文档。`Document: Send + Sync`，所以能整份搬进后台线程 ——
-        /// 这一条是 §十「一个步骤能进后台」五条判据里的第 1、2 条（签名不要窗口、
-        /// 输入不可变），其余三条（取消检查点、结果整份搬回、失败只影响自己那一步）
-        /// 由「一章是一个单元、作业带回一整份排版、取不到就当空章」天然满足。
+        /// `Document: Send + Sync`，供后台作业按章取文；取不到正文时按空章处理。
         doc: Arc<dyn OpenedDocument>,
         chapter: usize,
     },
@@ -93,14 +68,8 @@ impl ChapterSource {
         Arc::new(Self::Fetch { doc, chapter })
     }
 
-    /// 这一章的身份 —— [`LayoutKey::chapter`](folio_core::layout::LayoutKey::chapter) 那一格。
-    ///
-    /// 两种来路给的是不同类型的值，而这正是各自唯一能给的：按位置取的那一路**界面手上
-    /// 没有文本**，算不出内容哈希，只能给章号（一个开着的容器里第 N 章的内容不会变）；
-    /// 正文已经在手上那一路没有章号可指，给内容哈希。
-    ///
-    /// 只在这里算一次，结果存在 `Document::chapter` 上 —— 键是每帧都要算的，
-    /// 而内容哈希是 O(整章长度)。
+    /// [`LayoutKey::chapter`] 的身份：容器来源用章号（打开期间内容不变），内联来源用内容哈希。
+    /// 结果缓存在 `Document::chapter`，避免每帧进行 O(整章长度) 的哈希。
     pub fn identity(&self) -> u64 {
         match self {
             Self::Text(source) => content_hash(source),
@@ -108,18 +77,14 @@ impl ChapterSource {
         }
     }
 
-    /// 换章时判「还是不是同一章」。身份相同就当没换 —— 与从前那句
-    /// `if source == self.source { return; }` 同一条意思，只是不再逐字节比整章文本。
+    /// 身份相同视为未换章，避免逐字节比较正文。
     pub fn same_chapter(&self, other: &Self) -> bool {
         self.identity() == other.identity()
     }
 }
 
-/// 一章的**解析产物**：与读者偏好无关，所以改字号、拖窗口都不必重新解析。
-///
-/// 缓存挂在产物而不是挂在「取回来的章文本」上，理由见 `plans/阅读管线.md` §五：
-/// 文本本来就存在库里，重复付的钱在解析与可见文本坐标表上。`Arc` 是因为它同时被界面
-/// （命中、锚点换算）与在飞的排版作业拿着，而这两份必须是同一章。
+/// 与读者偏好无关的解析产物，改字号或窗口尺寸时复用。
+/// 界面命中、锚点换算和后台排版通过 `Arc` 共用同一章的 DOM 与坐标表。
 struct ChapterArtifacts {
     /// 建它时那段源文本的内容哈希（`layout::content_hash`，**由排版作业算** ——
     /// 界面线程在按位置取的那一路根本不持有正文）。
@@ -924,6 +889,40 @@ impl Document {
         self.pages = Rc::new(PageList::from_fragments(Vec::new(), 1));
         self.shaped.borrow_mut().clear();
         self.rows.borrow_mut().clear();
+        *self.char_lines.borrow_mut() = None;
+    }
+
+    /// 可重建缓存估算；当前 DOM、行盒、页表与注册字体不在此账内。
+    pub(in crate::ui::features::reader) fn estimated_cache_bytes(&self) -> usize {
+        let shaped = self.shaped.borrow();
+        let glyphs = shaped
+            .values()
+            .map(|line| {
+                std::mem::size_of::<LineLayout>()
+                    + line.runs.capacity() * std::mem::size_of::<gpui_kit::ShapedRun>()
+                    + line
+                        .runs
+                        .iter()
+                        .map(|run| {
+                            run.glyphs.capacity() * std::mem::size_of::<gpui_kit::ShapedGlyph>()
+                        })
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        let rows = self
+            .rows
+            .borrow()
+            .values()
+            .map(|row| row.capacity() * std::mem::size_of::<RowFragment>())
+            .sum::<usize>();
+        self.blocks.estimated_bytes() + glyphs + rows
+    }
+
+    /// 保留当前布局与坐标，只丢可再生的块、字形和行片段缓存。
+    pub(in crate::ui::features::reader) fn release_cache_memory(&mut self) {
+        self.blocks.release_memory();
+        *self.shaped.borrow_mut() = HashMap::new();
+        *self.rows.borrow_mut() = HashMap::new();
         *self.char_lines.borrow_mut() = None;
     }
 

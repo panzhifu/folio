@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::AnnotationStyle;
 use crate::ChapterExt;
-use crate::Store;
 use crate::{MIGRATIONS, StaleReason};
+use crate::{SourceUnavailable, Store};
 use folio_format::ext::FlowDocExt;
 use folio_format::{
     Chapter, ChapterLocator, Content, DocMeta, FixedDoc, FixedPage, FlowDoc, Format, ImageRes,
@@ -836,18 +836,11 @@ fn the_text_never_reaches_the_database() {
     assert_eq!(hits, 0, "正文那几万个字不该出现在章表里");
 }
 
-/// **源文件不在了**：连数据一起删掉，而不是留一本书点开是空白。
-///
-/// 正文只在文件里（`plans/text-out-of-db.md`），所以文件没了这本书就是死的。
-/// 但「看不见」有两种：文件真删了，还是盘/授权没挂上 —— 后者把整库删空是灾难，
-/// 所以判据里加了一条「上一层目录读得到」。
 #[test]
-fn a_book_whose_source_is_gone_is_pruned_with_its_data() {
+fn unavailable_sources_preserve_data_and_recover_when_the_file_returns() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("folio.db");
     let store = Store::open_at(&db).unwrap();
-
-    // 一本文件还在的、一本文件被删的。
     let kept = dir.path().join("kept.md");
     std::fs::write(&kept, "# 一\n\n正文\n").unwrap();
     let gone = dir.path().join("gone.md");
@@ -863,29 +856,103 @@ fn a_book_whose_source_is_gone_is_pruned_with_its_data() {
     store
         .set_position(gone_id, "page", &Locator::start())
         .unwrap();
+    store
+        .set_content_hash(gone_id, "source-identity", "sha256")
+        .unwrap();
+    let anchor = folio_model::TextAnchor::point(0, 1);
+    let annotation = store
+        .add_annotation(
+            gone_id,
+            &anchor,
+            "保留我的笔记",
+            "yellow",
+            AnnotationStyle::Highlight,
+        )
+        .unwrap();
+    let bookmark = store.add_bookmark(gone_id, &anchor).unwrap();
+    let collection = store.create_collection("收藏").unwrap();
+    store.add_to_collection(collection, gone_id).unwrap();
+    let before_annotation = store.annotation(annotation).unwrap().unwrap();
     std::fs::remove_file(&gone).unwrap();
+    for _ in 0..2 {
+        let unavailable = store.unavailable_sources().unwrap();
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].book_id, gone_id);
+        assert_eq!(unavailable[0].reason, SourceUnavailable::Missing);
+    }
+    drop(store);
+    let store = Store::open_at(&db).unwrap();
+    assert_eq!(
+        store.book_by_hash("source-identity").unwrap().unwrap().id,
+        gone_id
+    );
+    assert!(store.load_flow(gone_id).unwrap().is_some());
+    assert_eq!(
+        store.position(gone_id).unwrap(),
+        Some(("page".into(), Locator::start()))
+    );
+    assert_eq!(
+        store.annotation(annotation).unwrap().unwrap(),
+        before_annotation
+    );
+    assert_eq!(store.bookmarks(gone_id).unwrap()[0].id, bookmark);
+    assert_eq!(
+        store.books_in_collection(collection).unwrap()[0].id,
+        gone_id
+    );
+    assert!(store.book(kept_id).unwrap().is_some());
 
-    let pruned = store.prune_missing().unwrap();
-    assert_eq!(pruned, vec!["没了".to_string()]);
-    assert!(store.book(gone_id).unwrap().is_none(), "书要没");
-    assert!(store.load_flow(gone_id).unwrap().is_none(), "章节要跟着没");
-    assert!(store.position(gone_id).unwrap().is_none(), "进度要跟着没");
-    assert!(
-        store.book(kept_id).unwrap().is_some(),
-        "文件还在的那本不能动"
+    std::fs::write(&gone, "# 二\n\n正文\n").unwrap();
+    assert!(store.unavailable_sources().unwrap().is_empty());
+    assert_eq!(store.book_by_path(&gone).unwrap().unwrap().id, gone_id);
+    assert_eq!(
+        store.annotation(annotation).unwrap().unwrap(),
+        before_annotation
     );
 
-    // 盘点不出来（把上一层目录也删了）时**不删**：那是「现在看不见」，不是「没了」。
+    store.remove_book(gone_id).unwrap();
+    assert!(store.book(gone_id).unwrap().is_none());
+    assert!(store.annotation(annotation).unwrap().is_none());
+    assert!(store.bookmarks(gone_id).unwrap().is_empty());
+    assert!(store.position(gone_id).unwrap().is_none());
+}
+
+#[test]
+fn unavailable_sources_distinguish_missing_parent_directory_and_io_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::in_memory().unwrap();
     let detached = dir.path().join("外接盘/book.md");
     std::fs::create_dir_all(detached.parent().unwrap()).unwrap();
     std::fs::write(&detached, "# 三\n\n正文\n").unwrap();
     let detached_id = store.add_book(&detached, &meta("外接盘")).unwrap();
-    std::fs::remove_dir_all(dir.path().join("外接盘")).unwrap();
+    std::fs::remove_file(&detached).unwrap();
+    std::fs::remove_dir(detached.parent().unwrap()).unwrap();
+    let directory = dir.path().join("directory.md");
+    std::fs::write(&directory, "正文").unwrap();
+    let directory_id = store.add_book(&directory, &meta("路径变目录")).unwrap();
+    std::fs::remove_file(&directory).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    // NUL 路径在所有平台都是 IO 错误，不依赖测试进程的权限或身份。
+    let invalid = dir.path().join("invalid\0.md");
+    let invalid_id = store.add_book(&invalid, &meta("非法路径")).unwrap();
+
+    let unavailable = store.unavailable_sources().unwrap();
+    assert_eq!(unavailable.len(), 3);
+    let reason = |id| {
+        unavailable
+            .iter()
+            .find(|source| source.book_id == id)
+            .unwrap()
+            .reason
+    };
+    assert_eq!(reason(detached_id), SourceUnavailable::Missing);
+    assert_eq!(reason(directory_id), SourceUnavailable::NotFile);
     assert!(
-        store.prune_missing().unwrap().is_empty(),
-        "目录都读不到就别动"
+        matches!(reason(invalid_id), SourceUnavailable::Unreadable(kind) if kind != std::io::ErrorKind::NotFound)
     );
     assert!(store.book(detached_id).unwrap().is_some());
+    assert!(store.book(directory_id).unwrap().is_some());
+    assert!(store.book(invalid_id).unwrap().is_some());
 }
 
 /// 文件换了 / 索引是旧算法算的，都要认得出来。

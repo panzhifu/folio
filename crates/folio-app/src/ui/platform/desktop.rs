@@ -1,13 +1,5 @@
 //! 桌面入口：装主题集、装平台服务、开书库、开窗。
 
-// Without this Windows runs the exe as a console app and pops a terminal
-// window behind the UI. Debug builds keep the console so logs stay visible.
-
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
-
 use folio_core::Store;
 use gpui_kit::component::TitleBar;
 use gpui_kit::{App, AppContext as _, Font, TitlebarOptions, px, size};
@@ -19,6 +11,9 @@ use crate::ui::shell::AppShell;
 
 /// 桌面入口：`main.rs` 在非移动 target 上调它。
 pub fn run_desktop() {
+    if !super::restore::activate() {
+        return;
+    }
     // 第一件事是**读配置并装日志**（§5.6：配置 → 日志）：`logging` 那一节就在配置里，
     // 而它得在第一条日志之前生效。`Config::load` 只要文件系统，不需要 App 上下文，所以放在
     // 这里而不是 `run` 里。装不上（比如别处已经占了这个槽）只影响诊断输出，程序照起。
@@ -73,18 +68,16 @@ pub fn run_desktop() {
                     None
                 }
             };
-            // 源文件不在的那些书：连数据一起删掉。正文只在文件里（见
-            // `plans/text-out-of-db.md`），文件没了这本书就是死的，留在架上只会
-            // 让读者点开一片空白。删的是数据与副本，**不动读者自己的原件**。
-            match store.prune_missing() {
-                Ok(gone) if !gone.is_empty() => {
+            // 缺失或暂不可读的书源只报告，进度与批注仍属于读者。
+            match store.unavailable_sources() {
+                Ok(unavailable) if !unavailable.is_empty() => {
                     tracing::warn!(
-                        "desktop: 清理了 {} 本源文件已不在的书：{gone:?}",
-                        gone.len()
+                        "desktop: {} 本书的源文件不可用，已保留数据：{unavailable:?}",
+                        unavailable.len()
                     );
                 }
                 Ok(_) => {}
-                Err(err) => tracing::warn!("desktop: 清理失效的书失败：{err:#}"),
+                Err(err) => tracing::warn!("desktop: 检查书源失败：{err:#}"),
             }
             // 书库挂成全局：书架、阅读、批注都从这里读同一个库。
             crate::ui::services::app_store::install(store, cx);

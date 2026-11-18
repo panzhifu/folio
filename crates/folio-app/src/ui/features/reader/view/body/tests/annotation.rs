@@ -8,6 +8,7 @@ use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::config::ConfigHolder;
 use folio_core::ChapterExt;
 use folio_core::store::Store;
+use folio_core::sync::TombstoneKind;
 use folio_core::{AnnotationStyle, Chapter, FlowDoc, Format, Locator};
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, point, px,
@@ -749,16 +750,14 @@ fn removing_a_highlight_gives_no_undo_pill(cx: &mut TestAppContext) {
     assert!(store.annotations(id).expect("读库").is_empty());
 }
 
-/// 拔一枚书签仍给一窗后悔：胶囊挂着，按撤销整行**逐字段**原样回来。
-///
-/// [`a_bookmark_toggles_on_and_off_the_current_line`] 管的是钉/拔/撤销那条岔路走没走对，
-/// 这一条只管两件事：胶囊确实挂出来了，以及回来的那一行 id 与时间戳都没变 ——
-/// 拿掉 `restore_bookmark` 里「按原 id 插回」那一格，撤销会变成「新钉一枚」，这条红在 id 上。
+/// 撤销保留书签身份、内容与创建时间，逻辑版本必须超过已观察的删除。
 #[gpui_kit::test]
 fn a_removed_bookmark_comes_back_with_its_row_intact(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
     let flow = flow();
     let (store, id) = store_with_book(&flow, "markdown");
+    let hash = "b".repeat(64);
+    store.set_content_hash(id, &hash, "sha256").unwrap();
     let (view, _handle) = open_with_store(
         cx,
         &flow,
@@ -775,6 +774,12 @@ fn a_removed_bookmark_comes_back_with_its_row_intact(cx: &mut TestAppContext) {
 
     view.update(cx, |v, cx| v.remove_bookmark(before[0].id, cx));
     assert!(store.bookmarks(id).expect("读库").is_empty());
+    let deleted_at = store.collect_sync("fixture", 0).unwrap().snapshot.books[&hash]
+        .tombstones
+        .iter()
+        .find(|t| t.kind == TombstoneKind::Bookmark && t.uid == before[0].uid)
+        .expect("删除应记录原书签的墓碑")
+        .deleted_at;
     assert!(
         view.read_with(cx, |v, _| v.undo.is_some()),
         "拔完书签该有一颗撤销胶囊挂着"
@@ -783,6 +788,21 @@ fn a_removed_bookmark_comes_back_with_its_row_intact(cx: &mut TestAppContext) {
     view.update(cx, |v, cx| v.undo_delete(cx));
     let after = store.bookmarks(id).expect("撤销后读库");
     assert_eq!(after.len(), 1, "撤销把那一枚带回来");
-    assert_eq!(after[0], before[0], "整行原样回来：id 与时间戳都不变");
+    assert!(
+        after[0].updated_at > deleted_at,
+        "恢复版本必须压过已观察删除，不能被再次同步拔掉"
+    );
+    let mut expected = before[0].clone();
+    expected.updated_at = after[0].updated_at;
+    assert_eq!(
+        after[0], expected,
+        "除逻辑版本外，书签的每个字段都应原样恢复"
+    );
+    assert!(
+        store.collect_sync("fixture", 0).unwrap().snapshot.books[&hash]
+            .tombstones
+            .iter()
+            .all(|t| t.kind != TombstoneKind::Bookmark || t.uid != before[0].uid)
+    );
     assert!(view.read_with(cx, |v, _| v.undo.is_none()), "胶囊该收了");
 }

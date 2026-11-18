@@ -59,9 +59,9 @@ use gpui_kit::{
 
 use super::model::{Bucket, DayStat, Range, Snapshot};
 use crate::ui::components::muted_label;
+use crate::ui::foundation::navigation::{self, SizeClass};
 use crate::ui::services::app_store;
 use crate::ui::services::l10n::{duration, tf, tr};
-use crate::ui::shell::navigation::{self, SizeClass};
 
 /// 单栏时内容列的最大宽度。统计是报表面，一张表里的数字被拉到 1300 像素两头就是两片海。
 const COLUMN_MAX: f32 = 760.0;
@@ -281,7 +281,7 @@ impl StatsView {
 
 impl Render for StatsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let size = SizeClass::of(window);
+        let size = crate::ui::host::size_class(window);
         // Compact 档那条底栏是浮的：内容自己把栏底下那一段空出来。
         let tail = if size.is_compact() {
             navigation::clearance(crate::ui::host::safe_area(window, cx).bottom)
@@ -1783,9 +1783,9 @@ struct ChartPoint {
 #[cfg(test)]
 mod tests {
     use super::{Block, Frame, StatsView, columns_for, heat_level, hours_text, layout};
+    use crate::ui::foundation::navigation::SizeClass;
     use crate::ui::services::app_store;
     use crate::ui::services::config::ConfigHolder;
-    use crate::ui::shell::navigation::SizeClass;
     use folio_core::{Config, Store};
     use gpui_kit::component::Root;
     use gpui_kit::test::TestWindowExt as _;

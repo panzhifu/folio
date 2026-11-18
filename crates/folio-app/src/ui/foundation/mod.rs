@@ -15,9 +15,11 @@
 //! `features/reader/` —— 书架拿的只有 `images::cover_image` 一个入口：导入的解析在
 //! 后端（`folio_core::ingest::import`），真正的排版状态没有理由对别的屏可见。
 
+pub mod book_label;
 pub mod error;
 pub mod file_stem;
 pub mod images;
+pub mod navigation;
 pub mod reading_theme;
 pub mod style;
 pub mod theme;

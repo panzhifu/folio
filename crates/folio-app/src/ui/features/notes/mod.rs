@@ -52,10 +52,10 @@ use crate::ui::components::{
     BottomSheet, BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state,
 };
 use crate::ui::foundation::images::cover_image;
+use crate::ui::foundation::navigation::{self, SizeClass};
 use crate::ui::host;
 use crate::ui::services::app_store;
 use crate::ui::services::l10n::{duration, tf, tr};
-use crate::ui::shell::navigation::{self, SizeClass};
 
 /// 撤销胶囊在屏上停留多久。与阅读页那一颗同一个数：两处的语义是同一件事。
 const UNDO_TTL: Duration = Duration::from_secs(6);
@@ -127,7 +127,7 @@ impl NotesView {
     /// 手机上一条满幅的框用默认档（拇指要按得中），桌面那一档调 `.small()` 与整屏的
     /// 控件同高。窗口档位夹在 Medium 往上，不会中途换档，所以不必跟着 resize 重建。
     pub fn boot(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let compact = SizeClass::of(window).is_compact();
+        let compact = crate::ui::host::size_class(window).is_compact();
         let search = cx.new(|cx| {
             let search = SearchBox::new(tr(cx, "notes.search_placeholder"), window, cx);
             if compact { search } else { search.small() }
@@ -772,7 +772,7 @@ impl NotesView {
 
 impl Render for NotesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let size = SizeClass::of(window);
+        let size = crate::ui::host::size_class(window);
         let wide = size == SizeClass::Expanded;
         // Compact 档那条底栏是浮的：内容自己把栏底下那一段空出来（与统计那一屏同一套）。
         let tail = if size.is_compact() {

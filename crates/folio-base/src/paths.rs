@@ -32,6 +32,13 @@ pub const DATA_DIR_ENV: &str = "FOLIO_DATA_DIR";
 /// 宿主报上来的应用专属目录。只有移动平台会设；设了就是唯一的可写位置。
 static HOST_DIRS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
 
+static SESSION_DIRS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+
+/// 启动时在打开配置、数据库和服务前固定恢复后的根；运行中不能切换。
+pub fn set_session_dirs(config: PathBuf, data: PathBuf) -> bool {
+    SESSION_DIRS.set((config, data)).is_ok()
+}
+
 /// 由宿主在初始化时报告配置根与数据根，用于**没有标准目录的平台**（Android / iOS）。
 ///
 /// 只在第一次调用时生效：这些路径一旦有文件写进去就不能再换，否则第二次启动会
@@ -92,6 +99,14 @@ fn root(
 /// 配置根：`~/.config/folio`，可用 [`CONFIG_DIR_ENV`] 挪走；
 /// 宿主报过目录（[`set_app_dirs`]）时用那个。
 pub fn config_dir() -> PathBuf {
+    SESSION_DIRS
+        .get()
+        .map(|dirs| dirs.0.clone())
+        .unwrap_or_else(startup_config_dir)
+}
+
+/// 未激活恢复目录前的配置根；持久启动指针始终留在此处。
+pub fn startup_config_dir() -> PathBuf {
     root(
         env_dir(CONFIG_DIR_ENV),
         host_dirs().map(|dirs| dirs.0.clone()),
@@ -103,6 +118,14 @@ pub fn config_dir() -> PathBuf {
 /// 数据根：`~/.local/share/folio`，可用 [`DATA_DIR_ENV`] 挪走；
 /// 宿主报过目录（[`set_app_dirs`]）时用那个。
 pub fn data_dir() -> PathBuf {
+    SESSION_DIRS
+        .get()
+        .map(|dirs| dirs.1.clone())
+        .unwrap_or_else(startup_data_dir)
+}
+
+/// 未激活恢复目录前的数据根；隔离恢复副本固定放在此根下。
+pub fn startup_data_dir() -> PathBuf {
     root(
         env_dir(DATA_DIR_ENV),
         host_dirs().map(|dirs| dirs.1.clone()),
@@ -262,10 +285,8 @@ pub fn comics_cache_dir() -> PathBuf {
 
 /// 软件的四个落点，一次拿齐。
 ///
-/// 书副本、配置、日志、缓存这四格是「整个应用摆在磁盘上的形状」，启动横幅、诊断
-/// dump、存储屏要的是同一份；一处拿齐而不是各问各的函数，为的是这四格**互不嵌套**
-/// 的约定在类型上有名字——`usage` 那本磁盘账靠前缀认领字节，四格一散，谁钻进谁
-/// 就没人看了。更细的区（收件箱、词典、字体…）仍走它们自己的函数，这里不收。
+/// 书副本、配置、日志、缓存的启动与诊断快照。Windows/macOS 的标准配置根与数据根
+/// 可以相同，恢复后配置也可嵌在数据根内；usage 必须对遍历根去重。
 ///
 /// 四格各问各的解析链（环境变量 → 宿主报的目录 → 操作系统标准位置），这里只是
 /// 收拢，不复制任何顺序逻辑。
@@ -391,8 +412,7 @@ mod tests {
         }
     }
 
-    /// 四个落点一次拿齐：每格与它自己的函数一致，且**两两不嵌套**。`usage` 那本
-    /// 磁盘账靠前缀认领字节，任何一格钻进另一格，分类就只能靠判序侥幸。
+    /// 配置根按平台约定可与数据根相同；数据下的三个资产区仍互不嵌套。
     #[test]
     fn app_dirs_holds_the_four_top_level_spots() {
         let dirs = app_dirs();
@@ -402,7 +422,6 @@ mod tests {
         assert_eq!(dirs.cache, cache_dir());
         let spots = [
             ("books", &dirs.books),
-            ("config", &dirs.config),
             ("logs", &dirs.logs),
             ("cache", &dirs.cache),
         ];

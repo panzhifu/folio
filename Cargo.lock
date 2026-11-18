@@ -2274,6 +2274,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "chrono",
+ "embed-resource",
  "folio-core",
  "folio-curl",
  "gpui-kit",
@@ -2500,6 +2501,18 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "folio-xtask"
+version = "0.1.5"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "syn 2.0.119",
+ "tempfile",
+ "toml 0.8.23",
 ]
 
 [[package]]

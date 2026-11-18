@@ -38,7 +38,6 @@ use gpui_kit::{
 use crate::ui::features::reader::model::annotations::MarkedRow;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::services::l10n::tr;
-use crate::ui::shell::navigation::SizeClass;
 
 /// 便签卡的最宽那一条（含弹层自己那层内边距）。
 const NOTE_CARD_W: f32 = 420.0;
@@ -88,7 +87,7 @@ impl ReaderSession {
             editor.annotation.is_some() || !editor.input.read(cx).value().trim().is_empty();
         // 手机上贴近上沿：软键盘是 `adjustNothing`，贴着底边的卡片会被它盖掉。
         // 宽屏上往下压到视口上部（不是正中），留出键盘和手势条。
-        let top = if SizeClass::of(window).is_compact() {
+        let top = if crate::ui::host::size_class(window).is_compact() {
             56.0
         } else {
             96.0

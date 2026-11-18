@@ -29,6 +29,24 @@ fn main() {
         println!("cargo:rustc-cfg=mobile");
     }
 
+    // Windows 的 exe 图标只能嵌在链接期：资源管理器、任务栏和 Alt-Tab 读的是二进制里这一份，
+    // 而 gpui 不设窗口图标，没有它就是系统默认图标。`rc.exe` 由 embed-resource 去 Windows
+    // SDK 里找，不额外装工具；`manifest_optional` 是「纯装饰」那一档 —— 资源编译器缺席只
+    // 警告、不让构建红。`.rc` 里那个相对路径按它自己的目录解析。
+    if target_os == "windows" {
+        #[cfg(windows)]
+        {
+            println!("cargo:rerun-if-changed=../../packaging/windows/folio.rc");
+            println!("cargo:rerun-if-changed=../../packaging/icons/folio.ico");
+            if let Err(failure) =
+                embed_resource::compile("../../packaging/windows/folio.rc", embed_resource::NONE)
+                    .manifest_optional()
+            {
+                println!("cargo:warning=Windows 图标资源没嵌进去：{failure}");
+            }
+        }
+    }
+
     println!("cargo:rerun-if-env-changed=FOLIO_THEMES_DIR");
     // 依赖一动，`cargo metadata` 找到的 gpui-kit 源码目录（路径里带 commit）就换了，
     // 嵌进来的那套主题得跟着重生成。

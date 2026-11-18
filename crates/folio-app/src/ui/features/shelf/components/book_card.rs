@@ -60,7 +60,7 @@ pub(in crate::ui::features::shelf) const COVER_RATIO: f32 = 2.0 / 3.0;
 /// 一张卡下面那一行、「信息」面板里那一格、以及阅读页的书头，用的都是这一条：读者在架上
 /// 看见「甲 · 乙」，点开改完仍该是两个人，而不是一个名叫「甲 · 乙」的人
 /// （拆回去见 [`super::book_info::split_authors`]，库里存的仍是换行拼接）。
-pub(crate) const AUTHOR_SEP: &str = " · ";
+pub(crate) use crate::ui::foundation::book_label::AUTHOR_SEP;
 
 /// 相邻两格起步的间隔。主题 `motion` 里只有「一次动多久」那一档，没有「隔多久动下一格」，
 /// 所以这一条定在这里：14ms 一格，推到 [`ENTER_DELAY_CAP`] 那 200ms 为止（约第 15 格），
@@ -329,6 +329,10 @@ impl ShelfView {
         // 按住的封面收一档、松开弹回：指针按下即回执，弹簧从当前值接着走（可打断）。
         // 与滚动那一档相乘 —— 一张卡同一时刻只该有一个缩放值。
         let pressed = self.pressed_card == Some(book_id);
+        // 按下去暗一截**只认左键**（`pressed_card` 由左键的 MouseDown 记）。
+        // 这一档不能交给 `.active(…)`：那个状态认所有鼠标键，右键开管理菜单时整张卡
+        // 会先淡一下再弹回来 —— 封面大半是深色，压在浅色纸面上看着就是闪了一下。
+        let press_dim = if pressed { 0.75 } else { 1.0 };
         let press_scale = spring(
             SharedString::from(format!("shelf-card-press/{book_id}")),
             if pressed { 0.97 } else { 1.0 },
@@ -373,12 +377,11 @@ impl ShelfView {
             .flex_col()
             .gap_1()
             .cursor_pointer()
-            // 按下去当场暗一截，不等人把书打开才回话：移动端那一下轻点在这里合成
-            // 成 MouseDown/MouseUp（`plans/facts.md` Android 那一段），所以这一条
-            // 两端都吃得到。抬起不做动画而是立刻给 —— 指针跟着手指走，慢半拍的
+            // 按下去当场暗一截（`press_dim`），不等人把书打开才回话：移动端那一下轻点
+            // 在这里合成成 MouseDown/MouseUp（`plans/facts.md` Android 那一段），所以
+            // 这一条两端都吃得到。抬起不做动画而是立刻给 —— 指针跟着手指走，慢半拍的
             // 高亮比没有高亮更容易指错。
-            .active(|style| style.opacity(0.75))
-            .opacity(enter.progress(index) * selection_dim)
+            .opacity(enter.progress(index) * selection_dim * press_dim)
             // 按下记「哪一张被按住了」，抬起或按到别处就清 —— 封面靠这一格收一档。
             // 移动端的轻点会合成成 MouseDown/MouseUp（`plans/facts.md`），两端都吃得到。
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {

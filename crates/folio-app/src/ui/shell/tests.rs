@@ -1,17 +1,8 @@
-//! 外壳要钉住的两层：读书与导航栏/架面栈互不牵连的那些判据（纯函数，两端都编译），
-//! 以及「外壳起得来、书盖得上也收得回、标题栏真在视图树里、换语言能重画」这串启动回路。
-//!
-//! 后半截只在桌面跑：`try_find` 来自 `TestSupportExt`，那个 trait 在本文件是
-//! `#[cfg(not(mobile))]` 才挂上的（移动端没有测试支持注册路径）。
+//! 外壳的导航/阅读判据与启动、退出、标题栏、语言切换回归。
+//! 纯函数两端编译；使用 `TestSupportExt::try_find` 的交互回归仅桌面可用。
 
-/// 回归门：读书这件事**不再牵动**应用内那条导航栏。
-///
-/// 这一条钉的就是阅读层化要买的东西本身：那一层盖在导航栏之上，「收起导航栏给正文腾地方」
-/// 已经没有意义；而它一旦留着，退场时就没有任何东西能挤动正在滑走的那一页 —— 上一版
-/// 「返回时底部那条进度被往上顶」跳的正是这一处的容器。
-///
-/// 宿主到不了 Compact 档（`SizeClass::of` 在桌面把窄窗口夹到 `Medium`，底栏只在真机
-/// 长出来），所以钉住渲染用的那两条判据：沉浸跟着书、预留不含导航栏。
+/// 阅读层覆盖导航栏，沉浸状态跟随书本，正文预留不含导航栏。
+/// 桌面 `SizeClass::of` 将窄窗口夹为 `Medium`，因此直接验证 Compact 的渲染判据。
 #[test]
 fn the_book_does_not_ask_the_nav_bar_to_move() {
     use super::{Reserve, SizeClass, immersive_nav, reading_reserve};
@@ -26,8 +17,7 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
     assert!(!immersive_nav(SizeClass::Compact, false));
     assert!(!immersive_nav(SizeClass::Expanded, false));
 
-    // 而报给正文的那一条**永远不含导航栏**：宽恒为 0。底栏那 56 与侧栏那 96 都还在
-    // 原地画着，只是被这一层盖住 —— 报错了轴的那一步正是上一版让两端各扣错一条边的地方。
+    // 导航栏留在原位，由阅读层覆盖，不占正文宽度。
     let safe = Insets {
         top: 41.0,
         bottom: 25.0,
@@ -40,11 +30,7 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
     );
 }
 
-/// 三档的占位宽与底栏那两条数：**只有嵌入的两档占宽**，底栏浮在内容上。
-///
-/// 这是「三档统一」里最容易被改歪的一格：底栏一旦顺手也占一条布局行，内容就再也
-/// 到不了它底下（悬浮感当场没有）；侧栏两档一旦不占宽，书架第一列就永远压在卡片下面
-/// （看着像丢了一列书）。两个方向都只在这一处判。
+/// 侧栏两档占宽以免覆盖书架首列；底栏悬浮，不占布局行。
 #[test]
 fn the_nav_bar_reserves_width_only_where_it_is_docked() {
     use super::SizeClass;
@@ -79,12 +65,8 @@ fn the_nav_bar_reserves_width_only_where_it_is_docked() {
     );
 }
 
-/// 回归门：Compact 档的底栏是**浮**的 —— 它不吃布局行，且离手势条正好一圈。
-///
-/// 宿主进不到这一档（[`SizeClass::of`] 在桌面把窄窗口夹到 `Medium`），所以这里直接问
-/// `navigation`：560×640 的窗口、25 的手势条，胶囊应当宽 536、高 56、下沿落在 603。
-/// 内容那一格仍然铺满整窗 —— 它一旦被挤短一行，内容就再也到不了栏底下（悬浮感当场没有），
-/// 这正是把「底栏」写成布局行的代价。
+/// 直接构造 Compact 导航：560×640 窗口、25 px 手势条，浮栏应宽 536、高 56、下沿在 603。
+/// 内容仍须铺满窗口；桌面 `SizeClass::of` 不会产生此档位。
 #[gpui_kit::test]
 fn the_floating_bar_sits_above_the_gesture_strip_without_taking_a_row(
     cx: &mut gpui_kit::TestAppContext,
@@ -166,11 +148,7 @@ fn the_floating_bar_sits_above_the_gesture_strip_without_taking_a_row(
     );
 }
 
-/// 回归门：背光那一格只在**书挂着**的时候接管，书收了必须交还系统。
-///
-/// 失败的样子是安静的坏：读完一本书回到架面，屏幕还停在读者为那本书调的那一档暗，而应用
-/// 以为自己从没接管过背光。它与 [`immersive_nav`] 共用「跟着书」那条判据，也同在宿主摸不到
-/// 渲染的那一层（真机才长得出那一屏），所以钉在自由函数上。
+/// 只在开书且读者指定亮度时接管背光，关书后交还系统；宿主直接验证能力判据。
 #[test]
 fn the_brightness_follows_the_book_and_hands_back_when_it_closes() {
     use super::reading_brightness;
@@ -188,12 +166,7 @@ fn the_brightness_follows_the_book_and_hands_back_when_it_closes() {
     );
 }
 
-/// 阅读页的浅深只在**书挂着**时覆盖软件外观；关书之后一个字节都不许带走。
-///
-/// 失败的样子与背光那条同族：读着夜读的书退回架面，整屏还是黑的，而软件外观明明选的
-/// 是浅色 —— 读者只会以为设置没生效。这条也钉在自由函数上：外壳那一帧在测试里摸不到
-/// 墨水屏（或减动效）把三个时钟收成零：判据是纯函数芯，全局旗在 `repaint` 那头推。
-/// 电子纸上每一帧重绘都看得见，转场与翻页在那端不是动效是闪烁。
+/// 墨水屏或减动效将转场、翻页时钟归零，避免电子纸反复重绘闪烁。
 #[test]
 fn the_motion_clocks_collapse_when_calm() {
     use super::{Duration, NAV_TRANSITION, nav_duration_for, turn_duration_for, turn_over_for};
@@ -2893,12 +2866,6 @@ mod booted {
 
         let (handle, shell) = boot(cx, false);
         open_test_reading(&shell, cx);
-        let page = shell.read_with(cx, |this, _| {
-            this.reading
-                .as_ref()
-                .map(|layer| layer.page.clone())
-                .expect("书该已经盖上来")
-        });
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .expect("窗口应能渲染");
         // 把进场走完：退场从半路的当前值起跑不是这条门要钉的事。
@@ -2907,8 +2874,12 @@ mod booted {
         cx.update_window(handle, |_, window, cx| window.render_frame(cx))
             .expect("窗口应能渲染");
 
-        // 照顶栏那颗按钮的回调来：正更新着正文的时候调 `pop`（旧写法在这里 panic）。
-        page.update(cx, |page, cx| page.pop(cx));
+        cx.update_window(handle, |_, window, cx| {
+            window.click("folio-reader", cx);
+            window.render_frame(cx);
+            window.within("reader-top-bar").click("top-bar-back", cx);
+        })
+        .expect("顶栏返回应能通过真实点击关闭阅读层");
 
         assert!(
             !shell.read_with(cx, |this, _| this.reading_open()),
@@ -2920,6 +2891,31 @@ mod booted {
             shell.read_with(cx, |this, _| this.reading_mounted()),
             "退场动画还在走，这一层还不能放手"
         );
+    }
+
+    #[gpui_kit::test]
+    fn old_reading_page_events_cannot_close_or_navigate_the_replacement(cx: &mut TestAppContext) {
+        use crate::ui::features::reader::ReadingPageEvent;
+
+        let (handle, shell) = boot(cx, false);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        open_test_reading(&shell, cx);
+        let old = shell.read_with(cx, |shell, _| shell.reading.as_ref().unwrap().page.clone());
+        open_test_reading(&shell, cx);
+        let current = shell.read_with(cx, |shell, _| shell.reading.as_ref().unwrap().page.clone());
+        assert_ne!(old.entity_id(), current.entity_id());
+        old.update(cx, |_, cx| {
+            cx.emit(ReadingPageEvent::Closed);
+            cx.emit(ReadingPageEvent::OpenSettings);
+        });
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+        shell.read_with(cx, |shell, cx| {
+            let layer = shell.reading.as_ref().unwrap();
+            assert_eq!(layer.page.entity_id(), current.entity_id());
+            assert!(!layer.closing);
+            assert_eq!(layer.stack.read(cx).depth(), 1);
+        });
     }
 
     /// 回归门：删掉**正开着**的那一本，那一层要退回架面；删掉别的那本，它一动不动。
