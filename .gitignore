@@ -21,3 +21,7 @@ keystore.properties
 /cloudfunctions
 /.cloudbase
 /cloudbaserc.json
+
+# AOCI agent host integration (machine-bound; do not commit)
+.mcp.json
+.mcp.json.backup.*
