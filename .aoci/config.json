@@ -340,11 +340,13 @@
     ]
   },
   "installed_agents": [
-    "qoder"
+    "qoder",
+    "codex"
   ],
   "automation": {
     "mode": "auto"
   },
+  "code_cognition_parallel_batches": 3,
   "ai": {
     "enabled": false,
     "provider": "openai-compatible",
