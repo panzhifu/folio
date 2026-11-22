@@ -1,6 +1,7 @@
 /target
 /tests/fixtures/local/
 .qoder/settings.local.json
+.codebuddy/settings.local.json
 /.claude/
 /.qoder/skills/
 /.agents/skills/impeccable/scripts/data/font-index.json
