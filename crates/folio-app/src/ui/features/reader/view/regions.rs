@@ -4,7 +4,7 @@
 //! `reading_page.rs` 只剩「什么时候挂哪一条」。每条自己不带状态 —— 顶栏底栏开没开在
 //! `chrome` 里判，两块弹层开没开在它们自己的实体里判，这里只画。
 
-use crate::ui::components::{PillSlider, TopBar};
+use crate::ui::components::{PillSlider, THUMB_INSET, TopBar};
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::session::ReaderSession;
 
@@ -713,8 +713,12 @@ impl Render for ProgressRow {
             )
             // 剩下的宽度整条让给胶囊：外层包一格 `flex_1`，胶囊自己是 `w_full`，
             // 尺寸契约与阅读设置里那几条一致（弹层里它也是铺满所在行）。
+            //
+            // 两端各留 `THUMB_INSET`：圆钮在 0% / 100% 处会探出轨道半格，而这一排左右
+            // 就是「上一章」「下一章」两颗钮 —— 不留这一格，进度走到头时圆钮会把那颗钮
+            // 盖掉半边（命中区也压过去，按下去落不到章上）。
             .child(
-                div().flex_1().min_w_0().child(
+                div().flex_1().min_w_0().px(px(THUMB_INSET)).child(
                     PillSlider::new(
                         "reader-progress",
                         self.progress.clone(),

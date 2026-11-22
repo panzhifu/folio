@@ -60,6 +60,8 @@ use pages::about::about_page;
 use pages::ai::ai_page;
 use pages::appearance::appearance_page;
 use pages::backup::backup_page;
+#[cfg(any(debug_assertions, feature = "debug-ui"))]
+use pages::debug::debug_page;
 use pages::dictionary::dictionary_page;
 use pages::fonts::fonts_page;
 use pages::layout::layout_page;
@@ -166,13 +168,21 @@ pub enum SettingsPage {
     Storage,
     Backup,
     About,
+    /// 排查用的一页：库文件、书目数与日志尾巴，debug 构建或 `debug-ui` 特性下登记。
+    ///
+    /// 它挂在**末尾**而不是跟在「存储」后面：这一页不是读者会来找的东西，排在「关于」之后
+    /// 才不至于把每天要调的那几页再往下挤一格。release 构建里它连 [`SettingsPage::ALL`] 都
+    /// 不进（见那一格的 `cfg`），所以正式包上不存在这一格。
+    Debug,
 }
 
 impl SettingsPage {
     /// 全部页面，按导航顺序。
     ///
     /// `About` 排在末尾是刻意的：这一页不改任何东西，是读者**办完事顺手看一眼**的东西，
-    /// 摆在最上面等于让每天要调的那几页往下挪一格。
+    /// 摆在最上面等于让每天要调的那几页往下挪一格。`Debug` 接在它后面，且**只在 debug 构建
+    /// 或 `debug-ui` 特性下存在** —— 那一格用 `#[cfg]` 挂在数组尾巴上，其余构建编出来就是
+    /// 十六格。
     ///
     /// `Membership` 排在最上面（2026-11-03 这一版定的）。这一格从前紧挨 `About`，理由是
     /// 「一天不会调两次会员」；把它抬到第一格的是产品口径不是使用频次 —— 会员是**要不要开通**
@@ -183,7 +193,7 @@ impl SettingsPage {
     /// 变体顺序就是侧栏顺序，而深链靠 [`index`](Self::index) 现算 —— 挪位置不会指错页，
     /// 但会让「第 N 页」这句话在别处（测试、日志、旧截图）对不上，所以三处顺序
     /// （本枚举、`ALL`、[`spec_pages`]）必须一起动；用例里也别写死的序号，要按页名取。
-    pub const ALL: [SettingsPage; 16] = [
+    pub const ALL: &'static [SettingsPage] = &[
         SettingsPage::Membership,
         SettingsPage::Appearance,
         SettingsPage::Typography,
@@ -200,6 +210,8 @@ impl SettingsPage {
         SettingsPage::Storage,
         SettingsPage::Backup,
         SettingsPage::About,
+        #[cfg(any(debug_assertions, feature = "debug-ui"))]
+        SettingsPage::Debug,
     ];
 
     /// 在 `Settings` 组件里的页序下标。必须与 [`spec_pages`] 的组装顺序一致 ——
@@ -219,7 +231,8 @@ pub(in crate::ui::features::settings) fn spec_pages(
     cx: &App,
     notes: &Entity<NotesSheet>,
 ) -> Vec<spec::Page> {
-    vec![
+    #[allow(unused_mut)]
+    let mut pages = vec![
         membership_page(cx),
         appearance_page(cx),
         typography_page(cx),
@@ -236,7 +249,11 @@ pub(in crate::ui::features::settings) fn spec_pages(
         storage_page(cx),
         backup_page(cx),
         about_page(cx, notes),
-    ]
+    ];
+    // 调试页接在「关于」后面，与 [`SettingsPage::ALL`] 的尾巴同序。
+    #[cfg(any(debug_assertions, feature = "debug-ui"))]
+    pages.push(debug_page(cx));
+    pages
 }
 
 /// 桌面的整页字段：把规格映射回 `Settings` 组件的数据形状。

@@ -18,6 +18,15 @@ path = "src/main.rs"
 # 测试位于 lib；bin 仅负责入口，避免重复链接测试可执行文件。
 test = false
 
+[features]
+# 把「调试」那一页编进**正式构建**（默认只在 debug 构建里出现）。
+#
+# 手机上的测试包要带它：`cargo ndk … build --release --lib --features debug-ui`。
+# 为什么不用 `debug_assertions` 开这一档：`rust-embed`（gpui-kit 的图标与主题资产就在里面）
+# 在 debug 断言下改成**运行时读盘**，安卓包上没有那份目录，症状是整个应用的图标全空 ——
+# 2026-11-22 实测过一次。release 档位加这个特性，资产照旧编进二进制，页面同时在场。
+debug-ui = []
+
 [dependencies]
 folio-core.workspace = true
 # 水墨模式需重建 image::Frame，移动离屏分享也使用图像编码。

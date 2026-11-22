@@ -13,7 +13,6 @@ use gpui_kit::base::motion::{Spring, spring};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::popover::{Popover, PopoverState};
-use gpui_kit::component::progress::Progress;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{
@@ -111,17 +110,8 @@ const LISTEN_FOLLOW: Duration = Duration::from_millis(380);
 /// 听书」同一条口径：读的人说了算。
 const LISTEN_HAND_OVER: Duration = Duration::from_secs(4);
 
-/// 听书屏语速菜单的档。设置页那条连续滑条仍可按 0.05 微调；这里给的是「一眼能挑」
-/// 的几档 —— 顶栏右侧那颗钮打开的就是这张小单子，不逼读者去设置页找。
-const LISTEN_RATES: [f32; 7] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
-
-/// 听书屏「快进」一次跳多少秒。
-///
-/// 朗读是**句级**的，落不进半句里：跳过 N 秒的落点是「起点至少走过 N 秒的第一句」，
-/// 秒数按实测语速折成字数（见 [`ReaderSession::speech_chars_per_sec`] 与
-/// [`skip_target`]）。一章剩下的时长不够 N 秒时就停在最后一句，跨章仍归 `Done`
-/// 那一条接力。
-const LISTEN_SKIP_SECONDS: f32 = 15.0;
+/// 听书屏底部那两块（语速、章进度与两颗跳转钮）单独成子模块，见 [`listen_controls`]。
+mod listen_controls;
 
 /// 还没念完过一句时的兜底语速（字/秒，1× 档）。真机实测跨引擎能差三倍
 /// （227–604 ms/字），取 250 ms/字 这一档；第一句 `Done` 之后就用实测值。
@@ -838,40 +828,6 @@ impl ReadingPage {
             .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
     }
 
-    /// 快进 N 秒：把秒折成字（实测语速 × 当前倍率），落到 [`skip_target`] 算出的那一句，
-    /// 从它的开头念。走的是与上一句/下一句同一条 `speak_from` —— 暂停时按下去也从那
-    /// 一句开口，三个跳转口行为一致。只在**这一章**里跳：章末剩下的时长不够就停在
-    /// 最后一句，跨章仍归 `Done` 那一条接力。
-    fn listen_skip_forward(&mut self, cx: &mut Context<Self>) {
-        let Some((chapter, range)) = self.reader.read(cx).speech_range() else {
-            return;
-        };
-        let Some(script) = self.listen_script.clone() else {
-            return;
-        };
-        if script.chapter != chapter {
-            return;
-        }
-        let Some(ix) = sentence_index(&script.sentences, range.start) else {
-            return;
-        };
-        let rate = ConfigHolder::speech(cx).rate.max(0.01);
-        let chars_per_sec = self
-            .reader
-            .read(cx)
-            .speech_chars_per_sec()
-            .unwrap_or(LISTEN_FALLBACK_CPS)
-            * rate;
-        let Some(target) = skip_target(&script.sentences, ix, LISTEN_SKIP_SECONDS, chars_per_sec)
-        else {
-            return;
-        };
-        let want = script.sentences[target].chapter.clone();
-        self.listen_manual_at = None;
-        self.reader
-            .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
-    }
-
     /// 缓存书封面和标题，随阅读页释放。
     fn ensure_listen_book(&mut self, cx: &App) {
         if self.listen_book.is_some() {
@@ -1099,44 +1055,6 @@ impl ReadingPage {
                 self.listen_face == ListenFace::Text,
                 page_face,
             ));
-        // 语速：顶栏右端那颗钮（仪表盘图标 + 当前倍率）。从前它挤在播放键上方那条
-        // 进度旁边 —— 倍率与「这一章念到哪儿」互不相干，不该抢同一条视线；提到顶栏
-        // 之后，底部只剩进度与快进、播放那一排。
-        let rate = ConfigHolder::speech(cx).rate;
-        let speed_label: SharedString = rate_label(rate).into();
-        let rate_name = tr(cx, "listen.rate");
-        let rate_a11y = format!("{rate_name} {speed_label}");
-        let page_rate = cx.entity().clone();
-        // 语速这张小单子用标准的 `PopupMenu`：选中一档由 `checked` 画勾（不靠颜色
-        // 猜），点外面 / 按返回的收场也归组件自己。锚在**右上** = 往下开、右对齐，
-        // 钮在顶栏右端，单子不该往上飞出屏幕。
-        let speed_menu = move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
-            let current = ConfigHolder::speech(cx).rate;
-            let mut menu = menu.min_w(px(112.));
-            for option in LISTEN_RATES {
-                let page = page_rate.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(rate_label(option))
-                        .checked((current - option).abs() < 0.001)
-                        .on_click(move |_, _, cx| {
-                            // 下一句开口时 `speak_sentence` 会随发 `SetRate`：这里只改配置，
-                            // 不另开一条命令通路（与设置页同一条口径）。
-                            ConfigHolder::edit_speech(cx, |speech| speech.rate = option);
-                            page.update(cx, |_, cx| cx.notify());
-                        }),
-                );
-            }
-            menu
-        };
-        let speed = Button::new("listen-rate")
-            .ghost()
-            .small()
-            .rounded_full()
-            .icon(IconName::Gauge)
-            .label(speed_label)
-            .tooltip(rate_name.clone().to_string())
-            .accessibility_label(rate_a11y)
-            .dropdown_menu_with_anchor(Anchor::TopRight, speed_menu);
         let top = h_flex()
             .w_full()
             .items_center()
@@ -1155,9 +1073,8 @@ impl ReadingPage {
                 ),
             )
             .child(face_switch)
-            // 右端与左端对称（各占一段 `flex_1`）：语速贴着右缘，中间那颗胶囊因此
-            // 正落在屏中。
-            .child(h_flex().flex_1().justify_end().child(speed));
+            // 右端留一段空位与左端对称：胶囊因此正落在屏中（语速已经挪到进度条上方）。
+            .child(h_flex().flex_1());
 
         let book = self.listen_book.as_ref().and_then(|book| book.as_ref());
         let title: SharedString = book.map(|book| book.title.clone()).unwrap_or_default();
@@ -1460,37 +1377,16 @@ impl ReadingPage {
                 (done as f32 / script.chars as f32 * 100.0).clamp(0.0, 100.0)
             })
             .unwrap_or(0.0);
-        let skip_label = tf(
+        // 音色与语速压在进度条上方（左音色、右语速），进度那一排两头各一颗跳转钮（倒退 5 / 快进 15 秒）。
+        let tuning_row = listen_controls::tuning_row(cx.entity().clone(), cx);
+        let chapter_row = listen_controls::chapter_row(
+            chapter_progress,
+            position,
+            cx.entity().clone(),
+            can_prev,
+            can_next,
             cx,
-            "listen.forward",
-            &[("seconds", &format!("{LISTEN_SKIP_SECONDS:.0}"))],
         );
-        let page_skip = cx.entity().clone();
-        let skip = Button::new("listen-skip-forward")
-            .ghost()
-            .icon(IconName::FastForward)
-            .tooltip(skip_label.clone().to_string())
-            .accessibility_label(skip_label)
-            .disabled(!can_next)
-            .on_click(move |_, _, cx| {
-                page_skip.update(cx, |this, cx| this.listen_skip_forward(cx))
-            });
-        let chapter_row = h_flex()
-            .w_full()
-            .max_w(px(LISTEN_TEXT_W))
-            .mx_auto()
-            .items_center()
-            .gap_3()
-            .pb_4()
-            .child(
-                div().flex_1().min_w_0().child(
-                    Progress::new("listen-chapter-progress")
-                        .small()
-                        .value(chapter_progress)
-                        .accessibility_label(position.clone()),
-                ),
-            )
-            .child(skip);
 
         Some(
             v_flex()
@@ -1515,6 +1411,7 @@ impl ReadingPage {
                         .child(note)
                 }))
                 .children(retry)
+                .child(tuning_row)
                 .child(chapter_row)
                 .child(controls)
                 .into_any_element(),
@@ -2066,21 +1963,6 @@ fn sentence_char_positions(text: &str, sentences: &[ListenSentence]) -> (Vec<usi
     (starts, chars)
 }
 
-/// 语速的显示名：去掉小数点后的尾零（`1.00` → `1`，`0.75` 原样），再接一个 `×`。
-///
-/// 只做显示这一层：配置里存的仍是 0.05 一档的浮点，设置页那条滑条与本屏这张单子
-/// 读写同一列。
-fn rate_label(rate: f32) -> String {
-    let mut text = format!("{rate:.2}");
-    while text.ends_with('0') {
-        text.pop();
-    }
-    if text.ends_with('.') {
-        text.pop();
-    }
-    format!("{text}×")
-}
-
 /// 整章排一次：gpui 的 text system 在哪儿折，文稿就到哪儿折 —— 量的尺与画出来的尺
 /// 必须完全一致（同一字体族、[`LISTEN_BOOK_PX`]、同一列宽；行高不影响折点，画的那侧
 /// 由 `TextStyle::line_height` 走 [`LISTEN_LINE_H`]）。量出来的每一条行给「每句落在
@@ -2149,33 +2031,6 @@ fn sentence_index(sentences: &[ListenSentence], at: usize) -> Option<usize> {
                 .iter()
                 .rposition(|sentence| sentence.chapter.start <= at)
         })
-}
-
-/// 「快进 N 秒」落到哪一句：从第 `from` 句的**开头**起算，逐句累加估算时长
-/// （字数 ÷ `chars_per_sec`），取第一句起点已经走过 `seconds` 秒的那一句。
-///
-/// 朗读是句级的，落不进半句里：正在念的这一句整句计入（不知道念到句内哪儿），
-/// 所以跳过的内容**不少于** N 秒，最多多出一句。一章剩下的时长不够 N 秒时停在
-/// 最后一句；已经在最后一句就返回 `None`（没有可跳的，按钮当场禁用）。
-fn skip_target(
-    sentences: &[ListenSentence],
-    from: usize,
-    seconds: f32,
-    chars_per_sec: f32,
-) -> Option<usize> {
-    if from + 1 >= sentences.len() {
-        return None;
-    }
-    let cps = chars_per_sec.max(0.1);
-    let mut elapsed = 0.0;
-    for (ix, sentence) in sentences.iter().enumerate().skip(from) {
-        // `from` 自己那一句是起点，不算「已经走过的路」：这一格只在再看下一句时判。
-        if ix > from && elapsed >= seconds {
-            return Some(ix);
-        }
-        elapsed += sentence.chapter.len() as f32 / cps;
-    }
-    Some(sentences.len() - 1)
 }
 
 impl Render for ReadingPage {
@@ -3005,8 +2860,8 @@ mod tests {
     use super::chrome;
     use super::{
         LISTEN_LINE_H, LISTEN_TEXT_W, ListenScript, ListenSentence, ReadingPage, body_tap_zone,
-        build_listen_script, line_index_at, listen_column_width, listen_focus_offset, rate_label,
-        sentence_char_positions, sentence_index, skip_target,
+        build_listen_script, line_index_at, listen_column_width, listen_focus_offset,
+        sentence_char_positions, sentence_index,
     };
     use crate::ui::features::reader::model::session::ReaderSession;
     use crate::ui::services::config::ConfigHolder;
@@ -3176,41 +3031,6 @@ mod tests {
             "越过末尾钉在最后一句"
         );
         assert_eq!(sentence_index(&[], 0), None);
-    }
-
-    /// 语速的显示名：尾零去掉，小数保留（`1.00` 念成 `1×`，`0.75` 一字不动）。
-    #[test]
-    fn rate_labels_drop_trailing_zeros() {
-        assert_eq!(rate_label(1.0), "1×");
-        assert_eq!(rate_label(0.75), "0.75×");
-        assert_eq!(rate_label(1.25), "1.25×");
-        assert_eq!(rate_label(0.5), "0.5×");
-        assert_eq!(rate_label(2.0), "2×");
-    }
-
-    /// 「快进 N 秒」的落点：从这一句**开头**起算，跳过句子的估算时长，取第一句起点
-    /// 已经走过 N 秒的那一句；章末剩下的不够就停在最后一句，已经在最后一句就 `None`。
-    #[test]
-    fn skipping_forward_lands_on_the_first_sentence_past_the_seconds() {
-        // 六句、每句 20 字；4 字/秒 → 每句 5 秒。
-        let script: Vec<ListenSentence> = (0..6)
-            .map(|ix| ListenSentence {
-                chapter: ix * 20..ix * 20 + 20,
-                script: 0..0,
-            })
-            .collect();
-        // 15 秒 = 三句：第 0、1、2 句的时长都不够，第 3 句起点正好走过 15 秒。
-        assert_eq!(skip_target(&script, 0, 15.0, 4.0), Some(3));
-        // 倍率翻倍（每句 2.5 秒）：15 秒要走六句，章里不够 → 停在最后一句。
-        assert_eq!(skip_target(&script, 0, 15.0, 8.0), Some(5));
-        // 从中间起算同理：第 2 句起走满 15 秒落到第 5 句；第 3 句起不够，也停在它。
-        assert_eq!(skip_target(&script, 2, 15.0, 4.0), Some(5));
-        assert_eq!(skip_target(&script, 3, 15.0, 4.0), Some(5));
-        // 已经在最后一句：没有可跳的（按钮当场禁用）。
-        assert_eq!(skip_target(&script, 5, 15.0, 4.0), None);
-        // 空表 / 越界起点不 panic。
-        assert_eq!(skip_target(&[], 0, 15.0, 4.0), None);
-        assert_eq!(skip_target(&script, 99, 15.0, 4.0), None);
     }
 
     /// 听书屏那条章内进度按**字符**算：中文一个字三字节，拿字节数当分母会偏到一倍以上。

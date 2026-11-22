@@ -51,6 +51,10 @@ pub struct SettingsView {
     /// 对「备份」状态实体的订阅：读目录与打包在后台跑完要靠它唤醒这一屏。
     _backup_watch: Subscription,
     _speech_watch: Subscription,
+    /// 对「调试」那一页读数实体的订阅。只在 debug 构建里有这一页，所以整格跟着编掉；
+    /// 后台读数回来要靠它 notify 这一屏（与上面几条同一理由）。
+    #[cfg(any(debug_assertions, feature = "debug-ui"))]
+    _debug_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：关于那一页的按钮拿的是这一个句柄，挂的也是这一屏，
     /// 所以从阅读页压进来的那一屏关掉卡片时，不会把底下那一屏的退场动画一起接管过去。
     notes: Entity<NotesSheet>,
@@ -87,6 +91,14 @@ impl SettingsView {
         let backup_watch = cx.observe(&backup, |_, _, cx| cx.notify());
         let speech = crate::ui::services::speech::entity(cx);
         let speech_watch = cx.observe(&speech, |_, _, cx| cx.notify());
+        // 调试页只有 debug 构建才有。桌面这一屏**没有**「钻进某页」的钩子（页的选择在
+        // `Settings` 组件内部），所以读数不从建屏时起 —— 那一趟该由读者在那页上按「重新读取」
+        // 才发生，免得每一扇设置窗都为它读一遍盘。这条订阅只管「后台读完 → 这一屏重画」。
+        #[cfg(any(debug_assertions, feature = "debug-ui"))]
+        let debug_watch = {
+            let panel = crate::ui::services::debug_panel::entity(cx);
+            cx.observe(&panel, |_, _, cx| cx.notify())
+        };
         Self {
             _storage_watch: watch,
             _update_watch: update_watch,
@@ -97,6 +109,8 @@ impl SettingsView {
             _dictionary_watch: dictionary_watch,
             _backup_watch: backup_watch,
             _speech_watch: speech_watch,
+            #[cfg(any(debug_assertions, feature = "debug-ui"))]
+            _debug_watch: debug_watch,
             notes,
             initial: Some(page.index()),
         }

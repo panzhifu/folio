@@ -166,7 +166,7 @@ impl Knob {
         }
     }
 
-    /// 两颗钮的元素 id 前缀。每一段里一个名字只出现一次，但拼上名字才不靠那个巧合。
+    /// 滑条的元素 id 后缀：`pill-slider-<key>`。
     fn key(self) -> &'static str {
         match self {
             Self::Brightness => "brightness",
@@ -181,6 +181,12 @@ impl Knob {
             Self::TurnDuration => "turn-duration",
             Self::AutoAdvance => "auto-advance",
         }
+    }
+
+    /// 这一格摆不摆行首那句标题。亮度不摆：滑条自己带着太阳两端与百分比读数，标题只是
+    /// 同一件事的第二遍。
+    fn shows_title(self) -> bool {
+        !matches!(self, Self::Brightness)
     }
 
     /// 胶囊两端的语义标注（见 `ui::components::pill_slider`）。方向一律是
@@ -484,16 +490,9 @@ impl ReadingSheet {
         }
     }
 
-    /// 一格的三个把手：上面一行「标签在左、当前值在右」，下面一行 `−` 滑条 `+`。
-    ///
-    /// 滑条从前是通栏的，于是两个端点都顶在屏幕边上，拇指够不着；滑块又只有那么大，
-    /// 精确停在一档全靠运气。现在滑条让出两端（`flex_1` + `min_w_0`，居中那一段），
-    /// 两端各一颗钮 —— 形态借完整设置屏那族 `−`/`+`（`settings::view::compact` 的
-    /// `RowKind::Number`：`ghost` + `large` + 图标），钮走的是**粗档**，满程按十几下到
-    /// 几十下算，细跳仍然交给滑条。
-    ///
-    /// 标签这一份文本三处要用（行首、两端的可读名、胶囊自己的可读名），所以先把三份
-    /// 名字取好再搭元素。当前值写在圆钮里（见 [`PillSlider`]），不再单独占一格。
+    /// 一格的滑条：标题一行，下面是一条 [`PillSlider`]（当前值写在圆钮里，两端各一个图标或
+    /// 小字当端点）。`label` 同时是行首那句标题与无障碍名 —— 亮度那一格不摆标题（滑条自己
+    /// 带着太阳两头与百分比读数，头顶再写一句「亮度」是同一件事说两次），无障碍名照旧留着。
     fn stepper_row(
         &self,
         knob: Knob,
@@ -503,22 +502,21 @@ impl ReadingSheet {
     ) -> AnyElement {
         let state = self.knob(knob).clone();
         let (start, end) = knob.marks(cx);
-        let track_label = label.clone();
-        v_flex()
-            .w_full()
-            .gap_1()
-            .child(div().text_base().child(label))
-            .child(
-                PillSlider::new(
-                    format!("pill-slider-{}", knob.key()),
-                    state,
-                    value,
-                    Some(start),
-                    Some(end),
-                )
-                .accessibility_label(track_label),
+        let mut row = v_flex().w_full().gap_1();
+        if knob.shows_title() {
+            row = row.child(div().text_base().child(label.clone()));
+        }
+        row.child(
+            PillSlider::new(
+                format!("pill-slider-{}", knob.key()),
+                state,
+                value,
+                Some(start),
+                Some(end),
             )
-            .into_any_element()
+            .accessibility_label(label),
+        )
+        .into_any_element()
     }
 
     /// 「阅读浅深」那一格：跟随软件 / 跟随系统 / 浅色 / 深色 / 水墨，**按下的这一格是这一本书的**。
@@ -1216,11 +1214,12 @@ impl ReadingSheet {
     /// 往下才是阅读页自己的浅深、纸色与背景（钉下来就不常碰），最后是翻页那两张纸怎么走、
     /// 走多久。
     fn appearance_rows(&self, cx: &mut Context<Self>) -> AnyElement {
-        // 「跟随系统」念成一句话而不是「100%」：那一档应用确实什么都没接管。
-        let brightness_label = match ConfigHolder::appearance(cx).brightness {
-            None => tr(cx, "appearance.follow_system").to_string(),
-            Some(value) => format!("{}%", (value * 100.0).round()),
-        };
+        // 顶格念 100%：这一格是「应用压暗」的满程，100% 就不压暗（背光仍归系统）。不再出现
+        // 「跟随系统」——那四个字在这条滑条上没有可解释的位置。
+        let brightness = ConfigHolder::appearance(cx)
+            .brightness
+            .unwrap_or(BRIGHTNESS_RANGE.1);
+        let brightness_label = format!("{}%", (brightness * 100.0).round());
         v_flex()
             .w_full()
             .gap_4()

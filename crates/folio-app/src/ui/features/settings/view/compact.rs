@@ -54,6 +54,8 @@
 //! 颜色一支都不定义：整屏一层表面（`background`）加卡片那一圈 `border`，取的都是主题的角色名，
 //! 这个应用不往界面里塞色值（`ui/shared/theme.rs` 那条规矩）。
 
+mod blocks;
+
 use gpui_kit::Anchor;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -80,6 +82,7 @@ use crate::ui::components::{FontPicker, SearchBox, SearchBoxEvent, TopBar, muted
 use crate::ui::foundation::navigation;
 use crate::ui::services::l10n::tr;
 use crate::ui::services::storage::{self, Job};
+use blocks::{ROOT_BLOCKS, root_block};
 
 /// 一行的可命中高度。Apple HIG 明文那条 44×44；规范点名的 `px` 例外之一就是
 /// 「最小命中容差」，所以这一格不跟着 rem 走。
@@ -298,58 +301,6 @@ fn control_cell(id: SharedString, inner: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
-/// 根屏那条入口列表的分块：块名 + 落进这一块的页。
-///
-/// 为什么要块：[`SettingsPage::ALL`] 已经 16 格，从前除会员外全拍成一条平铺列表 —— 十四行
-/// 同一个字号、同一种行、只靠发丝线分开，读者要找「行距」得把整列读完才知道它在第几格。
-/// 分块把这条改成「先落到哪一类，再在那一类里找」，与规范那条「一个个看起来合理的控件凑在
-/// 一起仍可能失败，因为它们没有形成一个阅读顺序」对得上。
-///
-/// 两块不在这里。**会员**在根顶单独一张卡（要当场念等级与到期日，见 [`root_screen`]）。
-/// **「关于」**在末尾那张无节头的卡：一块只剩一行时，节头念的就是那一行自己的名字，那句是
-/// 重复（规范「上下文已经建立的信息不要再讲一遍」）。
-///
-/// **没登记的页不会从屏上消失**：它落进末尾那张无节头的卡，同时
-/// `every_page_lands_in_a_root_block` 那条用例红 —— 加一页忘了分块，症状是「它少一句块名」，
-/// 不是「它不见了」。
-const ROOT_BLOCKS: [(&str, &[SettingsPage]); 3] = [
-    (
-        "section.reading",
-        &[
-            SettingsPage::Appearance,
-            SettingsPage::Typography,
-            SettingsPage::Layout,
-            SettingsPage::Fonts,
-            SettingsPage::Speech,
-            SettingsPage::Dictionary,
-        ],
-    ),
-    (
-        "section.translation_ai",
-        &[SettingsPage::Translation, SettingsPage::Ai],
-    ),
-    (
-        "section.books_data",
-        &[
-            SettingsPage::Library,
-            SettingsPage::TxtRules,
-            SettingsPage::Toc,
-            SettingsPage::Sync,
-            SettingsPage::Storage,
-            SettingsPage::Backup,
-        ],
-    ),
-];
-
-/// 这一页落进根屏的哪一块；`None` = 末尾那张无节头的卡。
-///
-/// 按**页**查而不是按下标：块里写的是目的地，`ALL` 挪顺序时块跟着走，不会指错格子。
-fn root_block(page: SettingsPage) -> Option<usize> {
-    ROOT_BLOCKS
-        .iter()
-        .position(|(_, members)| members.contains(&page))
-}
-
 /// 一次搜索的命中。
 ///
 /// 两种命中要的东西不同，所以不是一种东西：`Page` 是「知道有这一页、忘了它叫什么」，进去
@@ -445,6 +396,10 @@ pub(crate) struct CompactSettings {
     /// 对「备份」状态实体的订阅：读目录与打包都在后台线程上结束，清单与结果句靠它唤醒。
     _backup_watch: Subscription,
     _speech_watch: Subscription,
+    /// 对「调试」那一页读数实体的订阅：后台读回来要靠它 notify（这一页只在 debug 构建里
+    /// 存在，所以整格跟着编掉）。
+    #[cfg(any(debug_assertions, feature = "debug-ui"))]
+    _debug_watch: Subscription,
     /// 「更新日志」那张卡片。**本屏一份**：与桌面那一屏同一个形状 —— 关于那一页的按钮拿的是
     /// 这一个句柄，挂的也是这一屏，所以两屏同时活着时各收各的（理由写在 `notes_sheet` 顶部）。
     notes: Entity<NotesSheet>,
@@ -490,6 +445,13 @@ impl CompactSettings {
         let backup_watch = cx.observe(&backup, |_, _, cx| cx.notify());
         let speech = crate::ui::services::speech::entity(cx);
         let speech_watch = cx.observe(&speech, |_, _, cx| cx.notify());
+        // 调试页那一份读数：实体只在 debug 构建里编进来，所以整段跟着编掉。读数由
+        // [`Self::open`] 在钻进那一页时起，回来时靠这条订阅重画。
+        #[cfg(any(debug_assertions, feature = "debug-ui"))]
+        let debug_watch = {
+            let panel = crate::ui::services::debug_panel::entity(cx);
+            cx.observe(&panel, |_, _, cx| cx.notify())
+        };
         Self {
             screen: Screen::Root,
             scroll: ScrollHandle::new(),
@@ -505,6 +467,8 @@ impl CompactSettings {
             _dictionary_watch: dictionary_watch,
             _backup_watch: backup_watch,
             _speech_watch: speech_watch,
+            #[cfg(any(debug_assertions, feature = "debug-ui"))]
+            _debug_watch: debug_watch,
             notes,
             search: None,
             query: SharedString::default(),
@@ -522,6 +486,12 @@ impl CompactSettings {
         // 备份那一页同理：清单是磁盘上的现在，不是建规格那一刻读到的旧表。
         if page_ix == SettingsPage::Backup.index() {
             crate::ui::services::backup::request(cx, crate::ui::services::backup::Job::List);
+        }
+        // 调试页同理：库大小与日志尾巴都是**现在**的读数，进来就取一趟。这一页只在 debug
+        // 构建里存在，所以整段跟着编掉。
+        #[cfg(any(debug_assertions, feature = "debug-ui"))]
+        if page_ix == SettingsPage::Debug.index() {
+            crate::ui::services::debug_panel::reload(cx);
         }
         cx.notify();
     }
@@ -652,8 +622,8 @@ impl CompactSettings {
                     .child(card(rows, cx)),
             );
         }
-        // 末尾那一张不摆节头：里头只有「关于」，而一块只剩一行时，块名念的就是那一行自己的
-        // 名字。将来若有没登记的页也落在这里 —— 少一句块名，不少一个入口。
+        // 末尾那一张不摆节头：里头是「关于」与「调试」（顺序照 `ALL`，调试压底），而一块只剩
+        // 一行时，块名念的就是那一行自己的名字。没登记的页也落在这里 —— 少一句块名，不少一个入口。
         // 正因为它没有节头，这一道缝留大的一档（32）：这一处只剩缝在说「这是另一件事」。
         if !unblocked.is_empty() {
             body = body.child(div().w_full().px_4().mt_8().child(card(unblocked, cx)));
@@ -1461,40 +1431,9 @@ mod tests {
     use gpui_kit::test::TestWindowExt as _;
     use gpui_kit::{AnyWindowHandle, AppContext as _, Entity, TestAppContext, px, size};
 
-    use super::{
-        CompactSettings, Hit, NotesSheet, ROOT_BLOCKS, Screen, SettingsPage, root_block,
-        search_hits, spec_pages,
-    };
+    use super::{CompactSettings, Hit, NotesSheet, Screen, SettingsPage, search_hits, spec_pages};
     use crate::ui::services::config::ConfigHolder;
     use crate::ui::services::update::Notes;
-
-    /// 分块不许漏页：除会员（根顶那张卡）外，每一页要么落进 `ROOT_BLOCKS` 的一块，要么落进
-    /// 末尾那张无节头的卡 —— 而后者今天只该站着「关于」。
-    ///
-    /// 这条用例管的是「加一页忘了登记」。那种页不会从屏上消失（它掉进无节头那一张），但它
-    /// 没有块名，而根屏那条列表又会重新变回「一串看不出类的行」—— 正是这次分块要治的那个病。
-    /// 红在这里比红在「读者扫不到那一格」便宜得多。
-    #[test]
-    fn every_page_lands_in_a_root_block() {
-        let unblocked: Vec<SettingsPage> = SettingsPage::ALL
-            .iter()
-            .filter(|page| root_block(**page).is_none())
-            .copied()
-            .collect();
-        assert_eq!(
-            unblocked,
-            vec![SettingsPage::Membership, SettingsPage::About],
-            "除会员与关于之外，每一页都要登记进 ROOT_BLOCKS 的某一块"
-        );
-        // 同一页不许落进两块：`root_block` 用 `position` 只认第一次，所以登记总数与块里的
-        // 名额对不上就是重复 —— 重复的症状是那一页在屏上出现两次。
-        let registered = SettingsPage::ALL
-            .iter()
-            .filter(|page| root_block(**page).is_some())
-            .count();
-        let slots: usize = ROOT_BLOCKS.iter().map(|(_, members)| members.len()).sum();
-        assert_eq!(registered, slots, "ROOT_BLOCKS 里有一页被登记了两次");
-    }
 
     /// 搜一行标题要带出**它在哪一页**：`Row` 命中摆的是那一格本身，而读者要的是「它归哪页管」
     /// 那一句；`Page` 命中则只给页。两头都用规格里现取的文案当查询词，不写死任何一句话 ——

@@ -36,8 +36,18 @@ use gpui_kit::{
 
 /// 胶囊轨道的高度。圆钮比它大一圈（上下各探出一点），设计稿同形。
 const TRACK: f32 = 32.0;
-/// 圆钮直径。
+/// 圆钮那一格：**命中区**，也是轨道居中用的那一格。44 是规范点名的最小触摸目标，
+/// 不再往下缩。
 const THUMB: f32 = 44.0;
+/// 画出来的那颗圆。比命中区小一圈 —— 圆钮原先按 44 画，在 393dp 的屏上显得压秤；
+/// 收到 36 之后轨道两端露得更多，读数也仍在圆心里。
+const THUMB_DOT: f32 = 36.0;
+/// 圆心那串读数的字号。36 的圆里四个字符（`100%`）刚好不贴边。
+const THUMB_TEXT: f32 = 12.0;
+/// 圆钮在两端会探出轨道半个身位（见模块头最后一段）。两侧紧挨着别的控件时（底栏那条阅读
+/// 进度左边是「上一章」、右边是「下一章」），外层按这一格留出横向内缩 —— 圆钮连命中区都
+/// 留在自己的盒子里，不会压住邻居那一颗钮。
+pub const THUMB_INSET: f32 = THUMB / 2.0;
 /// 胶囊轨道相对容器的下沉量：容器就是圆钮那一格（THUMB 高），轨道比它瘦一圈，
 /// 上下各让出 `(THUMB - TRACK) / 2` 才垂直居中 —— 圆钮铺满容器，谁也不悬出去。
 const TRACK_TOP: f32 = (THUMB - TRACK) / 2.0;
@@ -172,6 +182,8 @@ impl RenderOnce for PillSlider {
                     .child(SliderTrack::new(&state).absolute().inset_0()),
             )
             .child(
+                // 命中区仍是 `THUMB`（44 = 规范点名的最小触摸目标），画出来的圆缩小到
+                // `THUMB_DOT`：手指按到的那一格没变，眼睛看到的圆小了一圈。
                 SliderThumb::new(&state)
                     .absolute()
                     .top_0()
@@ -181,15 +193,22 @@ impl RenderOnce for PillSlider {
                     .items_center()
                     .justify_center()
                     .size(px(THUMB))
-                    .rounded_full()
-                    .bg(theme.background)
-                    .shadow_md()
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .text_color(theme.foreground)
-                            .whitespace_nowrap()
-                            .child(self.value_text),
+                            .size(px(THUMB_DOT))
+                            .rounded_full()
+                            .bg(theme.background)
+                            .shadow_md()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(THUMB_TEXT))
+                                    .text_color(theme.foreground)
+                                    .whitespace_nowrap()
+                                    .child(self.value_text),
+                            ),
                     ),
             )
             // 鼠标的松手：与 base `Slider` 行为根同款的两条监听（up 在内 / up 在外），

@@ -15,6 +15,9 @@ pub mod cloud_link;
 pub mod cloud_providers;
 pub mod cloud_upload;
 pub mod config;
+/// 调试页的读数。页面本身只在 debug 构建或 `debug-ui` 特性下登记，这一份跟着一起编。
+#[cfg(any(debug_assertions, feature = "debug-ui"))]
+pub mod debug_panel;
 pub mod dictionary;
 pub mod feedback;
 pub mod import_queue;

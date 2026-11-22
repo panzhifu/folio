@@ -37,7 +37,7 @@ adb install -r crates/folio-app/android/app/build/outputs/apk/release/app-releas
 
 cargo-ndk 4.x 作为链接器外壳是正常行为，错误看后续 clang/ld.lld；jniLibs 的带 hash 副本由 Gradle excludes 处理，不手动删除。
 
-**不主动查看手机。** 用户点名后才使用 `.agents/skills/scrcpy-android` 的虚拟显示截图、点击、滑动或录像；禁止 adb shell input、adb exec-out screencap 操作用户主屏。安装不算测试，装完不自动启动或点按。
+**不主动查看手机，也不主动驱动它。** 装完包就停：不启动、不点按、不滑动、不截图，界面由用户自己看。用户**在同一条指令里明确要求**截图/查看时才做那一次（默认走 `.agents/skills/scrcpy-android` 的虚拟显示；用户另说「直接截主屏」才用 `adb exec-out screencap`），做完立刻停手，不顺势接着导航 —— 没有新的明确指令就不再看第二眼。`adb shell input` 只允许打到虚拟显示（`-d <display>`），绝不操作用户主屏。编译通过、装包成功、进程活着，都不等于「可以看一眼」。
 
 ## 版本控制
 
