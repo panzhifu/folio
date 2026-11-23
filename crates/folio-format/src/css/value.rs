@@ -137,6 +137,7 @@ pub(super) fn parse_break_when(value: &str) -> Option<BreakWhen> {
         "left" => Some(BreakWhen::Left),
         "right" => Some(BreakWhen::Right),
         "always" => Some(BreakWhen::Always),
+        "avoid" => Some(BreakWhen::Avoid),
         _ => None,
     }
 }

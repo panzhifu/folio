@@ -3,12 +3,15 @@
 //! 从 `css::computed` 切出来只因为那台属性分发的 switch 本身就六百行；类型定义与层叠
 //! 入口留在父模块，这里的东西只对整个 `css` 内部开放，不属于对外公开面。
 
+use std::sync::Arc;
+
 use super::{
     AlignItems, BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
     BackgroundSize, BackgroundTile, BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color,
-    ComputedStyle, Direction, Display, FlexDirection, FlexWrap, Hyphens, InlineVAlign,
-    JustifyContent, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Positioning, RubyAlign, RubyPosition,
-    TextAlign, TextJustify, Transform, WordBreak,
+    ComputedStyle, DecorationStyle, Direction, Display, EmphasisPosition, EmphasisStyle,
+    FlexDirection, FlexWrap, GridTrack, Hyphens, InlineVAlign, JustifyContent, KNOWN_UNIMPLEMENTED,
+    Length, ObjectFit, Overflow, Positioning, QuotePair, RubyAlign, RubyPosition, ShadowLayer,
+    TextAlign, TextJustify, Transform, Visibility, WordBreak,
 };
 use crate::css::Declaration;
 use crate::css::value::{
@@ -132,6 +135,15 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         // `hyphens` 在 CSS 里可继承，写法与 `word_spacing` 同一档：书里通常在
         // `<body>` 或 `html` 上声明一次「这本书不许在连字符处断行」。
         hyphens: parent.hyphens,
+        // 可继承的排版属性：white-space / overflow-wrap / text-emphasis / visibility / quotes
+        // 写在 `<body>` 上一次就管全书，靠 inherit_from 这一条链带下去。
+        white_space_nowrap: parent.white_space_nowrap,
+        overflow_wrap_break: parent.overflow_wrap_break,
+        text_emphasis: parent.text_emphasis,
+        text_emphasis_color: parent.text_emphasis_color,
+        text_emphasis_position: parent.text_emphasis_position,
+        visibility: parent.visibility,
+        quotes: parent.quotes,
         // 装饰线在 CSS 里**不是继承属性**，但会向后代**传播**（`text-decoration: none`
         // 写在子元素上并不会去掉父元素的下划线，这是那条规则最有名的坑）。对我们的
         // 行内/块级盒来说，「传播」与「继承」算出来的结果一致，所以这里按继承实现，
@@ -345,6 +357,240 @@ fn apply_transform(style: &mut ComputedStyle, own: f32, root_px: f32, value: &st
     false
 }
 
+/// `text-emphasis` 简写：`<style> [color] [position]`，这里只收 style 段与颜色段。
+fn apply_text_emphasis(style: &mut ComputedStyle, value: &str) -> bool {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() {
+        return false;
+    }
+    let mut consumed_color = false;
+    apply_text_emphasis_style(style, parts[0]);
+    for part in &parts[1..] {
+        if let Some(c) = parse_color(part) {
+            style.text_emphasis_color = Some(c);
+            consumed_color = true;
+        } else {
+            match part.to_ascii_lowercase().as_str() {
+                "under" => style.text_emphasis_position = EmphasisPosition::Under,
+                "over" => style.text_emphasis_position = EmphasisPosition::Over,
+                _ => {}
+            }
+        }
+    }
+    let _ = consumed_color;
+    // 首段必须能被认成 style（含 none）。
+    matches!(
+        parts[0].to_ascii_lowercase().as_str(),
+        "none" | "filled" | "open" | "dot" | "circle" | "double-circle" | "triangle" | "sesame"
+    )
+}
+
+fn apply_text_emphasis_style(style: &mut ComputedStyle, value: &str) -> bool {
+    let low = value.to_ascii_lowercase();
+    let emphasis = match low.as_str() {
+        "none" => EmphasisStyle::None,
+        "filled" | "filled dot" | "dot" => EmphasisStyle::FilledDot,
+        "open" | "open dot" => EmphasisStyle::OpenDot,
+        "filled circle" | "circle" => EmphasisStyle::FilledCircle,
+        "triangle" | "filled triangle" => EmphasisStyle::Triangle,
+        "sesame" | "filled sesame" => EmphasisStyle::Sesame,
+        _ => return false,
+    };
+    style.text_emphasis = emphasis;
+    true
+}
+
+/// `box-shadow`: 逗号分隔的多层，每层 `[inset] <dx> <dy> [blur] [color]`。
+fn apply_box_shadow(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
+    if value.trim().eq_ignore_ascii_case("none") {
+        style.box_shadows = Arc::from(Vec::new());
+        return true;
+    }
+    let layers = crate::css::selector::split_top_level(value, ',');
+    if layers.is_empty() {
+        return false;
+    }
+    let mut out = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let tokens = split_value_tokens(layer.trim());
+        if tokens.len() < 2 {
+            return false;
+        }
+        let mut inset = false;
+        let mut nums = Vec::new();
+        let mut color = None;
+        for token in &tokens {
+            if token.eq_ignore_ascii_case("inset") {
+                inset = true;
+                continue;
+            }
+            if let Some(length) = edge_length(token, own, root_px, false) {
+                nums.push(length.resolve(own)); // em 按本元素字号折
+                continue;
+            }
+            if let Some(c) = parse_color(token) {
+                color = Some(c);
+                continue;
+            }
+            return false;
+        }
+        if nums.len() < 2 {
+            return false;
+        }
+        out.push(ShadowLayer {
+            dx: nums[0],
+            dy: nums[1],
+            blur: nums.get(2).copied().unwrap_or(0.0),
+            inset,
+            color,
+        });
+    }
+    style.box_shadows = Arc::from(out);
+    true
+}
+
+/// `outline: <width> <style> <color>`。宽度不占几何，绘制时画在边框盒外。
+fn apply_outline(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
+    if value.trim().eq_ignore_ascii_case("none") {
+        style.outline = None;
+        return true;
+    }
+    let tokens = split_value_tokens(value.trim());
+    let mut width = 0.0f32;
+    let mut border_style = BorderStyle::Solid;
+    let mut color = None;
+    let mut got_width = false;
+    let mut got_style = false;
+    for token in &tokens {
+        let low = token.to_ascii_lowercase();
+        // style 与 width 各自独立判（`1px solid red` 里 solid 在 1px 之后）。
+        if !got_style && parse_border_style(&low).is_some_and(|s| s != BorderStyle::None) {
+            border_style = parse_border_style(&low).unwrap();
+            got_style = true;
+            continue;
+        }
+        if !got_width && matches!(low.as_str(), "thin" | "medium" | "thick") {
+            width = match low.as_str() {
+                "thin" => 1.0,
+                "thick" => 3.0,
+                _ => 2.0,
+            };
+            got_width = true;
+            continue;
+        }
+        if !got_width && let Some(l) = edge_length(&low, own, root_px, false) {
+            width = l.resolve(own);
+            got_width = true;
+            continue;
+        }
+        if let Some(c) = parse_color(token) {
+            color = Some(c);
+            continue;
+        }
+        return false;
+    }
+    if !got_width {
+        width = 2.0; // medium
+    }
+    match &mut style.outline {
+        Some((_, _, _, offset)) => {
+            let offset = *offset;
+            style.outline = Some((width, color, border_style, offset));
+        }
+        None => style.outline = Some((width, color, border_style, 0.0)),
+    }
+    true
+}
+
+/// `quotes: "「" "」" "『" "』"` —— 1 或 2 对开合字符。
+fn apply_quotes(style: &mut ComputedStyle, value: &str) -> bool {
+    if value.trim().eq_ignore_ascii_case("none") {
+        style.quotes = None;
+        return true;
+    }
+    let parts = crate::css::selector::split_top_level(value, ' ');
+    let chars: Vec<char> = parts
+        .iter()
+        .filter_map(|p| {
+            let t = p.trim().trim_matches('"').trim_matches('\'');
+            t.chars().next()
+        })
+        .collect();
+    if chars.len() < 2 {
+        return false;
+    }
+    let pair = QuotePair {
+        open: chars[0],
+        close: chars[1],
+    };
+    let outer = if chars.len() >= 4 {
+        QuotePair {
+            open: chars[2],
+            close: chars[3],
+        }
+    } else {
+        pair
+    };
+    style.quotes = Some([outer, pair]);
+    true
+}
+
+/// `grid-template-columns`: 空格分隔的轨道（px/%/fr/minmax(N,M)/auto）。
+fn apply_grid_tracks(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
+    if value.trim().eq_ignore_ascii_case("none") {
+        style.grid_template_columns = Arc::from(Vec::new());
+        return true;
+    }
+    let tokens = split_value_tokens(value.trim());
+    let mut tracks = Vec::with_capacity(tokens.len());
+    for token in &tokens {
+        let low = token.to_ascii_lowercase();
+        if low == "auto" {
+            tracks.push(GridTrack::Auto);
+            continue;
+        }
+        if let Some(fr) = low
+            .strip_suffix("fr")
+            .and_then(|s| s.trim().parse::<f32>().ok())
+        {
+            tracks.push(GridTrack::Fr(fr));
+            continue;
+        }
+        if low.starts_with("minmax(") && low.ends_with(')') {
+            let inner = &low[7..low.len() - 1];
+            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+            if parts.len() != 2 {
+                return false;
+            }
+            let min = edge_length(parts[0], own, root_px, false).unwrap_or(Length::Px(0.0));
+            // max 一侧可能是 `1fr` / `max-content` / 普通长度。
+            if let Some(fr) = parts[1]
+                .strip_suffix("fr")
+                .and_then(|s| s.trim().parse::<f32>().ok())
+            {
+                tracks.push(GridTrack::MinMaxFr(min, fr));
+                continue;
+            }
+            let max = if parts[1] == "max-content" {
+                Length::Px(1e6)
+            } else {
+                match edge_length(parts[1], own, root_px, false) {
+                    Some(b) => b,
+                    None => return false,
+                }
+            };
+            tracks.push(GridTrack::MinMax(min, max));
+            continue;
+        }
+        match edge_length(&low, own, root_px, false) {
+            Some(l) => tracks.push(GridTrack::Length(l)),
+            None => return false,
+        }
+    }
+    style.grid_template_columns = Arc::from(tracks);
+    true
+}
+
 /// 一条背景长手属性（`background-size` 那一族）的**图层列表**：按顶层逗号切，
 /// 每层各解一次。`url(a,b)` 里那个逗号在括号内，`split_top_level` 切不进去。
 /// 任何一层解不出就整条判不认识 —— 把六层里的第三层悄悄丢掉，屏上看不出原因。
@@ -375,8 +621,42 @@ fn parse_background_image_list(value: &str) -> Option<Vec<Option<String>>> {
     })
 }
 
-fn parse_background_size_list(value: &str) -> Option<Vec<BackgroundSize>> {
-    background_layer_list(value, parse_background_size)
+/// `background-size` 长手的一层列表。em/rem 按本元素字号折（`own`），交给 [`edge_length`]。
+fn parse_background_size_list(value: &str, own: f32, root_px: f32) -> Option<Vec<BackgroundSize>> {
+    background_layer_list(value, |part| {
+        parse_background_size_fonted(part, own, root_px)
+    })
+}
+
+/// 单层 `background-size`，em/rem 已按字号折。`auto` / `cover` / `contain` 与百分比/px 同旧语义。
+fn parse_background_size_fonted(value: &str, own: f32, root_px: f32) -> Option<BackgroundSize> {
+    let parts = split_value_tokens(value);
+    if parts.is_empty() || parts.len() > 2 {
+        return None;
+    }
+    let axis = |t: &str| -> Option<Option<Length>> {
+        let low = t.to_ascii_lowercase();
+        if low == "auto" {
+            return Some(None);
+        }
+        Some(Some(edge_length(&low, own, root_px, false)?))
+    };
+    if parts.len() == 1 {
+        let low = parts[0].to_ascii_lowercase();
+        return match low.as_str() {
+            "cover" => Some(BackgroundSize::Cover),
+            "contain" => Some(BackgroundSize::Contain),
+            "auto" => Some(BackgroundSize::Auto),
+            _ => Some(BackgroundSize::Explicit {
+                width: Some(edge_length(&low, own, root_px, false)?),
+                height: None,
+            }),
+        };
+    }
+    Some(BackgroundSize::Explicit {
+        width: axis(&parts[0])?,
+        height: axis(&parts[1])?,
+    })
 }
 
 fn parse_background_position_list(value: &str) -> Option<Vec<BackgroundPosition>> {
@@ -672,7 +952,9 @@ pub(super) fn apply(
         }
         // `mixed` 是初值（横排字在竖排里不转、竖排标点按竖排摆），接受它等于没改任何东西；
         // `upright` / `sideways` 要逐字形旋转，排版层还没有那条路，照实计不认识。
-        "text-orientation" => value.eq_ignore_ascii_case("mixed"),
+        "text-orientation" | "-epub-text-orientation" | "-webkit-text-orientation" => {
+            value.eq_ignore_ascii_case("mixed")
+        }
         "text-align" => match value.to_ascii_lowercase().as_str() {
             // `start` / `end` 与 `left` / `right` 分开存：前者跟着 `direction` 翻边，
             // 后者是作者钉死的物理方向。合并成一档就是把 RTL 的书全左对齐的那处错。
@@ -919,21 +1201,25 @@ pub(super) fn apply(
         // 那份），不认就凭空多出 664 条「落差」。真阴影这一版不画（它不进 `ComputedStyle`），
         // 所以非 `none` 的值判不认识，交给 [`super::KNOWN_UNIMPLEMENTED`] 之外的统计。
         "box-shadow" | "-webkit-box-shadow" if value.trim().eq_ignore_ascii_case("none") => true,
-        "break-before" | "page-break-before" => match parse_break_when(value) {
-            Some(when) => {
-                style.break_before = when;
-                true
+        "break-before" | "page-break-before" | "-webkit-page-break-before" => {
+            match parse_break_when(value) {
+                Some(when) => {
+                    style.break_before = when;
+                    true
+                }
+                None => false,
             }
-            None => false,
-        },
-        "break-after" | "page-break-after" => match parse_break_when(value) {
-            Some(when) => {
-                style.break_after = when;
-                true
+        }
+        "break-after" | "page-break-after" | "-webkit-page-break-after" => {
+            match parse_break_when(value) {
+                Some(when) => {
+                    style.break_after = when;
+                    true
+                }
+                None => false,
             }
-            None => false,
-        },
-        "break-inside" | "page-break-inside" => {
+        }
+        "break-inside" | "page-break-inside" | "-webkit-page-break-inside" => {
             // 两个值都是「设定」而不是「查询」：`auto` 显式取消前面的 `avoid`
             // （同一份样式表里先 `avoid` 后 `auto` 是合法写法）。认不出的值不改任何东西。
             let avoid = value.eq_ignore_ascii_case("avoid");
@@ -1021,14 +1307,16 @@ pub(super) fn apply(
             }
             None => false,
         },
-        "background-size" => match parse_background_size_list(value) {
-            Some(list) => {
-                let count = list.len();
-                for_each_layer(style, count, |layer, i| layer.size = list[i]);
-                true
+        "background-size" | "-webkit-background-size" => {
+            match parse_background_size_list(value, own, root_px) {
+                Some(list) => {
+                    let count = list.len();
+                    for_each_layer(style, count, |layer, i| layer.size = list[i]);
+                    true
+                }
+                None => false,
             }
-            None => false,
-        },
+        }
         "background-position" => match parse_background_position_list(value) {
             Some(list) => {
                 let count = list.len();
@@ -1219,9 +1507,24 @@ pub(super) fn apply(
                 style.display = Display::InlineFlex;
                 true
             }
-            // `grid` 这些容器档仍认成块：排版层没有 Grid，但「按块摆」比整条作废更接近
-            // 作者的意思（居中的一块、图与字上下摞）。
-            "grid" | "inline-grid" | "contents" => {
+            "inline-block" => {
+                style.display = Display::InlineBlock;
+                true
+            }
+            "inline-table" => {
+                style.display = Display::InlineTable;
+                true
+            }
+            "grid" => {
+                style.display = Display::Grid;
+                true
+            }
+            "inline-grid" => {
+                style.display = Display::InlineGrid;
+                true
+            }
+            // `contents` 仍是块：排版层没有「子元素代父」那一档，按块摆最接近。
+            "contents" => {
                 style.display = Display::Block;
                 true
             }
@@ -1379,6 +1682,181 @@ pub(super) fn apply(
             _ => false,
         },
         "transform" => apply_transform(style, own, root_px, value),
+        // ---- text-decoration-style / color（2026-11-23）----
+        "text-decoration-style" | "-webkit-text-decoration-style" => {
+            match value.to_ascii_lowercase().as_str() {
+                "solid" => {
+                    style.decoration_style = DecorationStyle::Solid;
+                    true
+                }
+                "double" => {
+                    style.decoration_style = DecorationStyle::Double;
+                    true
+                }
+                "dotted" => {
+                    style.decoration_style = DecorationStyle::Dotted;
+                    true
+                }
+                "dashed" => {
+                    style.decoration_style = DecorationStyle::Dashed;
+                    true
+                }
+                "wavy" => {
+                    style.decoration_style = DecorationStyle::Wavy;
+                    true
+                }
+                _ => false,
+            }
+        }
+        "text-decoration-color" => match parse_color(value.trim()) {
+            Some(c) => {
+                style.decoration_color = Some(c);
+                true
+            }
+            None => false,
+        },
+        // ---- text-emphasis 族 ----
+        "text-emphasis" | "-webkit-text-emphasis" | "-epub-text-emphasis" => {
+            apply_text_emphasis(style, value)
+        }
+        "text-emphasis-style" | "-webkit-text-emphasis-style" => {
+            apply_text_emphasis_style(style, value)
+        }
+        "text-emphasis-color" => match parse_color(value.trim()) {
+            Some(c) => {
+                style.text_emphasis_color = Some(c);
+                true
+            }
+            None => false,
+        },
+        "text-emphasis-position"
+        | "-webkit-text-emphasis-position"
+        | "-epub-text-emphasis-position" => {
+            let low = value.to_ascii_lowercase();
+            // `under [right]` / `over [left]`：只看第一个定位词，左右是竖排的次轴。
+            if low.starts_with("under") {
+                style.text_emphasis_position = EmphasisPosition::Under;
+                true
+            } else if low.starts_with("over") {
+                style.text_emphasis_position = EmphasisPosition::Over;
+                true
+            } else {
+                false
+            }
+        }
+        // ---- box-shadow（含 inset / 多值）----
+        "box-shadow" | "-webkit-box-shadow" => apply_box_shadow(style, value, own, root_px),
+        // ---- outline / outline-offset ----
+        "outline" => apply_outline(style, value, own, root_px),
+        "outline-offset" => {
+            match edge_length(value.trim(), own, root_px, false) {
+                Some(l) => {
+                    let offset = l.resolve(own);
+                    // 没写过 outline 时先存一个**宽 0** 的占位：宽 0 不画，但保住了 offset，
+                    // 后面的 `outline` 会沿用。这样 `outline-offset` 单独一条也算接住。
+                    match &mut style.outline {
+                        Some((_, _, _, o)) => *o = offset,
+                        None => style.outline = Some((0.0, None, BorderStyle::Solid, offset)),
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+        // ---- overflow / overflow-x / overflow-wrap ----
+        "overflow" | "overflow-x" | "overflow-y" => {
+            let which = if decl.property.eq_ignore_ascii_case("overflow-x") {
+                0
+            } else if decl.property.eq_ignore_ascii_case("overflow-y") {
+                1
+            } else {
+                2
+            };
+            let overflow = match value.to_ascii_lowercase().as_str() {
+                "visible" => Overflow::Visible,
+                "hidden" => Overflow::Hidden,
+                "clip" => Overflow::Clip,
+                "scroll" => Overflow::Scroll,
+                "auto" => Overflow::Auto,
+                _ => return false,
+            };
+            match which {
+                0 => style.overflow_x = overflow,
+                1 => style.overflow_y = overflow,
+                _ => {
+                    style.overflow_x = overflow;
+                    style.overflow_y = overflow;
+                }
+            }
+            true
+        }
+        "overflow-wrap" | "word-wrap" => match value.to_ascii_lowercase().as_str() {
+            "break-word" | "anywhere" => {
+                style.overflow_wrap_break = true;
+                true
+            }
+            "normal" => {
+                style.overflow_wrap_break = false;
+                true
+            }
+            _ => false,
+        },
+        // ---- visibility / table-layout / text-size-adjust ----
+        "visibility" => match value.to_ascii_lowercase().as_str() {
+            "visible" => {
+                style.visibility = Visibility::Visible;
+                true
+            }
+            "hidden" => {
+                style.visibility = Visibility::Hidden;
+                true
+            }
+            "collapse" => {
+                style.visibility = Visibility::Collapse;
+                true
+            }
+            _ => false,
+        },
+        "table-layout" => match value.to_ascii_lowercase().as_str() {
+            "fixed" => {
+                style.table_layout_fixed = true;
+                true
+            }
+            "auto" => {
+                style.table_layout_fixed = false;
+                true
+            }
+            _ => false,
+        },
+        "text-size-adjust" | "-webkit-text-size-adjust" => {
+            match value.trim() {
+                "auto" | "none" => {
+                    // auto/none 是不缩放的提示，落 None（初值）。
+                    style.text_size_adjust = None;
+                    true
+                }
+                v => match v.trim_end_matches('%').parse::<f32>() {
+                    Ok(pct) => {
+                        style.text_size_adjust = Some(pct / 100.0);
+                        true
+                    }
+                    Err(_) => false,
+                },
+            }
+        }
+        // ---- quotes（两对开合字符）----
+        "quotes" => apply_quotes(style, value),
+        // ---- grid-template-columns（轨道定义）----
+        "grid-template-columns" => apply_grid_tracks(style, value, own, root_px),
+        "grid-column" | "grid-row" => {
+            // 显式定位在排版层消费；这里先认住「数字 / span N / auto」。
+            let low = value.trim().to_ascii_lowercase();
+            low == "auto" || low.parse::<i32>().is_ok() || low.starts_with("span ")
+        }
+        "justify-self" => matches!(
+            value.to_ascii_lowercase().as_str(),
+            "auto" | "start" | "end" | "center" | "stretch"
+        ),
         // `color: currentColor` 就是 `inherit`（自引用按继承折，CSS 明文）。
         "color" if value.eq_ignore_ascii_case("currentcolor") => {
             style.color = parent.color;
@@ -1403,7 +1881,9 @@ pub(super) fn apply(
                 style.word_break = WordBreak::Normal;
                 true
             }
-            "break-all" => {
+            "break-all" | "break-word" => {
+                // `break-word` 是 WebKit 旧写法，等价于 `overflow-wrap: break-word` +
+                // `word-break: normal`；这里折成 break-all 是最接近的既有断档。
                 style.word_break = WordBreak::BreakAll;
                 true
             }
@@ -1412,13 +1892,20 @@ pub(super) fn apply(
         "white-space" => match value.to_ascii_lowercase().as_str() {
             "normal" => {
                 style.white_space_pre = false;
+                style.white_space_nowrap = false;
                 true
             }
             "pre" | "pre-wrap" => {
                 style.white_space_pre = true;
+                style.white_space_nowrap = false;
                 true
             }
-            // nowrap / pre-line 一期不区分，按不支持计数而不是假装成功。
+            "nowrap" => {
+                // 合并空白但不换行：与 pre 的正交位，断行阶段据此整段不折。
+                style.white_space_pre = false;
+                style.white_space_nowrap = true;
+                true
+            }
             _ => false,
         },
         "width" => set_length(value, own, root_px, &mut style.width),
@@ -1435,7 +1922,7 @@ pub(super) fn apply(
         // 这一格决定上面六格的数**含不含**边框与内边距。生效点只有
         // `ComputedStyle::content_size` 一个式子（四个落点共用），所以这里只管存哪一档。
         // `padding-box` 不认（见 [`BoxSizing`]）：认成 `border-box` 会把边框也扣掉。
-        "box-sizing" => match value.to_ascii_lowercase().as_str() {
+        "box-sizing" | "-webkit-box-sizing" => match value.to_ascii_lowercase().as_str() {
             "content-box" => {
                 style.box_sizing = BoxSizing::ContentBox;
                 true

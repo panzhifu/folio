@@ -2784,11 +2784,10 @@ fn the_spacing_keywords_normal_reset_an_inherited_track() {
     assert_eq!(page.styled.ignored, 0);
 }
 
-/// `white-space`：`pre` 与 `pre-wrap` 在这一版共用同一个「保留换行」标记（折行与否
-/// 交给排版，不是这一档的事），`normal` 把它关掉。
-/// `nowrap` / `pre-line` 有意**不接**：四本真书实测 0 次，为它们把布尔换成五态枚举不值。
+/// `white-space`：`pre` / `pre-wrap` 置「保留换行」标记，`normal` 关掉它，`nowrap` 走
+/// 正交的「合并空白但不换行」标记（2026-11-23 接上）。`pre-line` 仍未接。
 #[test]
-fn white_space_pre_wrap_shares_the_pre_flag_and_normal_clears_it() {
+fn white_space_pre_wrap_shares_the_pre_flag_and_nowrap_is_its_own_flag() {
     let page = author(
         "<p class=a>一</p><p class=b>二</p><p class=c>三</p><p class=d>四</p>",
         ".a { white-space: pre } .b { white-space: pre-wrap } \
@@ -2804,10 +2803,15 @@ fn white_space_pre_wrap_shares_the_pre_flag_and_normal_clears_it() {
         !style(&page, find("c")).white_space_pre,
         "`normal` 要关掉它"
     );
-    assert_eq!(
-        page.styled.ignored, 1,
-        "只有 `nowrap` 那一条算落差；它被接进来了说明五态那一档被顺手做了"
+    assert!(
+        style(&page, find("d")).white_space_nowrap,
+        "`nowrap` 走独立的 nowrap 标记"
     );
+    assert!(
+        !style(&page, find("d")).white_space_pre,
+        "`nowrap` 不保留空白，只不换行"
+    );
+    assert_eq!(page.styled.ignored, 0, "四态全部接住，无落差");
 }
 
 /// `display: list-item` 是「画标记」那一档的唯一入口（UA 只给 `<li>`），
@@ -2819,54 +2823,45 @@ fn display_list_item_is_recorded_on_a_plain_element() {
     assert_eq!(page.styled.ignored, 0);
 }
 
-/// `display: inline-block` 判**不认识**，不是「接住了」。
-///
-/// 排版层只分四档：`None` 跳过、`Inline` 走行内、`ListItem` 画标记、其余按块
-/// （`layout::collect` 的 `is_inline_flow` 与 `is_item` 那两个判据）。从前这里存进一个
-/// 谁都不读的 `InlineBlock`，屏上与 `display: block` 一字不差，而 `examples/css-gap`
-/// 报 `Applied` —— 那是把「没做」记成「做了」。行内块要的 shrink-to-fit 宽与「占一行内
-/// 位置」都还没做，所以这里明说没接住。本机四本真书这条写法 0 处。
+/// `display: inline-block` / `inline-table` / `grid` / `inline-grid` 2026-11-23 起接住，
+/// 各自落到独立枚举档（排版层的行内块 / 网格分支消费它们）。
 #[test]
-fn inline_block_is_not_accepted_as_a_display_value() {
+fn inline_block_and_grid_are_accepted_as_display_values() {
     let base = ComputedStyle::default();
     let decl = |property: &str, value: &str| Declaration {
         property: property.into(),
         value: value.into(),
         important: false,
     };
-    assert_eq!(
-        declaration_status(&decl("display", "inline-block"), &base, 16.0),
-        DeclStatus::Unparsed,
-        "`display: inline-block` 不许报成接住了"
-    );
-    for value in ["block", "inline", "list-item", "none"] {
+    for (value, want) in [
+        ("inline-block", Display::InlineBlock),
+        ("inline-table", Display::InlineTable),
+        ("grid", Display::Grid),
+        ("inline-grid", Display::InlineGrid),
+    ] {
         assert_eq!(
             declaration_status(&decl("display", value), &base, 16.0),
             DeclStatus::Applied,
-            "另外四档是真生效的，别跟着一起划掉"
+            "`display: {value}` 该接住"
+        );
+        let page = author("<p>x</p>", &format!("p {{ display: {value} }}"));
+        assert_eq!(style(&page, tag(&page, "p")).display, want);
+        assert_eq!(page.styled.ignored, 0);
+    }
+    for value in ["block", "inline", "list-item", "none", "flex"] {
+        assert_eq!(
+            declaration_status(&decl("display", value), &base, 16.0),
+            DeclStatus::Applied,
+            "既有几档仍接住"
         );
     }
-    let page = author(
-        "<div><p>x</p></div>",
-        "div { display: block } p { display: inline-block }",
-    );
-    let p = style(&page, tag(&page, "p"));
-    assert_eq!(page.styled.ignored, 1, "只有那条 inline-block 计落差");
-    assert_eq!(
-        p.display,
-        Display::Block,
-        "作废的声明不改已有值：这一格回到 CSS 初值，而不是留下一个没人读的记号"
-    );
 }
 
-/// `break-before` / `break-after` 的 `avoid` 判**不认识**，理由与上面那一条同形：
-/// 排版层除了 `is_forced` 与 `parity` 没有第三处读 `BreakWhen`，而 `is_forced` 明写
-/// 「不是强制断」，所以存进去的 `Avoid` 是一个谁都不看的记号。
-///
-/// 别和 `break-inside: avoid` 搞混 —— 那一条落在 `break_inside_avoid` 这个布尔上，
-/// 分片器真读，是真生效的。
+/// `break-before` / `break-after` 的 `avoid` 2026-11-23 起接住，落到独立的
+/// `BreakWhen::Avoid`：不是强制断（`is_forced` 为假），但分片器能凭 `is_avoid` 在放得下时
+/// 避免切开。别和 `break-inside: avoid` 混淆，那一条落在 `break_inside_avoid` 上。
 #[test]
-fn avoid_is_not_a_break_before_or_after_value_but_break_inside_avoid_is() {
+fn avoid_is_a_real_break_when_value() {
     let base = ComputedStyle::default();
     let decl = |property: &str, value: &str| Declaration {
         property: property.into(),
@@ -2878,11 +2873,13 @@ fn avoid_is_not_a_break_before_or_after_value_but_break_inside_avoid_is() {
         "break-after",
         "page-break-before",
         "page-break-after",
+        "-webkit-page-break-before",
+        "-webkit-page-break-after",
     ] {
         assert_eq!(
             declaration_status(&decl(property, "avoid"), &base, 16.0),
-            DeclStatus::Unparsed,
-            "`{property}: avoid` 兑现不了，不该报成接住"
+            DeclStatus::Applied,
+            "`{property}: avoid` 现在接住"
         );
     }
     assert_eq!(
@@ -2891,8 +2888,11 @@ fn avoid_is_not_a_break_before_or_after_value_but_break_inside_avoid_is() {
         "`break-inside: avoid` 是另一条路，真的生效"
     );
     let page = author("<p>x</p>", "p { break-before: avoid }");
-    assert_eq!(page.styled.ignored, 1);
-    assert_eq!(style(&page, tag(&page, "p")).break_before, BreakWhen::Auto);
+    assert_eq!(page.styled.ignored, 0);
+    let before = style(&page, tag(&page, "p")).break_before;
+    assert_eq!(before, BreakWhen::Avoid);
+    assert!(!before.is_forced(), "avoid 不是强制断");
+    assert!(before.is_avoid(), "但它能被分片器认出来");
 }
 
 /// `break-before` / `break-after` 剩下的那几个值：`auto` 是**设定**而不是查询

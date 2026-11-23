@@ -271,6 +271,14 @@ pub enum Display {
     Flex,
     /// `display: inline-flex`。与 `Flex` 同一套布局；一期没有行内块，落点仍按块排。
     InlineFlex,
+    /// `display: inline-block`：行内级原子盒，宽度 shrink-to-fit（内容固有宽）。
+    InlineBlock,
+    /// `display: inline-table`：行内级表格原子盒。
+    InlineTable,
+    /// `display: grid`：网格容器，走 `layout::grid` 那套。
+    Grid,
+    /// `display: inline-grid`：行内级网格容器。
+    InlineGrid,
 }
 
 /// `flex-direction`：主轴方向。只收 `row` / `column`（`-reverse` 本子集不做）。
@@ -320,6 +328,89 @@ pub enum JustifyContent {
 pub enum Transform {
     Translate(Length, Length),
     Scale(f32, f32),
+}
+
+/// `text-decoration-style`：装饰线的形状。颜色另存 `text_decoration_color`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DecorationStyle {
+    #[default]
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
+/// `text-emphasis-style`：着重号的形状（横排/竖排绘制侧据字形方向选字符）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EmphasisStyle {
+    #[default]
+    None,
+    /// `filled dot` —— 实心圆点。
+    FilledDot,
+    /// `open dot` —— 空心圆点。
+    OpenDot,
+    /// `filled circle` / `double-circle` / `triangle` / `sesame` 折成相应字形由绘制侧定。
+    FilledCircle,
+    Triangle,
+    Sesame,
+}
+
+/// `text-emphasis-position` 的横排 `over` / `under` 与竖排 `left` / `right`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EmphasisPosition {
+    #[default]
+    Over,
+    Under,
+}
+
+/// 一条 `box-shadow` / `outline` 用的颜色与尺寸（尺寸已折成 px）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowLayer {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    /// `inset` 阴影（画在边框内）。
+    pub inset: bool,
+    pub color: Option<Color>,
+}
+
+/// `overflow` / `overflow-x` / `overflow-y` 的取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Overflow {
+    #[default]
+    Visible,
+    Hidden,
+    Clip,
+    Scroll,
+    Auto,
+}
+
+/// `visibility`：可继承；`hidden` / `collapse` 的盒子仍占位但不绘制。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Visibility {
+    #[default]
+    Visible,
+    Hidden,
+    Collapse,
+}
+
+/// `grid-template-columns` 里的一条轨道尺寸：固定 px、百分比、`fr` 弹性、或 `minmax(min,max)`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GridTrack {
+    Length(Length),
+    Fr(f32),
+    MinMax(Length, Length),
+    /// `minmax(<min>, Nfr)`：弹性轨道，min 是下界。
+    MinMaxFr(Length, f32),
+    Auto,
+}
+
+/// `quotes` 的一对开合引号字符（首位字符，足够中文「」『』与西文 ""）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct QuotePair {
+    pub open: char,
+    pub close: char,
 }
 
 /// `list-style-type` 的取值 —— 列表标记的内容，不是它的画法。
@@ -652,15 +743,20 @@ pub enum BreakWhen {
     Left,
     Right,
     Always,
+    /// `page-break-*: avoid` / `break-*: avoid`：尽量别在这断。不是强制断，
+    /// 所以 `is_forced()` 为假；分片器在「块能整块放下」时尊重它（见 fragment.rs）。
+    Avoid,
 }
 
 impl BreakWhen {
-    /// 是不是「强制断在这里」的意图。只有 `Auto` 不是。
-    ///
-    /// `avoid` 不在这里：它已经从 [`crate::css::value::parse_break_when`]
-    /// 的表里划掉，因为排版层没有任何一处能兑现「尽量别在这断」。
+    /// 是不是「强制断在这里」的意图。`Auto` 与 `Avoid` 都不是。
     pub fn is_forced(self) -> bool {
         matches!(self, Self::Page | Self::Left | Self::Right | Self::Always)
+    }
+
+    /// 是不是「尽量别在这断」的意图。分片器据此在放得下时避免切开。
+    pub fn is_avoid(self) -> bool {
+        matches!(self, Self::Avoid)
     }
 
     /// 强制断之后应当落在哪一侧。`None` = 不关心奇偶。
@@ -964,6 +1060,34 @@ pub struct ComputedStyle {
     pub opacity: f32,
     /// `transform`：会建立层叠上下文的 2D 基本变换。不继承。
     pub transform: Option<Transform>,
+    /// `white-space: nowrap`：合并空白但不换行。与 `white_space_pre`（保留空白）正交，
+    /// 只影响断行：nowrap 时整段不换行。不继承外的语义按 CSS（它是可继承的，见 inherit_from）。
+    pub white_space_nowrap: bool,
+    /// `text-decoration-style` / `-webkit-text-decoration-style` 与 `text-decoration-color`。不继承。
+    pub decoration_style: DecorationStyle,
+    pub decoration_color: Option<Color>,
+    /// `text-emphasis` 一族：着重号形状、颜色与位置。CSS 可继承。
+    pub text_emphasis: EmphasisStyle,
+    pub text_emphasis_color: Option<Color>,
+    pub text_emphasis_position: EmphasisPosition,
+    /// `box-shadow`（含 `-webkit-`）：阴影层列表。不继承。
+    pub box_shadows: Arc<[ShadowLayer]>,
+    /// `outline` / `outline-offset`：轮廓（宽, 色, 画法, 偏移）。不继承。
+    pub outline: Option<(f32, Option<Color>, BorderStyle, f32)>,
+    /// `overflow-x` / `overflow-y`（`overflow` 是两者简写）。不继承。
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
+    /// `overflow-wrap: break-word | anywhere`：允许在词内断行。可继承。
+    pub overflow_wrap_break: bool,
+    /// `visibility`：可继承；hidden/collapse 占位但不绘制。
+    pub visibility: Visibility,
+    /// `table-layout: fixed`：表格用固定列宽算法。不继承。
+    pub table_layout_fixed: bool,
+    /// `text-size-adjust` / `-webkit-text-size-adjust`：阅读器字号提示（100% = 不缩放）。
+    pub text_size_adjust: Option<f32>,
+    /// `grid-template-columns` 的轨道定义与 `quotes`（均可继承 quotes、grid 轨道不继承）。
+    pub grid_template_columns: Arc<[GridTrack]>,
+    pub quotes: Option<[QuotePair; 2]>,
     /// `list-style-type`。只有 `display: list-item`（UA 给 `<li>`）的块会读它。
     ///
     /// CSS 2.1 里它**是可继承**的，而这正是 `<ol>` 的十进制落到每一个 `<li>` 的唯一
@@ -1174,6 +1298,22 @@ impl Default for ComputedStyle {
             z_index: 0,
             opacity: 1.0,
             transform: None,
+            white_space_nowrap: false,
+            decoration_style: DecorationStyle::default(),
+            decoration_color: None,
+            text_emphasis: EmphasisStyle::default(),
+            text_emphasis_color: None,
+            text_emphasis_position: EmphasisPosition::default(),
+            box_shadows: Arc::from(Vec::new()),
+            outline: None,
+            overflow_x: Overflow::default(),
+            overflow_y: Overflow::default(),
+            overflow_wrap_break: false,
+            visibility: Visibility::default(),
+            table_layout_fixed: false,
+            text_size_adjust: None,
+            grid_template_columns: Arc::from(Vec::new()),
+            quotes: None,
             list_style_type: ListStyle::default(),
             float: Float::default(),
             clear: Clear::default(),
@@ -1329,6 +1469,62 @@ impl std::hash::Hash for ComputedStyle {
                 f(*y, h);
             }
         }
+        self.white_space_nowrap.hash(h);
+        (self.decoration_style as u8).hash(h);
+        self.decoration_color.hash(h);
+        (self.text_emphasis as u8).hash(h);
+        self.text_emphasis_color.hash(h);
+        (self.text_emphasis_position as u8).hash(h);
+        self.box_shadows.len().hash(h);
+        for shadow in self.box_shadows.iter() {
+            f(shadow.dx, h);
+            f(shadow.dy, h);
+            f(shadow.blur, h);
+            shadow.inset.hash(h);
+            shadow.color.hash(h);
+        }
+        // outline: (宽, 色, 画法, 偏移)
+        match &self.outline {
+            None => 0u8.hash(h),
+            Some((w, color, style, offset)) => {
+                1u8.hash(h);
+                f(*w, h);
+                color.hash(h);
+                (*style as u8).hash(h);
+                f(*offset, h);
+            }
+        }
+        (self.overflow_x as u8).hash(h);
+        (self.overflow_y as u8).hash(h);
+        self.overflow_wrap_break.hash(h);
+        (self.visibility as u8).hash(h);
+        self.table_layout_fixed.hash(h);
+        self.text_size_adjust.map(f32::to_bits).hash(h);
+        self.grid_template_columns.len().hash(h);
+        for track in self.grid_template_columns.iter() {
+            match track {
+                GridTrack::Length(l) => {
+                    0u8.hash(h);
+                    len(l, h);
+                }
+                GridTrack::Fr(v) => {
+                    1u8.hash(h);
+                    f(*v, h);
+                }
+                GridTrack::MinMax(a, b) => {
+                    2u8.hash(h);
+                    len(a, h);
+                    len(b, h);
+                }
+                GridTrack::MinMaxFr(a, fr) => {
+                    4u8.hash(h);
+                    len(a, h);
+                    f(*fr, h);
+                }
+                GridTrack::Auto => 3u8.hash(h),
+            }
+        }
+        self.quotes.hash(h);
         (self.list_style_type as u8).hash(h);
         (self.float as u8).hash(h);
         (self.clear as u8).hash(h);

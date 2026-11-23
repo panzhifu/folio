@@ -1943,7 +1943,7 @@ impl<'a> Ctx<'a> {
         let widths = &collected.widths;
         let max: f32 = widths.iter().sum();
         let mut min = 0.0f32;
-        if style.word_break == WordBreak::BreakAll {
+        if style.word_break == WordBreak::BreakAll || style.overflow_wrap_break {
             // 任意两字之间都能断 ⇒ 最小宽就是**最宽的那个字**。
             min = widths.iter().copied().fold(0.0, f32::max);
         } else {
@@ -2623,22 +2623,25 @@ impl<'a> Ctx<'a> {
         for hard in hard_lines(&collected.text) {
             let slice = collected.text.get(hard.clone()).unwrap_or("");
             // UAX #14：给出的下标是「下一行可以从这里开始」。
-            let mut breaks: Vec<usize> = if style.word_break == WordBreak::BreakAll {
-                // `word-break: break-all`：**任意两个字符之间**都能断。不走 UAX #14 的
-                // 词边界（那正是这一档要放开的东西），也不再摘连字符断点。
-                slice
-                    .char_indices()
-                    .skip(1)
-                    .map(|(ix, _)| hard.start + ix)
-                    .collect()
-            } else {
-                linebreaks(slice)
-                    .filter(|(ix, _)| *ix > 0 && *ix < slice.len())
-                    .map(|(ix, _)| hard.start + ix)
-                    // `hyphens: none` 的书不许在连字符处断，所以把那一批断点摘掉。
-                    .filter(|at| !hyphen_break_banned(&collected.text, *at, style.hyphens))
-                    .collect()
-            };
+            let mut breaks: Vec<usize> =
+                if style.word_break == WordBreak::BreakAll || style.overflow_wrap_break {
+                    // `word-break: break-all` / `overflow-wrap: break-word|anywhere`：
+                    // **任意两个字符之间**都能断（只剩长词内部可断这一档，正常词仍优先在空格断）。
+                    // 不走 UAX #14 的
+                    // 词边界（那正是这一档要放开的东西），也不再摘连字符断点。
+                    slice
+                        .char_indices()
+                        .skip(1)
+                        .map(|(ix, _)| hard.start + ix)
+                        .collect()
+                } else {
+                    linebreaks(slice)
+                        .filter(|(ix, _)| *ix > 0 && *ix < slice.len())
+                        .map(|(ix, _)| hard.start + ix)
+                        // `hyphens: none` 的书不许在连字符处断，所以把那一批断点摘掉。
+                        .filter(|at| !hyphen_break_banned(&collected.text, *at, style.hyphens))
+                        .collect()
+                };
             // ruby 容器不许拆开排到两行上：落在容器**内部**的断点全部摘掉，起止两边留着
             //（起点那一格是「整个容器挪到下一行」，终点那一格是容器之后的正常断行）。
             // `word-break: break-all` 那一档同样要摘：它放开的是正文的断行机会，
