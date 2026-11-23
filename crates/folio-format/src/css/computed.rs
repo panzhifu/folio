@@ -267,6 +267,59 @@ pub enum Display {
     TableCell,
     /// `display: table-row-group`（`<thead>` / `<tbody>` / `<tfoot>`）；抽取网格时展开一层。
     TableRowGroup,
+    /// `display: flex`。排版层走 `layout::flex` 那套（主轴 + 交叉轴摆子项）。
+    Flex,
+    /// `display: inline-flex`。与 `Flex` 同一套布局；一期没有行内块，落点仍按块排。
+    InlineFlex,
+}
+
+/// `flex-direction`：主轴方向。只收 `row` / `column`（`-reverse` 本子集不做）。
+///
+/// 它是**逻辑**方向而非物理 x/y：`row` 沿书写模式的行内轴，`column` 沿块轴，
+/// 竖排下由排版层用 [`WritingMode`] 的投影折成物理坐标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FlexDirection {
+    #[default]
+    Row,
+    Column,
+}
+
+/// `flex-wrap`：主轴放不下时是否换行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FlexWrap {
+    #[default]
+    NoWrap,
+    Wrap,
+}
+
+/// `align-items`：子项在**交叉轴**上的对齐。`baseline` 本子集不做（它要字形度量对齐）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AlignItems {
+    #[default]
+    Stretch,
+    Start,
+    End,
+    Center,
+}
+
+/// `justify-content`：子项在**主轴**上的分布。只收书里用到的四档。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum JustifyContent {
+    #[default]
+    Start,
+    End,
+    Center,
+    SpaceBetween,
+}
+
+/// `transform` 里会建立层叠上下文、且绘制侧能兑现的那一部分。
+///
+/// 完整矩阵与 3D 变换不做（落进 `ignored`）。这里只留层叠相关、能折成简单平移/缩放的
+/// 2D 基本型：`translate(x, y)`（长度按 `Length` 折，`%` 折自自身盒）与 `scale(sx, sy)`。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Transform {
+    Translate(Length, Length),
+    Scale(f32, f32),
 }
 
 /// `list-style-type` 的取值 —— 列表标记的内容，不是它的画法。
@@ -888,6 +941,29 @@ pub struct ComputedStyle {
     pub padding_left: Length,
     pub padding_right: Length,
     pub display: Display,
+    // ---- Flex 容器属性（只被 `display: flex` / `inline-flex` 的块消费）----
+    /// 主轴方向。不继承（CSS 规定 Flex 容器属性都不继承）。
+    pub flex_direction: FlexDirection,
+    pub flex_wrap: FlexWrap,
+    /// 交叉轴对齐。不继承。
+    pub align_items: AlignItems,
+    /// 主轴分布。不继承。
+    pub justify_content: JustifyContent,
+    /// `gap` 的两个分量：主轴为 `row` 时 `column_gap` 是横缝、`row_gap` 是纵缝；
+    /// 主轴为 `column` 时互换。CSS 里 `gap` / `row-gap` / `column-gap` **不继承**。
+    pub row_gap: Option<Length>,
+    pub column_gap: Option<Length>,
+    // ---- Flex 子项属性（只被 Flex 容器的直接子项消费）----
+    /// `flex-grow` / `flex-shrink` 因子与 `flex-basis`。不继承。
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_basis: Option<Length>,
+    /// `z-index`：层叠顺序。只对定位元素与 Flex 子项生效，见 `stacking`。不继承。
+    pub z_index: i32,
+    /// `opacity`：不透明度，`1.0` = 初值（不建立层叠上下文）。不继承。
+    pub opacity: f32,
+    /// `transform`：会建立层叠上下文的 2D 基本变换。不继承。
+    pub transform: Option<Transform>,
     /// `list-style-type`。只有 `display: list-item`（UA 给 `<li>`）的块会读它。
     ///
     /// CSS 2.1 里它**是可继承**的，而这正是 `<ol>` 的十进制落到每一个 `<li>` 的唯一
@@ -1086,6 +1162,18 @@ impl Default for ComputedStyle {
             padding_left: Length::ZERO,
             padding_right: Length::ZERO,
             display: Display::Block,
+            flex_direction: FlexDirection::default(),
+            flex_wrap: FlexWrap::default(),
+            align_items: AlignItems::default(),
+            justify_content: JustifyContent::default(),
+            row_gap: None,
+            column_gap: None,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: None,
+            z_index: 0,
+            opacity: 1.0,
+            transform: None,
             list_style_type: ListStyle::default(),
             float: Float::default(),
             clear: Clear::default(),
@@ -1217,6 +1305,30 @@ impl std::hash::Hash for ComputedStyle {
         len(&self.padding_left, h);
         len(&self.padding_right, h);
         (self.display as u8).hash(h);
+        (self.flex_direction as u8).hash(h);
+        (self.flex_wrap as u8).hash(h);
+        (self.align_items as u8).hash(h);
+        (self.justify_content as u8).hash(h);
+        opt_len(&self.row_gap, h);
+        opt_len(&self.column_gap, h);
+        f(self.flex_grow, h);
+        f(self.flex_shrink, h);
+        opt_len(&self.flex_basis, h);
+        self.z_index.hash(h);
+        f(self.opacity, h);
+        match &self.transform {
+            None => 0u8.hash(h),
+            Some(Transform::Translate(a, b)) => {
+                1u8.hash(h);
+                len(a, h);
+                len(b, h);
+            }
+            Some(Transform::Scale(x, y)) => {
+                2u8.hash(h);
+                f(*x, h);
+                f(*y, h);
+            }
+        }
         (self.list_style_type as u8).hash(h);
         (self.float as u8).hash(h);
         (self.clear as u8).hash(h);
@@ -1348,11 +1460,10 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
     // `float` / `clear` 同一条路，2026-10-16 那一轮移出去的 —— 现在真会摆浮动盒、
     // 真会把后面的行带折窄，见 `layout::collect` 的 `PlacedFloat`。
-    // `columns` / `column-gap` 留下：分片器认的是**视口**栏数（`FragmentOptions::columns`，
+    // `columns` 留下：分片器认的是**视口**栏数（`FragmentOptions::columns`，
     // 由界面或读者给），作者写的块级 `column-count` 要改排版期的折行宽度，还没接。
-    // 详见 `css/computed.rs` 的忽略清单。
+    // `column-gap` 2026-11-23 移了出去：它作为 `gap` 的横轴分量随 Flex 一起接住。
     "columns",
-    "column-gap",
     // 列表标记 2026-10-15 起真的画了，所以 `list-style` 与 `list-style-type` 从这份
     // 名单里移了出去 —— 它们现在会改屏上的东西（`layout::marker`）。
     // `list-style-image` 与 `list-style-position` 2026-10-29 也移了出去：它们不是
@@ -1392,9 +1503,8 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // [`Positioning`]）—— 落点是封面/标题页那几块装饰（`left:50%; margin-left:-9.5em`
     // 那套居中写法）。`relative` 2026-11-04 起也收（流内整体位移，见 [`Positioning::Relative`]）；
     // `sticky` 判不认识，它要滚动状态。
-    // `z-index` 留着：我们的绘制顺序是「相交即上抬」，不是 z 树，绝对定位盒的层序
-    // 按文档序走。
-    "z-index",
+    // `z-index` 2026-11-23 移了出去：完整层叠上下文落地（见 `layout::stacking`），
+    // 定位盒与 Flex 子项按 z 值排序绘制。
     // 下面这一批是 2026-10-30 从《基督山伯爵》《诡秘之主》两本的落差表里捞出来的：
     // 属性名认得、这一版**没有对应物**，于是单拎出来记「认得、不生效」，不再算进
     // 「不认识」那一栏（两本书各几百到上千个元素，会把真正要关注的写法淹掉）。
@@ -1405,14 +1515,10 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     "text-rendering",
     "backdrop-filter",
     "-webkit-backdrop-filter",
-    // - flex 一族：排版引擎只做流式与表格，没有 flex 容器。`display: flex` 认成块
-    //   （见 `apply` 那一臂），其余几条挪不动任何东西。
-    "flex-direction",
-    "align-items",
-    "justify-content",
+    // - flex 一族：2026-11-23 接上了主轴/交叉轴的 Flex 子集（`layout::flex`）：
+    //   `flex-direction` / `align-items` / `justify-content` / `flex-wrap` / `gap` 都移了出去。
+    //   `align-self` 仍未做（逐项覆盖交叉轴对齐），留在这一档。
     "align-self",
-    "flex-wrap",
-    "gap",
 ];
 
 #[derive(Debug, Default)]

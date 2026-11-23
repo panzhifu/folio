@@ -21,8 +21,8 @@ use super::wrap::{
     hard_lines, hyphen_break_banned, orig_of, scan_by_char, scan_by_word, trim_end_spaces,
 };
 use folio_format::css::computed::{
-    CellVAlign, Clear, ComputedStyle, Direction, Display, Float, Length, Positioning, StyledDom,
-    TextAlign, TextJustify, WordBreak,
+    AlignItems, CellVAlign, Clear, ComputedStyle, Direction, Display, FlexDirection, Float, Length,
+    Positioning, StyledDom, TextAlign, TextJustify, WordBreak,
 };
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
@@ -1577,6 +1577,254 @@ impl<'a> Ctx<'a> {
         )
     }
 
+    /// 量一个子树的**最大内容宽**（不折行时那一段），给 Flex 子项 `flex-basis: auto`
+    /// 当固有主尺寸。与 [`Self::cell_intrinsic`] 同一把尺：都走 [`collect`] 的宽度表。
+    fn flex_intrinsic_width(&self, node: NodeId, available: f32) -> f32 {
+        let style = self.style_of(node);
+        let collected = collect(
+            &[node],
+            self.dom,
+            self.styles,
+            style.white_space_pre,
+            self.images,
+            self.measure,
+            Sizes {
+                width: available,
+                screen_width: self.screen.map(|(w, _)| w),
+                page_height: self.page_height,
+                screen_height: self.screen.map(|(_, h)| h),
+            },
+        );
+        collected.widths.iter().sum::<f32>().max(1.0)
+    }
+
+    /// 摆一个 Flex 容器（`display: flex` / `inline-flex`），返回边框盒高。
+    ///
+    /// 算法分两趟、全程在**逻辑坐标**里：主轴 `row` 走 x、`column` 走 y，竖排由外层
+    /// `Layout::assemble` 统一转置，所以横竖共用这一份。第一趟量每个子项的假设主尺寸
+    /// （flex-basis / 固有宽），按 [`super::flex`] 分行、分配 grow/shrink、算 justify；
+    /// 第二趟把每个子项当块排到 **(最终主位置, 临时 y=0)**，记下它产出的行/块区间与
+    /// 交叉尺寸，再按 align-items 平移到位。`column` 方向在流式排版里高度是 auto，
+    /// 主轴没有可分配的自由空间，于是子项按固有高依次堆、gap 插在中间。
+    fn flex(
+        &mut self,
+        node: NodeId,
+        x: f32,
+        y: f32,
+        width: f32,
+        basis: f32,
+        cb_h: Option<f32>,
+    ) -> f32 {
+        let style = self.style_of(node);
+        let [bt, br, bb, bl] = style.border_drawn();
+        let pl = bl + style.padding_left.resolve(basis).max(0.0);
+        let pr = br + style.padding_right.resolve(basis).max(0.0);
+        let pt = bt + style.padding_top.resolve(basis).max(0.0);
+        let pb = bb + style.padding_bottom.resolve(basis).max(0.0);
+        let content_w = (width - pl - pr).max(1.0);
+        let is_row = style.flex_direction == FlexDirection::Row;
+
+        // 子项：跳过 display:none 与绝对定位（后者收起来等整章排完再摆，与 children 同口径）。
+        let mut items: Vec<NodeId> = self.children_of(node).to_vec();
+        items.retain(|&child| {
+            let s = self.style_of(child);
+            if s.display == Display::None {
+                return false;
+            }
+            if matches!(s.position, Positioning::Absolute | Positioning::Fixed) {
+                self.absolute.push((child, y));
+                return false;
+            }
+            true
+        });
+        let index = self.push_block(node, x, y, width, String::new(), true);
+        if items.is_empty() {
+            return self.close_block(index, pt + pb);
+        }
+
+        // 轻量档：只量高、不产行盒。主轴分行/分配照常算（纯数），每个子项用 block_light
+        // 量交叉尺寸，取一行的最大值累加。与完整档同源，章高不会因模式不同而跳。
+        if self.light {
+            let row_gap = style
+                .row_gap
+                .map(|l| l.resolve(content_w))
+                .unwrap_or(0.0)
+                .max(0.0);
+            let col_gap = style
+                .column_gap
+                .map(|l| l.resolve(content_w))
+                .unwrap_or(0.0)
+                .max(0.0);
+            let content_h = if is_row {
+                let mut infos: Vec<super::flex::Item> = Vec::with_capacity(items.len());
+                for &child in &items {
+                    let s = self.style_of(child);
+                    let intrinsic = self.flex_intrinsic_width(child, content_w);
+                    let basis = s
+                        .flex_basis
+                        .map(|l| l.resolve(content_w))
+                        .unwrap_or(intrinsic);
+                    infos.push(super::flex::Item {
+                        basis,
+                        grow: s.flex_grow,
+                        shrink: s.flex_shrink,
+                        min: 0.0,
+                        max: f32::MAX,
+                    });
+                }
+                let lines = super::flex::wrap_lines(&infos, content_w, col_gap, style.flex_wrap);
+                let mut total = 0.0f32;
+                for line in &lines {
+                    let sizes = super::flex::resolve_line(&infos, line, content_w, col_gap);
+                    let mut cross = 0.0f32;
+                    for (k, &idx) in line.iter().enumerate() {
+                        let w = sizes[k].max(1.0);
+                        cross = cross.max(self.block_light(items[idx], w, w, None));
+                    }
+                    total += cross + row_gap;
+                }
+                (total - row_gap).max(0.0)
+            } else {
+                let mut total = 0.0f32;
+                for &child in &items {
+                    total += self.block_light(child, content_w, content_w, None) + row_gap;
+                }
+                (total - row_gap).max(0.0)
+            };
+            return self.close_block(
+                index,
+                pt + Self::used_content_height(style, content_h, pt + pb, cb_h) + pb,
+            );
+        }
+
+        // gap 的主/交叉分量：CSS `gap: <row> <column>`。row 方向主轴是 column-gap，
+        // column 方向主轴是 row-gap。
+        let row_gap = style
+            .row_gap
+            .map(|l| l.resolve(content_w))
+            .unwrap_or(0.0)
+            .max(0.0);
+        let col_gap = style
+            .column_gap
+            .map(|l| l.resolve(content_w))
+            .unwrap_or(0.0)
+            .max(0.0);
+        let main_gap = if is_row { col_gap } else { row_gap };
+        let cross_gap = if is_row { row_gap } else { col_gap };
+
+        if is_row {
+            // ---- 主轴 = x ----
+            let mut finfos: Vec<super::flex::Item> = Vec::with_capacity(items.len());
+            for &child in &items {
+                let s = self.style_of(child);
+                let (_, box_w) = self.solve_block_width(s, content_w, x + pl);
+                let intrinsic = self.flex_intrinsic_width(child, content_w);
+                let (basis_px, grow, shrink) = match s.flex_basis {
+                    Some(l) => (l.resolve(content_w), s.flex_grow, s.flex_shrink),
+                    None => (intrinsic.min(box_w), s.flex_grow, s.flex_shrink),
+                };
+                let min = s.min_width.map(|l| l.resolve(content_w)).unwrap_or(0.0);
+                let max = s
+                    .max_width
+                    .map(|l| l.resolve(content_w))
+                    .unwrap_or(f32::MAX);
+                finfos.push(super::flex::Item {
+                    basis: basis_px,
+                    grow,
+                    shrink,
+                    min,
+                    max: max.max(min),
+                });
+            }
+            let lines = super::flex::wrap_lines(&finfos, content_w, main_gap, style.flex_wrap);
+            let mut cross_cursor = 0.0f32;
+            for line in &lines {
+                let sizes = super::flex::resolve_line(&finfos, line, content_w, main_gap);
+                let items_sum: f32 = sizes.iter().sum();
+                let gap_total = main_gap * (line.len().saturating_sub(1)) as f32;
+                let free = content_w - items_sum - gap_total;
+                let (lead, extra) =
+                    super::flex::justify_offset(free, line.len(), style.justify_content);
+                // 先把这一行每个子项排到临时 y=0，记下交叉尺寸与行/块区间。
+                struct Placed {
+                    block_start: usize,
+                    block_end: usize,
+                    line_start: usize,
+                    line_end: usize,
+                    cross: f32,
+                }
+                let mut placed: Vec<Placed> = Vec::with_capacity(line.len());
+                let mut item_x = x + pl + lead;
+                for (k, &idx) in line.iter().enumerate() {
+                    let child = items[idx];
+                    let item_w = sizes[k].max(1.0);
+                    let line_start = self.lines.len();
+                    let block_start = self.blocks.len();
+                    let cross = self.block(child, item_x, 0.0, item_w, item_w, None);
+                    placed.push(Placed {
+                        block_start,
+                        block_end: self.blocks.len(),
+                        line_start,
+                        line_end: self.lines.len(),
+                        cross,
+                    });
+                    item_x += item_w + main_gap + extra;
+                }
+                let line_cross = placed.iter().map(|p| p.cross).fold(0.0f32, f32::max);
+                // align-items：stretch 把盒子拉到整行交叉尺寸；其余按 start/end/center 平移。
+                for p in placed {
+                    let align_dy = match style.align_items {
+                        AlignItems::Start | AlignItems::Stretch => 0.0,
+                        AlignItems::End => line_cross - p.cross,
+                        AlignItems::Center => (line_cross - p.cross) / 2.0,
+                    };
+                    let dy = y + pt + cross_cursor + align_dy;
+                    for line_box in &mut self.lines[p.line_start..p.line_end] {
+                        line_box.y += dy;
+                    }
+                    for block in &mut self.blocks[p.block_start..p.block_end] {
+                        block.y += dy;
+                    }
+                    if style.align_items == AlignItems::Stretch
+                        && let Some(block) = self.blocks.get_mut(p.block_start)
+                    {
+                        block.height = line_cross;
+                    }
+                }
+                cross_cursor += line_cross + cross_gap;
+            }
+            let content_h = (cross_cursor - cross_gap).max(0.0);
+            self.close_block(
+                index,
+                pt + Self::used_content_height(style, content_h, pt + pb, cb_h) + pb,
+            )
+        } else {
+            // ---- 主轴 = y（高度 auto，按固有高依次堆；交叉轴 = x 走 align-items）----
+            let mut cursor = 0.0f32;
+            for &child in &items {
+                // 交叉尺寸：stretch 铺满内容宽；否则量固有宽。
+                let item_w = match style.align_items {
+                    AlignItems::Stretch => content_w,
+                    _ => self.flex_intrinsic_width(child, content_w).min(content_w),
+                };
+                let cross_free = content_w - item_w;
+                let dx = match style.align_items {
+                    AlignItems::Start | AlignItems::Stretch => 0.0,
+                    AlignItems::End => cross_free,
+                    AlignItems::Center => cross_free / 2.0,
+                };
+                let item_x = x + pl + dx;
+                let h = self.block(child, item_x, y + pt + cursor, item_w, content_w, None);
+                cursor += h + main_gap;
+            }
+            let content_h = (cursor - main_gap).max(0.0);
+            self.close_block(
+                index,
+                pt + Self::used_content_height(style, content_h, pt + pb, cb_h) + pb,
+            )
+        }
+    }
+
     /// 摆绝对定位的盒：脱流，按 `left` / `right` / `top` / `bottom` 相对**这一章的盒**摆。
     ///
     /// 必须在整章的高定下来之后调用（`top` / `bottom` 的百分比基准是包含块高）。
@@ -2049,6 +2297,11 @@ impl<'a> Ctx<'a> {
         // 子节点折 `height: NN%` 用的基准。这一块**明确写过** `height` 才给得出，
         // 由内容撑出来的高不算（两条理由都在 [`Self::child_height_basis`] 上）。
         let child_h = Self::child_height_basis(style, cb_h, pt + pb);
+        // Flex 容器：`flex()` 自己 `push_block` 并逐子项摆放，走完直接收口，不落到下面的
+        // 流式 / 表格路径。与 `Display::Table` 在 `children` 里那一档同构。
+        if matches!(style.display, Display::Flex | Display::InlineFlex) {
+            return self.flex(node, x, y, width, basis, cb_h);
+        }
         let index = self.push_block(node, x, y, width, String::new(), true);
         let line_px = (style.font_size * style.line_height).max(1.0);
         let inner = if self.has_block_children(node) {
@@ -2225,6 +2478,12 @@ impl<'a> Ctx<'a> {
         }
 
         let content_width = (width - pl - pr).max(1.0);
+        // Flex 容器量高：轻量档没有 Flex 的「主轴分行 + 交叉对齐」，直接复用完整 flex()
+        // 拿准确高（目录/进度条据此算章高，估错会让进度跳）。flex() 内部按 self.light
+        // 决定每子项走 block 还是 block_light，所以这里复用它既准又不产多余行盒。
+        if matches!(style.display, Display::Flex | Display::InlineFlex) {
+            return self.flex(node, 0.0, 0.0, width, basis, cb_h);
+        }
         // 与 `block_uncached` 同一个基准：这一趟量高，那一趟实排，两边不许各拿一个数。
         let child_h = Self::child_height_basis(style, cb_h, pt + pb);
         let inner = if self.has_block_children(node) {

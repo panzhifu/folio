@@ -34,11 +34,13 @@ pub mod page;
 
 mod cache;
 mod collect;
+mod flex;
 mod font;
 mod geometry;
 mod key;
 mod marker;
 mod ports;
+mod stacking;
 mod table;
 mod wrap;
 
@@ -259,6 +261,9 @@ fn layout_inner(
         WritingMode::HorizontalTb
     };
     let mut out = Layout::assemble(ctx.blocks, ctx.lines, content_width, height, flow);
+    // 层叠序：每条行沿 owner 的祖先链找最近的层叠上下文，取 z。绘制侧按它重排谁盖住谁；
+    // 正文源序、命中与分页一律不变。全部为 0 时零回归。
+    out.line_z = stacking::compute_line_z(dom, styles, &out);
     // 绘制侧只认 `DecorSeed::full_bleed`；`fixed` 底图在 `decor_seeds` 里按 attachment
     // 现认，封面这一档由排版把结论带过去。
     out.root_full_bleed = cover_background;

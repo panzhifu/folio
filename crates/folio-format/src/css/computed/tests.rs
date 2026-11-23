@@ -77,6 +77,20 @@ fn tag(page: &Page, tag: &str) -> NodeId {
         .unwrap_or_else(|| panic!("文档里应有 <{tag}>"))
 }
 
+fn tags(page: &Page, tag: &str) -> Vec<NodeId> {
+    page.dom
+        .elements()
+        .filter(|(_, n)| {
+            n.tag
+                .as_ref()
+                .map(|t| t.local.to_string())
+                .unwrap_or_default()
+                == tag
+        })
+        .map(|(id, _)| id)
+        .collect()
+}
+
 fn class(page: &Page, want: &str) -> NodeId {
     page.dom
         .elements()
@@ -875,10 +889,10 @@ fn text_justify_is_recognized_and_inherited() {
     assert_eq!(p.text_justify, TextJustify::InterCharacter);
 }
 
-/// 定位一族 2026-10-29 起真生效（绝对定位按这一章的盒摆），`z-index` 仍记
-/// 「认得、不生效」—— 我们的层序是文档序，不是 z 树。
+/// 定位一族 2026-10-29 起真生效（绝对定位按这一章的盒摆），`z-index` 2026-11-23
+/// 随完整层叠上下文一起接住（定位盒与 Flex 子项按 z 值排序绘制）。
 #[test]
-fn the_position_family_is_applied_except_z_index() {
+fn the_position_family_and_z_index_are_applied() {
     use crate::css::Declaration;
     use crate::css::computed::{DeclStatus, declaration_status};
 
@@ -914,8 +928,13 @@ fn the_position_family_is_applied_except_z_index() {
     );
     assert_eq!(
         status("z-index", "3"),
-        DeclStatus::Inert,
-        "层序按文档序，不是 z 树"
+        DeclStatus::Applied,
+        "z-index 随层叠上下文落地，真改绘制顺序"
+    );
+    assert_eq!(
+        status("z-index", "auto"),
+        DeclStatus::Applied,
+        "`auto` 是合法值（落 z=0），不是不认识"
     );
 }
 
@@ -3513,16 +3532,125 @@ fn prefixed_and_no_op_values_are_not_counted_as_unparsed() {
     assert_eq!(bad.styled.ignored, 1, "认不出的词仍要算不认识");
 }
 
-/// `display: flex` 认成块：排版层没有 flex 容器，但「按块摆」正是书里想要的那件事，
-/// 整条丢掉会让那一块回到行内流里。
+/// `display: flex` 2026-11-23 起是真生效的容器：走 `layout::flex`，Flex 一族全部接住。
 #[test]
-fn display_flex_falls_back_to_a_block() {
+fn display_flex_is_a_real_container() {
+    use crate::css::computed::{AlignItems, JustifyContent};
     let page = author(
         "<div>块</div>",
-        "div { display: flex; align-items: center }",
+        "div { display: flex; align-items: center; justify-content: space-between }",
     );
-    assert_eq!(style(&page, tag(&page, "div")).display, Display::Block);
-    assert_eq!(page.styled.ignored, 0, "`align-items` 归「认得、不生效」");
+    let s = style(&page, tag(&page, "div"));
+    assert_eq!(s.display, Display::Flex);
+    assert_eq!(s.align_items, AlignItems::Center);
+    assert_eq!(s.justify_content, JustifyContent::SpaceBetween);
+    assert_eq!(page.styled.ignored, 0, "Flex 一族都该接住");
+
+    // inline-flex 是行内级的 Flex 容器，display 另立一档（落点按块排）。
+    let inline = author("<div>块</div>", "div { display: inline-flex }");
+    assert_eq!(
+        style(&inline, tag(&inline, "div")).display,
+        Display::InlineFlex
+    );
+}
+
+// ---- Flex 子集 + column-gap + 层叠（2026-11-23）----
+
+/// Flex 容器属性只收本子集支持的取值；越界值（`baseline` / `space-around` / `-reverse`）
+/// 整条作废计入 ignored，不能悄悄当初值。
+#[test]
+fn flex_container_properties_accept_only_the_subset() {
+    use crate::css::computed::declaration_status;
+    use crate::css::computed::{AlignItems, FlexDirection, FlexWrap, JustifyContent};
+    use crate::css::{Declaration, Origin};
+
+    let status = |property: &str, value: &str| {
+        declaration_status(
+            &Declaration {
+                property: property.into(),
+                value: value.into(),
+                important: false,
+            },
+            &ComputedStyle::default(),
+            16.0,
+        )
+    };
+    for (property, value) in [
+        ("flex-direction", "row"),
+        ("flex-direction", "column"),
+        ("flex-wrap", "wrap"),
+        ("flex-wrap", "nowrap"),
+        ("align-items", "stretch"),
+        ("align-items", "center"),
+        ("justify-content", "space-between"),
+        ("justify-content", "center"),
+        ("gap", "0.35em 0.65em"),
+        ("column-gap", "0.5em"),
+        ("flex", "0 1 34%"),
+        ("z-index", "1"),
+        ("opacity", "0.5"),
+        ("transform", "translate(2px, 3px)"),
+    ] {
+        assert_eq!(
+            status(property, value),
+            DeclStatus::Applied,
+            "`{property}: {value}` 该接住"
+        );
+    }
+    for (property, value) in [
+        ("flex-direction", "row-reverse"),
+        ("align-items", "baseline"),
+        ("justify-content", "space-around"),
+        ("transform", "rotate(3deg)"),
+    ] {
+        assert_eq!(
+            status(property, value),
+            DeclStatus::Unparsed,
+            "`{property}: {value}` 越界，计不认识"
+        );
+    }
+
+    let page = page(
+        "<div>块</div>",
+        &[(
+            "div { display:flex; flex-direction:column; flex-wrap:wrap; \
+                   align-items:stretch; justify-content:center; gap:2px 4px; \
+                   opacity:0.5; transform:scale(2) }",
+            Origin::Author,
+        )],
+    );
+    let s = style(&page, tag(&page, "div"));
+    assert_eq!(s.flex_direction, FlexDirection::Column);
+    assert_eq!(s.flex_wrap, FlexWrap::Wrap);
+    assert_eq!(s.align_items, AlignItems::Stretch);
+    assert_eq!(s.justify_content, JustifyContent::Center);
+    assert_eq!(s.row_gap, Some(Length::Px(2.0)));
+    assert_eq!(s.column_gap, Some(Length::Px(4.0)));
+    assert_eq!(s.opacity, 0.5);
+    assert!(s.transform.is_some());
+}
+
+/// `flex` 简写：`0 1 34%` 拆成 grow/shrink/basis；单值长度当 basis、单值数字当 grow。
+#[test]
+fn flex_shorthand_splits_into_grow_shrink_basis() {
+    let page = author(
+        "<i>a</i><i>b</i><i>c</i>",
+        "i:nth-child(1) { flex: 0 1 34% } \
+         i:nth-child(2) { flex: 2 } \
+         i:nth-child(3) { flex: 50px }",
+    );
+    let ids = tags(&page, "i");
+    let a = style(&page, ids[0]);
+    assert_eq!(a.flex_grow, 0.0);
+    assert_eq!(a.flex_shrink, 1.0);
+    assert_eq!(a.flex_basis, Some(Length::Percent(0.34)));
+    let b = style(&page, ids[1]);
+    assert_eq!(b.flex_grow, 2.0);
+    assert_eq!(b.flex_shrink, 1.0);
+    assert_eq!(b.flex_basis, None);
+    let c = style(&page, ids[2]);
+    assert_eq!(c.flex_grow, 1.0);
+    assert_eq!(c.flex_basis, Some(Length::Px(50.0)));
 }
 
 // ---- ruby 注音（2026-10-31）----

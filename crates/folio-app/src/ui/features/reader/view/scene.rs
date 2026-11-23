@@ -400,7 +400,7 @@ impl Scene {
         );
         let __decor = __t.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.decor_ns += __decor);
-        for ix in lines {
+        for ix in layout.paint_order(lines.start, lines.end) {
             let Some(line) = layout.lines.get(ix) else {
                 continue;
             };

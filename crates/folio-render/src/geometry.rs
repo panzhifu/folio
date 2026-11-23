@@ -339,6 +339,10 @@ pub struct Layout {
     /// 全部退回线性扫 —— 慢一点但不会答错，也不报错（将来接负外边距 / 绝对定位那天，
     /// 症状会先在速度上出现，而不是先在读代码的人的脑子里）。
     stacked: bool,
+    /// 每一行的**绘制层叠序**（z 值），与 `lines` 等长；由 [`super::stacking`] 在 layout
+    /// 入口算好。绘制侧按它重排行盒的先后，正文/命中仍按 `lines` 的原序（源序），两件事分开。
+    /// 空表 = 这一份没有层叠需求（z 全 0、无 opacity/transform），绘制走原序零回归。
+    pub line_z: Vec<i32>,
 }
 
 /// 把引擎排好的那份**逻辑横排**长条整体投影成竖排的物理坐标。
@@ -455,6 +459,7 @@ impl Layout {
             owner,
             stacked: false,
             root_full_bleed: false,
+            line_z: Vec::new(),
         };
         // 叠放性最后才折：那条判据问的是「沿推进轴的底边」，而那两个入口是 `Layout` 的
         // 方法（竖排的起点要按长条总长翻面，那份信息在 `self` 上）。
@@ -577,6 +582,17 @@ impl Layout {
     /// 真排版为假就说明排版层放出了互相压住的行，那是新的几何形态在要求索引换算法。
     pub fn stacked(&self) -> bool {
         self.stacked
+    }
+
+    /// 给定可见带 `[from, to)` 的行下标，返回**绘制顺序**的行下标：按 `(z, 源序)` 稳定
+    /// 排序，让正 z 的行后画（盖住负 z / 0 的行）。`line_z` 全 0 时结果与源序逐字相同。
+    /// 命中与分页不读这一份，仍用源序。
+    pub fn paint_order(&self, from: usize, to: usize) -> Vec<usize> {
+        let mut order: Vec<usize> = (from..to).collect();
+        if self.line_z.iter().any(|&z| z != 0) {
+            order.sort_by_key(|&ix| (self.line_z.get(ix).copied().unwrap_or(0), ix));
+        }
+        order
     }
 
     /// 命中测试：推进轴上的位置 → 行盒下标（横排下它就是纵坐标）。选择与批注回显从这里起步。

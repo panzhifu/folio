@@ -4,14 +4,15 @@
 //! 入口留在父模块，这里的东西只对整个 `css` 内部开放，不属于对外公开面。
 
 use super::{
-    BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundTile, BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color, ComputedStyle,
-    Direction, Display, Hyphens, InlineVAlign, KNOWN_UNIMPLEMENTED, ObjectFit, Positioning,
-    RubyAlign, RubyPosition, TextAlign, TextJustify, WordBreak,
+    AlignItems, BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
+    BackgroundSize, BackgroundTile, BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color,
+    ComputedStyle, Direction, Display, FlexDirection, FlexWrap, Hyphens, InlineVAlign,
+    JustifyContent, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Positioning, RubyAlign, RubyPosition,
+    TextAlign, TextJustify, Transform, WordBreak,
 };
 use crate::css::Declaration;
 use crate::css::value::{
-    BorderElement, border_target, border_width_px, box_side_px, box_sides, four_of,
+    BorderElement, border_target, border_width_px, box_side_px, box_sides, edge_length, four_of,
     parse_background_image_layer, parse_background_position, parse_background_repeat,
     parse_background_size, parse_baseline_shift, parse_bleed, parse_border_radius,
     parse_border_style, parse_break_when, parse_clear, parse_color, parse_count, parse_decoration,
@@ -211,6 +212,137 @@ fn apply_font_shorthand(
     style.font_family = first;
     style.font_families = list;
     true
+}
+
+/// `flex: <grow> <shrink> <basis>` 简写。收 1–3 个 token：
+/// - 单个长度（含 `%`）当 basis，grow=1、shrink=1（`flex: 34%` 的常见写法）；
+/// - 单个数字当 grow，shrink=1、basis=auto（`flex: 1`）；
+/// - `auto` 当 basis=grow=shrink 的初值组合（`flex: auto` → 1 1 auto）；
+/// - 三值形态 `grow shrink basis`，basis 可为长度或 `auto`。
+///
+/// 任一段解析失败整条作废。
+fn apply_flex_shorthand(style: &mut ComputedStyle, own: f32, root_px: f32, value: &str) -> bool {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() || parts.len() > 3 {
+        return false;
+    }
+    let num = |p: &str| -> Option<f32> {
+        let n = p.parse::<f32>().ok()?;
+        (n >= 0.0).then_some(n)
+    };
+    let basis = |p: &str| -> Option<Option<Length>> {
+        if p.eq_ignore_ascii_case("auto") {
+            Some(None)
+        } else {
+            edge_length(p, own, root_px, false).map(Some)
+        }
+    };
+    // 单值：纯数字是 grow（`flex: 2`），带单位/`auto` 才是 basis（`flex: 34%`）。
+    // 必须先判数字 —— `edge_length` 会把裸数字当 px 收下，反过来会把 `flex: 2` 误读成 basis。
+    if parts.len() == 1 {
+        if let Some(g) = num(parts[0]) {
+            style.flex_grow = g;
+            style.flex_shrink = 1.0;
+            style.flex_basis = None;
+            return true;
+        }
+        if let Some(b) = basis(parts[0]) {
+            style.flex_grow = 1.0;
+            style.flex_shrink = 1.0;
+            style.flex_basis = b;
+            return true;
+        }
+        return false;
+    }
+    // 两/三值：第一段 grow，第二段 shrink，第三段 basis（缺省 auto）。
+    let grow = match num(parts[0]) {
+        Some(v) => v,
+        None => return false,
+    };
+    let shrink = match num(parts[1]) {
+        Some(v) => v,
+        None => return false,
+    };
+    let basis_val = if parts.len() == 3 {
+        match basis(parts[2]) {
+            Some(v) => v,
+            None => return false,
+        }
+    } else {
+        None
+    };
+    style.flex_grow = grow;
+    style.flex_shrink = shrink;
+    style.flex_basis = basis_val;
+    true
+}
+
+/// `transform`：只收会建立层叠上下文、绘制侧能兑现的 2D 基本型。
+/// `none` 清掉变换；`translate(x, y)` 与 `scale(s, [sy])` 各折一份。
+/// 其余（rotate / matrix / 3D）整条判不认识，如实计入 ignored。
+fn apply_transform(style: &mut ComputedStyle, own: f32, root_px: f32, value: &str) -> bool {
+    let v = value.trim();
+    if v.eq_ignore_ascii_case("none") {
+        style.transform = None;
+        return true;
+    }
+    let lower = v.to_ascii_lowercase();
+    // CSS 允许逗号或空白分隔函数参数（`translate(2px, 3px)` / `translate(2px 3px)`），
+    // 逗号统一成空白再切，两种写法都收。
+    let args = |inner: &str| -> Vec<String> {
+        inner
+            .replace(',', " ")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+    if let Some(inner) = lower
+        .strip_prefix("translate(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let parts = args(inner);
+        if parts.is_empty() || parts.len() > 2 {
+            return false;
+        }
+        let x = match edge_length(&parts[0], own, root_px, false) {
+            Some(v) => v,
+            None => return false,
+        };
+        let y = if parts.len() == 2 {
+            match edge_length(&parts[1], own, root_px, false) {
+                Some(v) => v,
+                None => return false,
+            }
+        } else {
+            Length::ZERO
+        };
+        style.transform = Some(Transform::Translate(x, y));
+        return true;
+    }
+    if let Some(inner) = lower
+        .strip_prefix("scale(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let parts = args(inner);
+        if parts.is_empty() || parts.len() > 2 {
+            return false;
+        }
+        let sx = match parts[0].parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let sy = if parts.len() == 2 {
+            match parts[1].parse::<f32>() {
+                Ok(v) => v,
+                Err(_) => return false,
+            }
+        } else {
+            sx
+        };
+        style.transform = Some(Transform::Scale(sx, sy));
+        return true;
+    }
+    false
 }
 
 /// 一条背景长手属性（`background-size` 那一族）的**图层列表**：按顶层逗号切，
@@ -1076,16 +1208,177 @@ pub(super) fn apply(
                 style.display = Display::None;
                 true
             }
-            // `display: flex` / `inline-flex` / `grid` 这些**容器**档：排版层没有它们，
-            // 但「按块摆」正是书里写它们想要的那件事（居中的一块、图与字上下摞）。
-            // 认成块而不是丢掉，屏上比整条作废更接近作者的意思；真要不要做布局，
-            // 是另一次开工。
-            "flex" | "inline-flex" | "grid" | "inline-grid" | "contents" => {
+            // `display: flex` / `inline-flex` 2026-11-23 接上：走 `layout::flex` 那套
+            // 主轴 + 交叉轴布局。inline-flex 一期没有行内块，落点仍按块排，但子项的
+            // 排列交给 Flex 引擎。
+            "flex" => {
+                style.display = Display::Flex;
+                true
+            }
+            "inline-flex" => {
+                style.display = Display::InlineFlex;
+                true
+            }
+            // `grid` 这些容器档仍认成块：排版层没有 Grid，但「按块摆」比整条作废更接近
+            // 作者的意思（居中的一块、图与字上下摞）。
+            "grid" | "inline-grid" | "contents" => {
                 style.display = Display::Block;
                 true
             }
             _ => false,
         },
+        // ---- Flex 容器属性。CSS 规定这些不继承，值写错整条作废 ----
+        "flex-direction" => match value.to_ascii_lowercase().as_str() {
+            "row" => {
+                style.flex_direction = FlexDirection::Row;
+                true
+            }
+            "column" => {
+                style.flex_direction = FlexDirection::Column;
+                true
+            }
+            _ => false,
+        },
+        "flex-wrap" => match value.to_ascii_lowercase().as_str() {
+            "nowrap" => {
+                style.flex_wrap = FlexWrap::NoWrap;
+                true
+            }
+            "wrap" => {
+                style.flex_wrap = FlexWrap::Wrap;
+                true
+            }
+            _ => false,
+        },
+        "align-items" => match value.to_ascii_lowercase().as_str() {
+            "stretch" => {
+                style.align_items = AlignItems::Stretch;
+                true
+            }
+            "flex-start" | "start" => {
+                style.align_items = AlignItems::Start;
+                true
+            }
+            "flex-end" | "end" => {
+                style.align_items = AlignItems::End;
+                true
+            }
+            "center" => {
+                style.align_items = AlignItems::Center;
+                true
+            }
+            _ => false,
+        },
+        "justify-content" => match value.to_ascii_lowercase().as_str() {
+            "flex-start" | "start" => {
+                style.justify_content = JustifyContent::Start;
+                true
+            }
+            "flex-end" | "end" => {
+                style.justify_content = JustifyContent::End;
+                true
+            }
+            "center" => {
+                style.justify_content = JustifyContent::Center;
+                true
+            }
+            "space-between" => {
+                style.justify_content = JustifyContent::SpaceBetween;
+                true
+            }
+            _ => false,
+        },
+        // `gap: <row> [<column>]`：一列值时横纵相同，两列值时分别给 row/column。
+        // `normal` 是初值，落到 `None`（不插缝）。
+        "gap" => {
+            let parts: Vec<&str> = value.split_whitespace().collect();
+            if parts.is_empty() || parts.len() > 2 {
+                return false;
+            }
+            let parse_one = |p: &str| -> Option<Option<Length>> {
+                if p.eq_ignore_ascii_case("normal") {
+                    Some(None)
+                } else {
+                    edge_length(p, own, root_px, false).map(Some)
+                }
+            };
+            let row = match parse_one(parts[0]) {
+                Some(v) => v,
+                None => return false,
+            };
+            let col = if parts.len() == 2 {
+                match parse_one(parts[1]) {
+                    Some(v) => v,
+                    None => return false,
+                }
+            } else {
+                row
+            };
+            style.row_gap = row;
+            style.column_gap = col;
+            true
+        }
+        "row-gap" => match edge_length(value, own, root_px, false) {
+            Some(v) => {
+                style.row_gap = Some(v);
+                true
+            }
+            None => false,
+        },
+        "column-gap" => match edge_length(value, own, root_px, false) {
+            Some(v) => {
+                style.column_gap = Some(v);
+                true
+            }
+            None => false,
+        },
+        // ---- Flex 子项属性 ----
+        "flex-grow" => match value.trim().parse::<f32>() {
+            Ok(v) if v >= 0.0 => {
+                style.flex_grow = v;
+                true
+            }
+            _ => false,
+        },
+        "flex-shrink" => match value.trim().parse::<f32>() {
+            Ok(v) if v >= 0.0 => {
+                style.flex_shrink = v;
+                true
+            }
+            _ => false,
+        },
+        "flex-basis" if value.eq_ignore_ascii_case("auto") => {
+            style.flex_basis = None;
+            true
+        }
+        "flex-basis" => match set_length(value, own, root_px, &mut style.flex_basis) {
+            true => true,
+            false => false,
+        },
+        // `flex: <grow> <shrink> <basis>` 简写。只收 1–3 个 token 的常见形态：
+        // 单值若是长度当 basis，若是数字当 grow（shrink=1、basis=auto）。
+        "flex" => apply_flex_shorthand(style, own, root_px, value),
+        "z-index" => match value.trim() {
+            "auto" => {
+                style.z_index = 0;
+                true
+            }
+            v => match v.parse::<i32>() {
+                Ok(n) => {
+                    style.z_index = n;
+                    true
+                }
+                Err(_) => false,
+            },
+        },
+        "opacity" => match value.trim().parse::<f32>() {
+            Ok(v) if (0.0..=1.0).contains(&v) => {
+                style.opacity = v;
+                true
+            }
+            _ => false,
+        },
+        "transform" => apply_transform(style, own, root_px, value),
         // `color: currentColor` 就是 `inherit`（自引用按继承折，CSS 明文）。
         "color" if value.eq_ignore_ascii_case("currentcolor") => {
             style.color = parent.color;
