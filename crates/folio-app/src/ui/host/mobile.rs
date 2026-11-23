@@ -25,13 +25,12 @@ impl Host for MobileHost {
     }
 
     fn overlay_controls(&self) -> bool {
-        // Android 上 gpui-kit 的浮层点不住（见 `shelf_view` 长按菜单那条路与
-        // `plans/facts.md`），而设置项点不动等于设置没有。
+        // Android 上 gpui-kit 的浮层点不住（`shelf_view` 长按菜单那条路），而设置项点不动等于设置没有。
         false
     }
 
     fn back_at_root(&self) -> BackAtRoot {
-        // 那一侧的返回键与边缘滑动都被 fork 翻成 escape（见 `plans/facts.md`），走到栈底
+        // 那一侧的返回键与边缘滑动都被 fork 翻成 escape，走到栈底
         // 就是「没有可退的了」。这时候**丢回后台**而不是退出：退出那条路会让进程在自己还
         // 挂着前台顶窗时消失，系统拿不到任务快照，就没有过渡动画可播 —— 实测那就是一次
         // 闪退的样子（`Host::back_at_root` 里记着那四条量出来的日志）。要真退出，读者划掉

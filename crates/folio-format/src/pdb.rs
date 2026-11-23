@@ -179,7 +179,7 @@ fn markup_info(source: &str, stem: &str) -> super::novel::detect::BookInfo {
 /// 标记已经是引擎就绪的那一份，包装这一格只剩「不许动它」。
 ///
 /// 与 [`super::html`] 的 `chapter_source` 同一条立场：正文原样透传，坐标系的稳定性靠
-/// **不转换**（`plans/Locator.md`：锚点就建在源文本上）。
+/// **不转换**（锚点就建在源文本上）。
 fn keep_markup(source: &str) -> String {
     source.to_string()
 }

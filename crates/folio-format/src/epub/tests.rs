@@ -29,7 +29,7 @@ fn doc_of(path: &Path) -> crate::test_support::Doc {
 
 /// 可重排的那一半：绝大多数用例只关心 `FlowDoc`，而且是**正文已经取回来**的那种。
 ///
-/// `document::open` 现在只给索引（库里就存这个，见 `plans/text-out-of-db.md`），
+/// `document::open` 现在只给索引（库里就存这个），
 /// 而这一层要断言的是正文本身，所以按位置把每一章取回来。
 fn flow_of(path: &Path) -> FlowDoc {
     let doc = doc_of(path);
@@ -299,14 +299,13 @@ fn synth_epub(dir: &tempfile::TempDir, chapter_xhtml: &str) -> PathBuf {
 
 /// 章标题的回落：目录里没有这一章时，读章内第一个 h1/h2/h3 —— 两趟**给同一个答案**。
 ///
-/// 这里曾经钉的是一个差别：标题回落要读正文才拿得到，而「只读索引」那一趟不读正文
-/// （`plans/text-out-of-db.md`），所以索引只能给「第 N 节」，而全文给真标题。
+/// 这里曾经钉的是一个差别：标题回落要读正文才拿得到，而「只读索引」那一趟不读正文，
+/// 所以索引只能给「第 N 节」，而全文给真标题。
 /// 同一个字段两条路两个答案，是漂 —— 症状是「导入时书签里叫『第 3 节』，
 /// 打开之后叫『第三章 庭院』」。
 ///
 /// 现在两趟一致了，因为**索引那一趟本来就要读正文**：`chapters.char_len` 是
-/// 全局字符进度的分母，必须在导入时算准（`plans/导入管线.md` §八 第 3 条、
-/// 已决第 11 条）。正文既然已经在手上，标题回落就是白拿的，没有理由不用它。
+/// 全局字符进度的分母，必须在导入时算准。正文既然已经在手上，标题回落就是白拿的，没有理由不用它。
 ///
 /// 代价写明白：条目标题不再来自目录就能定，导入要多付一遍解压。
 #[test]
@@ -923,7 +922,7 @@ fn forced_parallel_indexing_matches_the_sequential_result() {
 /// 这条曾经挂着 `#[ignore]`：`image_bytes` 每次调用都 `Zip::open`（重读一遍中央
 /// 目录、重建几千个条目名的索引），一百次取图就是一百次开容器，跑出来
 /// `left: 100, right: 1`。它当时是一句**写好的承诺** —— 目标形状是把容器索引留成
-/// 一份共享的不可变结果（`plans/导入管线.md` §十 的 `Container`）。
+/// 一份共享的不可变结果（`Container`）。
 ///
 /// 那个形状落地之后（`format::container`，`BookDocument` 持有它并按需懒开），
 /// 这行属性就去掉了：它从承诺变成了守门员。谁把 `BookDocument::image_bytes`
@@ -1903,7 +1902,7 @@ const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2"
 ///
 /// 键（`ImageRes::href`）来自正文那串 `src`，去处（`source`）由 manifest 的降级链决定 ——
 /// 夹具把两侧分开给，才测得出「换了去处而键没换」这一件真正要钉的事：正文一个字都不许改
-/// （锚点坐标建在源文本上，`plans/Locator.md`）。
+/// （锚点坐标建在源文本上）。
 fn epub_chart(dir: &tempfile::TempDir, items: &str, entries: &[(&str, &[u8])]) -> PathBuf {
     let path = dir.path().join("chart.epub");
     let opf = format!(

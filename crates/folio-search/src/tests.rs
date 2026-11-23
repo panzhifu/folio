@@ -58,7 +58,7 @@ fn between(text: &str, chars: Range<usize>) -> String {
 /// 命中报的偏移是**可见文本**的字符数，不是源文本的字节数。
 ///
 /// 这一条是整个搜索层的地基：`Locator.offset`、`chapters.char_len`、锚点的 `start`
-/// 全在这一把尺上（见 `plans/Locator.md`）。它错了，症状是「搜『猫』、跳过去屏上是
+/// 全在这一把尺上。它错了，症状是「搜『猫』、跳过去屏上是
 /// 『狗』」—— 而列表里那句上下文照样读得通，因为它是从同一章折出来的。
 #[test]
 fn a_hit_lands_on_the_visible_char_axis() {

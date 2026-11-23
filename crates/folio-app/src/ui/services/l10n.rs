@@ -58,7 +58,7 @@ pub fn tplural(cx: &App, stem: &str, count: usize) -> String {
 /// 数由 `folio_core::duration_parts` 拆，这里只决定说哪一句：整点不提分钟、
 /// 不足一小时不提小时、不足一分钟才说秒。三条规则各语言自己写在 TOML 里
 /// （`stats.duration_*` 那四条），所以这一段一次都没拼「小时」两个字
-/// （`plans/基础设施.md` §五.4）。住在这一层而不是统计屏内部，是因为「笔记」那一屏
+/// 住在这一层而不是统计屏内部，是因为「笔记」那一屏
 /// 的卡片也要说同一句话 —— 两处各挑一次句式，改日就会说出两种口径。
 pub fn duration(cx: &App, secs: i64) -> SharedString {
     let parts = duration_parts(secs);

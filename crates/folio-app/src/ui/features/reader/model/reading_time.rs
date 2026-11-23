@@ -104,8 +104,7 @@ impl ReaderSession {
         let (Some(store), Some(book_id)) = (self.store.clone(), self.book_id) else {
             return;
         };
-        // `chars` 给 0：它的口径还没定（`plans/Locator.md` 的开放问题：回翻怎么重复计、
-        // 跨章怎么去重），而库里一个来源不明的数比一列 0 难查得多。界面那屏也相应地
+        // `chars` 给 0：它的口径还没定（开放问题：回翻怎么重复计、跨章怎么去重），而库里一个来源不明的数比一列 0 难查得多。界面那屏也相应地
         // 不显示字数。
         if let Err(err) = store.record_session(book_id, start, ended, 0) {
             tracing::warn!(

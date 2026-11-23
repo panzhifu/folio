@@ -1034,7 +1034,7 @@ impl CompactSettings {
                     );
                 }
                 // 其余（浅深、主题、界面语言）仍是就地浮层：与桌面同一条路，
-                // 而「浮层在 Android 上点得住」这条已经跟着行列表验过（`plans/facts.md`）。
+                // 而「浮层在 Android 上点得住」这条已经跟着行列表验过。
                 let (options, current, scrollable, set) =
                     (options.clone(), current, *scrollable, set.clone());
                 control_cell(

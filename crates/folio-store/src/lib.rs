@@ -57,6 +57,7 @@ pub mod assets;
 mod bookmarks;
 mod books;
 mod collections;
+mod cover_backfill;
 mod content;
 mod import_log;
 pub mod notes;
@@ -80,7 +81,8 @@ pub use folio_model::types;
 mod tests;
 
 pub use books::book_root;
-pub use books::{CoverBackfillRow, SourceUnavailable, StaleReason, UnavailableSource};
+pub use books::{SourceUnavailable, StaleReason, UnavailableSource};
+pub use cover_backfill::CoverBackfillRow;
 pub use folio_model::revision::{BookRevision, BookSource, RevisionFence};
 pub use import_log::{IMPORT_LOG_KEEP, ImportLanding, ImportLogEntry};
 pub use revisions::{
@@ -246,6 +248,28 @@ impl Store {
             "INSERT INTO prefs (key, value_json) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
             params![key, serde_json::to_string(&value)?],
+        )?;
+        Ok(())
+    }
+
+    /// 原样读取一段文本型标记（封面补齐的失败账本用它存一小段 JSON）；缺键返回 None。
+    pub fn pref_text(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let raw: Option<String> = conn
+            .query_row("SELECT value_json FROM prefs WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(raw)
+    }
+
+    /// 原样写一段文本型标记（有则覆盖）。值按 JSON 文本保存，与 [`Self::pref_number`] 共表。
+    pub fn set_pref_text(&self, key: &str, text: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute(
+            "INSERT INTO prefs (key, value_json) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+            params![key, text],
         )?;
         Ok(())
     }

@@ -2701,7 +2701,7 @@ fn justify_plan(
     chars: u32,
     spaces: u32,
 ) -> Option<Justify> {
-    // RTL 的余量摊开方向与空隙计数都反，一期不做（见 `plans/facts.md` 的已知边界）。
+    // RTL 的余量摊开方向与空隙计数都反，一期不做（已知边界）。
     if hard_end || style.direction.is_rtl() || style.text_align != TextAlign::Justify {
         return None;
     }

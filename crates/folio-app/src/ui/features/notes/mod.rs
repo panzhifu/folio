@@ -6,8 +6,9 @@
 //! 点开一张卡把这一本的逐条笔记抬成一块底部弹层。布局决定与统计那一屏同一套纪律：
 //!
 //! - **取数只在 [`NotesView::refresh`] 里**（切进这一屏、关掉一本书、本屏删改之后，
-//!   由外壳或自己叫），`render` 一律不碰库。封面也在这里解好字节存进 [`BookGroup`]：
-//!   逐帧解图是把「画一屏」变成「做一轮 IO」，而渲染帧不该干 IO。
+//!   由外壳或自己叫），`render` 一律不碰库。整趟取数（含逐本封面文件的读）走后台线程，
+//!   回来才投影、解码、换上新清单：逐帧读盘是把「画一屏」变成「做一轮 IO」，而渲染帧
+//!   不该干 IO；界面线程上只做内存里那点解码。
 //! - **卡片按最近动静倒序**：跨书清单不排序就是一锅按时间的流水，而读者认的是「哪本书」。
 //! - **搜索框找的是书**：词对上书名，或对上这一本里任何一条引文与笔记，那一本就留在
 //!   列表上。点进去看的仍是这一本的**全部**笔记 —— 搜完再进去，读者要的是那一句的上下文，
@@ -33,7 +34,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use folio_core::store::notes::{self, BookGroup, MarkEntry, counts, matches_query};
+use folio_core::store::notes::{BookGroup, MarkEntry, counts, matches_query};
 use folio_core::{AnnotationExportFormat, DocMeta, Format, annotations_export};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -51,7 +52,6 @@ use gpui_kit::{
 use crate::ui::components::{
     BottomSheet, BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, empty_state,
 };
-use crate::ui::foundation::images::cover_image;
 use crate::ui::foundation::navigation::{self, SizeClass};
 use crate::ui::host;
 use crate::ui::services::app_store;
@@ -97,6 +97,9 @@ pub struct NotesView {
     /// 字节 → 可画的图只在 [`Self::refresh`] 里解一次，渲染帧不干解码。
     covers: HashMap<i64, Arc<Image>>,
     store_missing: bool,
+    /// 取数那一趟的序号。连着叫两次（切页与删改撞在一起）时只认最后那趟的结果，
+    /// 先回来的旧快照直接丢掉 —— 否则删掉一条笔记，屏上又会被上一趟的快照补回来。
+    load_seq: u64,
     undo: Option<PendingUndo>,
     undo_seq: u64,
     /// 顶部那颗搜索框。句柄必须跨帧持有：`InputState` 就是框的内容与焦点的载体，
@@ -144,6 +147,7 @@ impl NotesView {
             data: None,
             covers: HashMap::new(),
             store_missing: false,
+            load_seq: 0,
             undo: None,
             undo_seq: 0,
             search,
@@ -153,38 +157,6 @@ impl NotesView {
             _search_watch,
             _sheet_watch,
         }
-    }
-
-    /// 重取一次快照。切进这一屏（外壳叫）、关掉一本书（外壳叫）、本屏删改之后
-    /// （自己叫）都走这里。
-    pub fn refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(store) = app_store::handle(cx) else {
-            self.store_missing = true;
-            self.data = None;
-            cx.notify();
-            return;
-        };
-        match notes::load_groups(&store) {
-            Ok(mut groups) => {
-                projection::apply(&store, &mut groups, cx);
-                self.store_missing = false;
-                self.covers = groups
-                    .iter()
-                    .filter_map(|group| {
-                        let bytes = group.cover.as_ref()?;
-                        let image = cover_image(bytes)?;
-                        Some((group.book_id, image))
-                    })
-                    .collect();
-                self.data = Some(groups);
-            }
-            Err(err) => {
-                tracing::warn!(error = %err, "笔记: 读批注与书签失败");
-                self.store_missing = true;
-                self.data = None;
-            }
-        }
-        cx.notify();
     }
 
     /// 点开一张卡：把这一本的逐条笔记抬成底部弹层。
@@ -991,3 +963,4 @@ fn meta_line(icon: IconName, text: SharedString, cx: &App) -> AnyElement {
 mod tests;
 
 mod projection;
+mod refresh;

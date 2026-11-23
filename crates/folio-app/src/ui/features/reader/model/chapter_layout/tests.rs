@@ -439,10 +439,9 @@ fn setting_the_same_preferences_relayouts_nothing(cx: &mut TestAppContext) {
 }
 
 /// 接线验收：**改一次读者偏好，重新解析的章数必须为 0**
-/// （`plans/阅读管线.md` §十二那条计数断言，也是 §十三第 2 步「接 LayoutKey + 章产物缓存」的验收）。
+/// （那条计数断言，也是 「接 LayoutKey + 章产物缓存」的验收）。
 ///
-/// 用计数而不是计时：计时在这台机器上被调度噪声牵着走（`plans/layout-optimization.md` §5.3
-/// 实测 ±20%），而「解析了几次」是一个确定的整数。这条**能红**：把 `typeset_job` 里
+/// 用计数而不是计时：计时在这台机器上被调度噪声牵着走（实测 ±20%），而「解析了几次」是一个确定的整数。这条**能红**：把 `typeset_job` 里
 /// 「产物的内容哈希与这趟取到的正文对得上就复用」那一支退回成无条件 `ChapterArtifacts::build`，
 /// 最后那条断言立刻翻红。
 #[gpui_kit::test]
@@ -508,7 +507,7 @@ fn a_preference_change_reparses_nothing(cx: &mut TestAppContext) {
     );
 }
 
-/// 接线验收（`plans/阅读管线.md` §十三第 2 步）：排版键**一处构造**，
+/// 接线验收：排版键**一处构造**，
 /// 同一代内问两次得到同一把键，而每类输入只动它该动的那几格。
 ///
 /// 这条钉的是两种相反的毛病各一半：
@@ -659,7 +658,7 @@ fn the_font_revision_of_a_book_that_registered_faces_moves_the_key() {
 
 // ---- 每项偏好有没有消费者 ----
 
-/// 一项读者偏好的**归属**。这张分类表是 `plans/基础设施.md` §2.4 那条规矩的落地形式：
+/// 一项读者偏好的**归属**。这张分类表是那条规矩的落地形式：
 /// 「只有字段上的标注能一眼看出哪个是设计、哪个是漏」。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PrefClass {
@@ -835,7 +834,7 @@ fn every_preference_is_classified() {
 /// `every_reader_preference_changes_the_key` 的另一半。
 ///
 /// 那一条只钉「会不会重排」，钉不住「重排完还是不是原来那份」。差别是实测出来的：
-/// `paragraph_gap_em` 曾经键换了、整章重排、行盒纹丝不动（`plans/基础设施.md` §2.4）。
+/// `paragraph_gap_em` 曾经键换了、整章重排、行盒纹丝不动。
 /// 断言取**整章高 + 每一行的 (x, y, width)**，不是行数：只看行数会在「改了字号却恰好
 /// 没多出一行」时假绿。
 ///
@@ -1272,8 +1271,7 @@ fn scrolling_never_rebuilds_the_decor_table(cx: &mut TestAppContext) {
 /// 折它要走一遍整章的行、每行逐片段问一次文本坐标，所以两头都要钉：没划过字、没开
 /// 选区、没恢复落点的那本书一分钱不许付（前半）；问过之后两条查询共用同一张表，
 /// 不是每帧重折（后半）。接线之前这里是另一个形状 —— **每条批注 × 每帧 × 每个进链的
-/// 章**各把整章的行走一遍（`plans/阅读管线.md` §十一 第 9 条，实测一章 25 条批注
-/// 每帧 +1.7–2.2 ms）。
+/// 章**各把整章的行走一遍（实测一章 25 条批注，每帧 +1.7–2.2 ms）。
 #[gpui_kit::test]
 fn the_line_index_waits_for_its_first_query(cx: &mut TestAppContext) {
     use std::rc::Rc;
@@ -1529,7 +1527,6 @@ fn the_banded_query_agrees_with_filtering_afterwards(cx: &mut TestAppContext) {
 /// 不是一句永远成立的「≤」）；同一条区间夹上可见带只许走带内那几行；带内一条八个字的
 /// 短批注还得被**字符**那一头再夹一次（只靠可见带不算窄化完成）；而一条根本不在这一屏上
 /// 的批注一行都不许走 —— 那正是「一章 25 条、屏上 3 条」这一帧的形状
-/// （`plans/阅读管线.md` §十一 第 9 条）。
 #[gpui_kit::test]
 fn a_banded_query_walks_only_the_visible_lines(cx: &mut TestAppContext) {
     use folio_core::infra::metrics::{Metric, take_local};

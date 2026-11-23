@@ -1048,7 +1048,7 @@ fn a_pdf_book_searches_and_a_hit_jumps_to_its_page(cx: &mut TestAppContext) {
     });
     assert_eq!(texts.len(), pages, "整本那一列的长度就是页数");
     // **别拿 `contains` 问这一列**：定版式的字序里有按几何补出来的空格（`T`→`I` 那
-    // 3.29 pt 被判成词缝那一类，整页对 poppler 的账在 `doc/优化计划.md` CT-11），
+    // 3.29 pt 被判成词缝那一类，整页对 poppler 的账另按行内 em 重做），
     // 所以「那一页写着 COPYRIGHT」不等于「字符串里连着写」。这里问的是**真那一路匹配器**：
     // 它对空白不敏感（`search::each_hit`），而跳过去要的正是它报出来的那个偏移。
     let query = folio_core::search::Query::parse("COPYRIGHT").expect("有词");

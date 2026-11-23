@@ -543,7 +543,7 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
     }
 
     // 常驻资源（导入作业池 + 监听 + 传书）收拢到一个进程级句柄里；书库句柄也交过去，
-    // 好让关停时「作业池先于库连接销毁」（`plans/基础设施.md` §1.3）。
+    // 好让关停时「作业池先于库连接销毁」。
     crate::ui::services::resident::install(cx);
     // 网盘凭据的轮换落盘（后台线程续期 → 通道 → 主线程写回 config）。
     crate::ui::services::cloud_auth::install(cx);

@@ -155,8 +155,7 @@ ALTER TABLE books ADD COLUMN fixed_json TEXT NOT NULL DEFAULT '';
     //
     // 两件事：
     // 1. 摘掉 v2 建的 trigram 索引与三个触发器。实测它是库里最大的一项：一本
-    //    二十万字的中文书，正文 0.44 MB，索引 1.3 MB（搜索推后，见
-    //    `plans/text-out-of-db.md`）；搜索真要做时，索引是**可重建的派生数据**。
+    //    二十万字的中文书，正文 0.44 MB，索引 1.3 MB（搜索推后）；搜索真要做时，索引是**可重建的派生数据**。
     // 2. 给章表加位置列。老库的行要按 `books.format` + `spine_href` + `idx` 算，
     //    SQL 里做不干净（JSON 转义），所以回填在 Rust 里，见 [`super::Store::finish_v8`]。
     r#"
@@ -198,17 +197,16 @@ CREATE TABLE chapter_read (
 );
 "#,
     // v11：封面缩略图的**规格版本**。`books.cover` 只是字节，没有「按什么规格生成的」，
-    // 换了尺寸 / 编码之后老封面认不出来，只能一直用下去（`plans/基础设施.md` §5.1）。
+    // 换了尺寸 / 编码之后老封面认不出来，只能一直用下去。
     // 这一列记下生成它的 `format::COVER_SPEC_VERSION`；缺省的 0 = 迁移之前生成的封面，
     // 一律当旧规格，开书时由 `stale_reason` 认出来、走重扫重生成。
     r#"
 ALTER TABLE books ADD COLUMN cover_spec INTEGER NOT NULL DEFAULT 0;
 "#,
-    // v12：**书的身份从「它在哪儿」换成「它是什么」**（`plans/导入管线.md` §六）。
+    // v12：**书的身份从「它在哪儿」换成「它是什么」**。
     //
     // `content_hash` 可空而不是 `NOT NULL DEFAULT ''`：这一列是**懒补**的。迁移本身不许
-    // 读全库——几百本的一次性顺序读与哈希不该压在开库那一下（`plans/基础设施.md` §1.2 第 1
-    // 条），所以「还没算过」必须是一个能表达的状态，而空串会和它混起来。NULL 的行由
+    // 读全库——几百本的一次性顺序读与哈希不该压在开库那一下，所以「还没算过」必须是一个能表达的状态，而空串会和它混起来。NULL 的行由
     // [`Store::rows_missing_hash`] 数出来，逐本填上（导入命中时、`reindex` 时，以及
     // `Cleanup` 档那个补齐副本改名的后台作业）。
     //
@@ -226,7 +224,7 @@ ALTER TABLE books ADD COLUMN hash_algo TEXT NOT NULL DEFAULT '';
 CREATE INDEX idx_books_content_hash ON books(content_hash) WHERE content_hash IS NOT NULL;
 "#,
     // v13：**摘掉 `annotations.chapter_id`** —— 它是「重扫一次书就清空批注」那条
-    // 丢数据路的根，见 `plans/导入管线.md` §九 那条门（「历史批注一条都不漂」）。
+    // 丢数据路的根：那条门要求「历史批注一条都不漂」。
     //
     // 这一列从 v1 起就带着 `REFERENCES chapters(id) ON DELETE CASCADE`，而
     // `save_flow_in` 落库的第一句是 `DELETE FROM chapters WHERE book_id = ?1` 再重插。
@@ -257,9 +255,9 @@ ALTER TABLE annotations DROP COLUMN chapter_id;
 CREATE INDEX idx_annotations_book ON annotations(book_id);
 "#,
     // v14：**请回 `chapters.char_len`** —— 它在 v9 被删掉，理由是「只写不读，
-    // 而出库之后连写都写不出真值」。两条现在都反过来（`plans/导入管线.md` §八 第 3 条）：
+    // 而出库之后连写都写不出真值」。两条现在都反过来：
     //
-    // - **有读者了**：它是「全局字符进度」的分母。`plans/Locator.md` 第二节把
+    // - **有读者了**：它是「全局字符进度」的分母。把
     //   「前面各章字数之和 + 章内偏移」定成可以相减的全局进度，而百分比 = 全局进度 ÷
     //   全书总字数 —— 那条式子不打开书、不排版就成立，所以书架能显示「读了 37%」，
     //   而且换一台屏宽不同的设备显示的是同一个数。
@@ -278,7 +276,7 @@ CREATE INDEX idx_annotations_book ON annotations(book_id);
 ALTER TABLE chapters ADD COLUMN char_len INTEGER;
 "#,
     // v15：**封面落盘**。封面按它自己的字节哈希写一份文件到 `<书库>/covers/`，
-    // 库里只留这两格描述（`plans/导入管线.md` §八 第 4 条）。
+    // 库里只留这两格描述。
     //
     // 为什么封面要单独落文件而不是继续塞 BLOB：`books.cover` 是 MB 级的字节，
     // 而书架每次列书目都要读它（`SHELF_COLUMNS` 里就有 `cover`）。落到文件之后
@@ -294,8 +292,7 @@ ALTER TABLE chapters ADD COLUMN char_len INTEGER;
     //
     // **不动 `books.cover` 与 `cover_spec`**：读的时候磁盘优先、BLOB 兜底，
     // 老库（v15 之前入库的行）与新写入失败的行都靠那条兜底。删列要等老行都被
-    // reindex 过 —— 那不可能是这个迁移的事（`plans/基础设施.md` §5.2：
-    // 删数据不是迁移该顺手做的）。
+    // reindex 过 —— 那不可能是这个迁移的事（删数据不是迁移该顺手做的）。
     r#"
 ALTER TABLE books ADD COLUMN cover_hash TEXT;
 ALTER TABLE books ADD COLUMN cover_mime TEXT;
@@ -327,8 +324,7 @@ ALTER TABLE books DROP COLUMN cover_spec;
     // 为什么 `href` 一列不够用了：EPUB3 的 `<item fallback="…">` 让作者把「这一版解不动的
     // 那一份」（逐页 SVG 与 `image/svg+xml` 的封面是主流那两个）和同一张图的位图版本挂在
     // 一起。这时**键与去处是两件事**：`href` 必须仍是正文 `<img src>` 解出来的那一条，
-    // 因为排版与绘制都拿它查表，而正文一个字都不许改（锚点坐标建在源文本上，
-    // `plans/Locator.md`）；要读的字节却在另一条目里。以前只有后一件事，于是这类书画不出来。
+    // 因为排版与绘制都拿它查表，而正文一个字都不许改（锚点坐标建在源文本上）；要读的字节却在另一条目里。以前只有后一件事，于是这类书画不出来。
     //
     // 空串读回时算「与 `href` 同一条」（`load_flow` 那一趟），所以 EPUB 以外的格式写空、
     // 这一版之前入库的老行也不必回填 —— 它们本来就没有降级路可谈。
@@ -340,7 +336,7 @@ ALTER TABLE images ADD COLUMN source TEXT NOT NULL DEFAULT '';
     // 和「箭头按钮按下去往哪走」—— 那是**手**的事，与正文往哪边流（CSS 的 `direction`，
     // 来自元素的 `dir`）是两件事，两格各存各的，不许从一个推另一个。
     //
-    // 为什么不在开书时现读 OPF：开书只读索引（`plans/text-out-of-db.md` 那条立场），
+    // 为什么不在开书时现读 OPF：开书只读索引（那条立场），
     // 而这一格是导入那一趟本来就把 OPF 读完之后顺手有的数，带过来比再开一次容器便宜。
     // SQLite 没有布尔列，0 / 1 存 INTEGER，与 `books` 其余那几格同一口径；默认 0 = 按左翻，
     // 也就是「这一版还没读过这本书的 spine」的旧行照旧能用。

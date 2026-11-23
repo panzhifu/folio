@@ -50,6 +50,7 @@ fn read_manifest(root: &Path) -> Result<Manifest> {
 pub fn check(root: &Path, base: Option<&str>) -> Result<()> {
     let manifest = read_manifest(root)?;
     check_documents(root, &manifest)?;
+    check_doc_paths(root)?;
     check_facts(root, &manifest)?;
     crate::locales::check(root)?;
     skills::check(root, &manifest.skills)?;
@@ -197,6 +198,58 @@ pub fn check_links(root: &Path, file: &str, text: &str) -> Result<()> {
         let parent = Path::new(file).parent().ok_or("链接文件没有父目录")?;
         if !root.join(parent).join(target).exists() {
             return Err(format!("FOLIO-GOV-001 {file} 失效链接：{target}").into());
+        }
+    }
+    Ok(())
+}
+
+fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_symlink() {
+            continue;
+        }
+        if path.is_dir() {
+            rust_files(&path, out)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn check_doc_paths(root: &Path) -> Result<()> {
+    let mut files = Vec::new();
+    for dir in ["crates", "tools"] {
+        rust_files(&root.join(dir), &mut files)?;
+    }
+    files.sort();
+    for path in files {
+        let rel = path
+            .strip_prefix(root)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(&path)?;
+        for (index, line) in text.lines().enumerate() {
+            for part in line.split('`').skip(1).step_by(2) {
+                if !part.ends_with(".md") {
+                    continue;
+                }
+                if !(part.starts_with("doc/") || part.starts_with("plans/")) {
+                    continue;
+                }
+                if !root.join(part).is_file() {
+                    return Err(format!(
+                        "FOLIO-GOV-005 {rel}:{} 注释指向不存在的文档：{part}",
+                        index + 1
+                    )
+                    .into());
+                }
+            }
         }
     }
     Ok(())
@@ -405,7 +458,9 @@ fn has_run_command(source: &str, prefix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::governance::{check_boundaries, check_links, has_run_command, repository_path};
+    use crate::governance::{
+        check_boundaries, check_doc_paths, check_links, has_run_command, repository_path,
+    };
 
     #[test]
     fn paths_and_entry_links_reject_escapes_and_missing_targets() {
@@ -417,6 +472,22 @@ mod tests {
         std::fs::write(root.path().join("exists.md"), "ok").unwrap();
         assert!(check_links(root.path(), "AGENTS.md", "[ok](exists.md)").is_ok());
         assert!(check_links(root.path(), "AGENTS.md", "[bad](missing.md)").is_err());
+    }
+
+    #[test]
+    fn rust_comments_must_point_at_documents_that_exist() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("crates/demo/src")).unwrap();
+        std::fs::create_dir_all(root.path().join("doc")).unwrap();
+        std::fs::write(root.path().join("doc/实存.md"), "ok").unwrap();
+        let source = root.path().join("crates/demo/src/lib.rs");
+        let tick = '\u{60}';
+        std::fs::write(&source, format!("//! 见 {tick}doc/实存.md{tick}。\n")).unwrap();
+        check_doc_paths(root.path()).unwrap();
+        std::fs::write(&source, format!("//! 见 {tick}doc/已删.md{tick} 那一节。\n")).unwrap();
+        let error = check_doc_paths(root.path()).unwrap_err().to_string();
+        assert!(error.contains("FOLIO-GOV-005"), "{error}");
+        assert!(error.contains("doc/已删.md"), "{error}");
     }
 
     #[test]

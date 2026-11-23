@@ -2679,7 +2679,7 @@ mod tests {
         // 不再凭空多出 `TI TLE` 那个假空格 —— 第 5 格 `E` 就是这个词的末字。
         // poppler 那一侧也没有这个空格（它 `pdftotext -raw` 交的是 `TITLE`）。
         // 这条门校的是**盒的坐标与行号**；整页词数对账仍按行内 em 重做，记在
-        // `doc/优化计划.md` 的 CT-11。搜索那一侧已经不认空白（`search::each_hit`）。
+        // 整页词数那条账上。搜索那一侧已经不认空白（`search::each_hit`）。
         let title_end = text.chars[4];
         assert_eq!(title_end.ch, 'E');
         assert!(

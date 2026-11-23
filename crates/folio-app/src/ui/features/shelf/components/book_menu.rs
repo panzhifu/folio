@@ -22,8 +22,7 @@
 //!
 //! 两端共用这一份。框架里 `ContextMenuExt` 是这么设计的：手指没有右键，长按走的
 //! 就是右键那条路；而长按一旦被菜单认领，这一次触摸就不会再派发成 tap，不会出现
-//! 「长按想删书，顺手把书打开了」。浮层在 Android 上点得住（`plans/facts.md`，
-//! 2026-10-11 读者更正过旧的记录）。
+//! 「长按想删书，顺手把书打开了」。浮层在 Android 上点得住（2026-10-11 读者更正过旧的记录）。
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};

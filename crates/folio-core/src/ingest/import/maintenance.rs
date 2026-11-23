@@ -6,6 +6,8 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use serde::{Deserialize, Serialize};
+
 use crate::content::format::ParseBudget;
 
 use crate::infra::paths;
@@ -48,6 +50,20 @@ pub fn backfill_copies(store: &Store, _book_dir: &Path, ctx: &StageCtx) -> Backf
 pub const COVER_BACKFILL_VERSION: i64 = 1;
 pub(super) const COVER_BACKFILL_KEY: &str = "cover_backfill";
 
+/// 一次翻多少行。分页是为了让取消点之间的库锁持有时间有界，也让「扫到一半退出」
+/// 下次能从断点接着走；内存不是这里的约束。
+pub(super) const COVER_BACKFILL_PAGE: usize = 32;
+/// 每趟最多重试几条失败记录：一本坏书不该把 `Cleanup` 档一直占着。
+pub(super) const COVER_BACKFILL_RETRY_PAGE: usize = 8;
+/// 第 n 次失败等多久再试（秒）；超过档位就按最后一档半小时。
+pub(super) const COVER_BACKFILL_BACKOFF_SECS: [i64; 4] = [30, 120, 600, 1_800];
+/// 账本上限；满了先丢最早该重试的那条。宁可漏一次重试，也不让 `prefs` 里的标记无界长。
+pub(super) const COVER_BACKFILL_LEDGER_CAP: usize = 512;
+/// 扫到哪本书的断点：书号严格大于它的行还没看。
+pub(super) const COVER_BACKFILL_CURSOR_KEY: &str = "cover_backfill.cursor";
+/// 没补成的那几本及其退避时刻，存成一小段 JSON。
+pub(super) const COVER_BACKFILL_LEDGER_KEY: &str = "cover_backfill.retry";
+
 /// 封面补齐一趟的账。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CoverBackfillReport {
@@ -59,6 +75,10 @@ pub struct CoverBackfillReport {
     pub skipped: u64,
     /// 源文件在、但解析 / 写盘没成的行。
     pub failed: u64,
+    /// 从失败账本里到点重试的行数（无论这次成没成）。
+    pub retried: u64,
+    /// 这趟过后账本里还压着几条等下次重试。
+    pub pending: u64,
 }
 
 /// **把丢掉的封面补回来**：v15/v16 那次升级把 `books.cover` 这个 BLOB 删了，却没有
@@ -66,65 +86,266 @@ pub struct CoverBackfillReport {
 /// 重扫把 `cover_hash` 写成 NULL 的行，症状都是「架面上那张图不见了」。
 ///
 /// 封面字节不可再生于库（v16 起库里只有两格描述），唯一来源是那份书文件，所以这一趟
-/// 必须回容器读一次。它跑在 `Cleanup` 档、按 `prefs` 里的记号**整机只跑一次**，不是
+/// 必须回容器读一次。它跑在 `Cleanup` 档、按 `prefs` 里的记号**整趟只扫一次**，不是
 /// 每次开机都把全库解一遍 —— 与 `backfill_copies` 同一条懒补口径
-/// （`plans/基础设施.md` §1.2 第 1 条）。
 ///
-/// 取消点在书与书之间，**被取消就不写记号**：已经补好的那些下次会被「文件在」挡掉，
-/// 没走到的那些下次接着补。
+/// 与「一次扫完」的差别在三处：
+/// - 分页扫，断点记在 `cover_backfill.cursor`；被取消就停在断点上，下次接着扫。
+/// - 没补成的行进失败账本，按 30 s / 2 min / 10 min / 30 min 退避重试；成功即销账。
+/// - 版本记号在扫到底时才写：失败不等于没扫完，没补成的那几本由账本继续盯。
 pub fn backfill_covers(store: &Store, ctx: &StageCtx) -> CoverBackfillReport {
     let mut report = CoverBackfillReport::default();
-    // 先问记号，跑过就整趟不读全库。读不出来按「没跑过」处理：多跑一趟是幂等的。
-    if let Ok(Some(done)) = store.pref_number(COVER_BACKFILL_KEY)
-        && done >= COVER_BACKFILL_VERSION
-    {
-        return report;
-    }
-    let rows = match store.rows_for_cover_backfill() {
-        Ok(rows) => rows,
+    let mut ledger = CoverBackfillLedger::load(store);
+    let now = unix_seconds();
+    // 记号读不出来按「没扫过」处理：多扫一趟是幂等的。
+    let scanned = match store.pref_number(COVER_BACKFILL_KEY) {
+        Ok(done) => done.unwrap_or(0),
         Err(err) => {
-            tracing::warn!("import: 封面补齐问不到书目：{err:#}");
-            return report;
+            tracing::warn!("import: 封面补齐问不到记号：{err:#}");
+            0
         }
     };
-    let total = rows.len() as u64;
-    let mut cancelled = false;
-    for (done, row) in rows.iter().enumerate() {
-        if ctx.cancel().triggered() {
-            cancelled = true;
-            tracing::info!("import: 封面补齐被取消，已看 {done} / {total} 本");
-            break;
-        }
-        ctx.item(done as u64, total);
-        report.scanned += 1;
-        match restore_cover(store, row) {
-            RestoreCover::Already => report.skipped += 1,
-            RestoreCover::Restored => report.restored += 1,
-            RestoreCover::Unavailable => report.skipped += 1,
-            RestoreCover::Failed => report.failed += 1,
-        }
+    if scanned < COVER_BACKFILL_VERSION {
+        scan_cover_backfill(store, ctx, &mut report, &mut ledger, now);
     }
-    ctx.item(total, total);
-    if !cancelled
-        && let Err(err) = store.set_pref_number(COVER_BACKFILL_KEY, COVER_BACKFILL_VERSION)
-    {
-        // 记号没写上，下次会再跑一趟；已补好的被「文件在」挡掉，不会重复写盘。
-        tracing::warn!("import: 封面补齐的记号没写上：{err:#}");
+    if !ctx.cancel().triggered() {
+        retry_cover_backfill(store, ctx, &mut report, &mut ledger, now);
     }
+    ledger.save(store);
+    report.pending = ledger.failures.len() as u64;
     if report.restored > 0 {
         // 架面把「没有封面」也缓存了，得让它下一帧重查一次，否则封面补回来了还画占位。
         crate::bump_cover_epoch();
     }
-    if report.restored > 0 || report.failed > 0 {
+    if report.restored > 0 || report.failed > 0 || report.retried > 0 {
         tracing::info!(
-            "import: 封面补齐一趟 —— 看过 {} 本，补回 {}，跳过 {}，没补成 {}",
+            "import: 封面补齐一趟 —— 看过 {} 本，补回 {}，跳过 {}，没补成 {}；重试 {} 条，账本还欠 {} 条",
             report.scanned,
             report.restored,
             report.skipped,
-            report.failed
+            report.failed,
+            report.retried,
+            report.pending
         );
     }
     report
+}
+
+/// 从断点一页一页往后扫；全部扫到底才写版本记号。
+fn scan_cover_backfill(
+    store: &Store,
+    ctx: &StageCtx,
+    report: &mut CoverBackfillReport,
+    ledger: &mut CoverBackfillLedger,
+    now: i64,
+) {
+    let mut cursor = match store.pref_number(COVER_BACKFILL_CURSOR_KEY) {
+        Ok(cursor) => cursor.unwrap_or(0),
+        Err(err) => {
+            tracing::warn!("import: 封面补齐问不到断点，从头扫：{err:#}");
+            0
+        }
+    };
+    loop {
+        let rows = match store.cover_backfill_page(cursor, COVER_BACKFILL_PAGE) {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!("import: 封面补齐翻不动下一页：{err:#}");
+                return;
+            }
+        };
+        if rows.is_empty() {
+            break;
+        }
+        let short = rows.len() < COVER_BACKFILL_PAGE;
+        for row in &rows {
+            if ctx.cancel().triggered() {
+                // 断点停在上一本处理完的位置；账本一起存，下次从这儿接着扫。
+                save_cover_cursor(store, cursor);
+                tracing::info!("import: 封面补齐被取消，停在第 {cursor} 本之后");
+                return;
+            }
+            report.scanned += 1;
+            ctx.item(report.scanned, 0);
+            match restore_cover(store, row) {
+                RestoreCover::Already | RestoreCover::Unavailable => report.skipped += 1,
+                RestoreCover::Restored => {
+                    report.restored += 1;
+                    ledger.clear(row.id);
+                }
+                RestoreCover::Failed => {
+                    report.failed += 1;
+                    ledger.note_failure(row.id, now);
+                }
+            }
+            cursor = row.id;
+        }
+        // 每页存一次断点：进程被杀也只丢这一页的进度。
+        save_cover_cursor(store, cursor);
+        if short {
+            break;
+        }
+    }
+    if let Err(err) = store.set_pref_number(COVER_BACKFILL_KEY, COVER_BACKFILL_VERSION) {
+        // 记号没写上，下次会再扫一趟；已补好的被「文件在」挡掉，不会重复写盘。
+        tracing::warn!("import: 封面补齐的记号没写上：{err:#}");
+    }
+    save_cover_cursor(store, 0);
+}
+
+/// 从失败账本里取有界几条到点重试；补成了销账，仍没补成的按新档位再等。
+fn retry_cover_backfill(
+    store: &Store,
+    ctx: &StageCtx,
+    report: &mut CoverBackfillReport,
+    ledger: &mut CoverBackfillLedger,
+    now: i64,
+) {
+    let due = ledger.due(now, COVER_BACKFILL_RETRY_PAGE);
+    if due.is_empty() {
+        return;
+    }
+    let rows = match store.cover_backfill_rows(&due) {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!("import: 封面补齐取不到重试的行：{err:#}");
+            return;
+        }
+    };
+    for row in &rows {
+        if ctx.cancel().triggered() {
+            return;
+        }
+        report.retried += 1;
+        match restore_cover(store, row) {
+            RestoreCover::Failed => ledger.note_failure(row.id, now),
+            RestoreCover::Restored => {
+                report.restored += 1;
+                ledger.clear(row.id);
+            }
+            RestoreCover::Already | RestoreCover::Unavailable => ledger.clear(row.id),
+        }
+    }
+    // 账本里有、库里已经没有这行的（上次扫过之后删了书）：直接销账，不然永远等不到。
+    let seen: HashSet<i64> = rows.iter().map(|row| row.id).collect();
+    for id in due {
+        if !seen.contains(&id) {
+            ledger.clear(id);
+        }
+    }
+}
+
+fn save_cover_cursor(store: &Store, cursor: i64) {
+    if let Err(err) = store.set_pref_number(COVER_BACKFILL_CURSOR_KEY, cursor) {
+        tracing::warn!("import: 封面补齐的断点没写上：{err:#}");
+    }
+}
+
+fn unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 一次失败的退避档，按连续失败次数取；档用尽后一直按最后一档等。
+fn cover_backfill_backoff(failures: u32) -> i64 {
+    let index = usize::try_from(failures.saturating_sub(1))
+        .unwrap_or(usize::MAX)
+        .min(COVER_BACKFILL_BACKOFF_SECS.len() - 1);
+    COVER_BACKFILL_BACKOFF_SECS[index]
+}
+
+/// 一条没补成的记录。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CoverBackfillFailure {
+    /// 书号。
+    id: i64,
+    /// 连续失败次数，决定退避档。
+    failures: u32,
+    /// 下次可以重试的 Unix 秒。
+    retry_at: i64,
+}
+
+/// 失败账本：只记 `restore_cover` 回 `Failed` 的行。
+///
+/// 账本存 `prefs`，不建表：它是补扫作业的临时记账，丢了最多重扫一趟（幂等），
+/// 不值得为它加迁移。落盘形状就是一个顶层数组，旧版本读不懂就按空账本重来。
+#[derive(Debug, Default)]
+struct CoverBackfillLedger {
+    failures: Vec<CoverBackfillFailure>,
+}
+
+impl CoverBackfillLedger {
+    fn load(store: &Store) -> Self {
+        match store.pref_text(COVER_BACKFILL_LEDGER_KEY) {
+            Ok(Some(text)) => match serde_json::from_str::<Vec<CoverBackfillFailure>>(&text) {
+                Ok(failures) => Self { failures },
+                Err(err) => {
+                    tracing::warn!("import: 封面补齐的失败账本读不动，按空账本重来：{err:#}");
+                    Self::default()
+                }
+            },
+            Ok(None) => Self::default(),
+            Err(err) => {
+                tracing::warn!("import: 封面补齐问不到失败账本：{err:#}");
+                Self::default()
+            }
+        }
+    }
+
+    fn save(&self, store: &Store) {
+        let Ok(text) = serde_json::to_string(&self.failures) else {
+            return;
+        };
+        if let Err(err) = store.set_pref_text(COVER_BACKFILL_LEDGER_KEY, &text) {
+            tracing::warn!("import: 封面补齐的失败账本没写上：{err:#}");
+        }
+    }
+
+    /// 销账：补成了、或已确认没得补（源文件不在 / 描述与文件都在）。
+    fn clear(&mut self, id: i64) {
+        self.failures.retain(|failure| failure.id != id);
+    }
+
+    /// 记一次失败；同一本连败就往后推，不同本按各自次数取档。
+    fn note_failure(&mut self, id: i64, now: i64) {
+        if let Some(failure) = self.failures.iter_mut().find(|failure| failure.id == id) {
+            failure.failures = failure.failures.saturating_add(1);
+            failure.retry_at = now.saturating_add(cover_backfill_backoff(failure.failures));
+            return;
+        }
+        self.failures.push(CoverBackfillFailure {
+            id,
+            failures: 1,
+            retry_at: now.saturating_add(cover_backfill_backoff(1)),
+        });
+        if self.failures.len() > COVER_BACKFILL_LEDGER_CAP
+            && let Some(index) = self
+                .failures
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, failure)| failure.retry_at)
+                .map(|(index, _)| index)
+        {
+            // 丢最早该重试的那条：它多半是反复失败的老书，留着只会一直占位。
+            self.failures.remove(index);
+        }
+    }
+
+    /// 到点该重试的书号，最早的先来；一趟只给有界条数。
+    fn due(&self, now: i64, limit: usize) -> Vec<i64> {
+        let mut due: Vec<&CoverBackfillFailure> = self
+            .failures
+            .iter()
+            .filter(|failure| failure.retry_at <= now)
+            .collect();
+        due.sort_by_key(|failure| (failure.retry_at, failure.id));
+        due.into_iter()
+            .take(limit)
+            .map(|failure| failure.id)
+            .collect()
+    }
 }
 
 enum RestoreCover {
@@ -194,7 +415,7 @@ fn restore_cover(store: &Store, row: &CoverBackfillRow) -> RestoreCover {
 /// 现在的去处，书库根也照扫 —— 改成这个形状之前，半成品就留在根上。
 ///
 /// 返回清掉几个。目录读不了就返回 0：这是启动路径上的自愈动作，失败不该让程序起不来
-/// （`plans/基础设施.md` §1.3 末条，级别按 §3.1 的「自愈」那一档走）。
+/// （级别按「自愈」那一档走）。
 /// 两个区的名字都以点开头，而 `scan` 那条「以点开头的目录跳过」顺带保证了半成品
 /// 永远不会被当成一本书 —— 这一条不靠这里删得干净。
 pub fn sweep_partials(book_dir: &Path) -> usize {
@@ -326,7 +547,7 @@ fn sweep_partials_in(dir: &Path) -> usize {
 /// 把暂存区整个清空，返回清掉几项。
 ///
 /// 与上面那条判据不同，这里**不需要挑名字**：`.staging` 按定义就是中间态的去处
-/// （`plans/导入管线.md` §一 步 2），里面任何一样东西都不可能是权威数据。而且现在
+/// （步 2），里面任何一样东西都不可能是权威数据。而且现在
 /// 管线在里面对副本改过一次名（`readable_stem` 那一步），留下的中间文件不带 `.part`
 /// 尾巴 —— 按 `.part` 挑着删就会一次次漏掉。目录本身留着，下次导入还要用。
 fn empty_dir(dir: &Path) -> usize {
@@ -347,4 +568,69 @@ fn empty_dir(dir: &Path) -> usize {
         }
     }
     removed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        COVER_BACKFILL_BACKOFF_SECS, COVER_BACKFILL_LEDGER_CAP, CoverBackfillFailure,
+        CoverBackfillLedger, cover_backfill_backoff,
+    };
+
+    fn failure(id: i64, failures: u32, retry_at: i64) -> CoverBackfillFailure {
+        CoverBackfillFailure {
+            id,
+            failures,
+            retry_at,
+        }
+    }
+
+    #[test]
+    fn a_failure_waits_longer_every_time_until_the_last_step() {
+        assert_eq!(cover_backfill_backoff(1), 30);
+        assert_eq!(cover_backfill_backoff(2), 120);
+        assert_eq!(cover_backfill_backoff(3), 600);
+        assert_eq!(cover_backfill_backoff(4), 1_800);
+        assert_eq!(cover_backfill_backoff(9), 1_800, "档用尽后一直按最后一档等");
+        assert_eq!(cover_backfill_backoff(1), COVER_BACKFILL_BACKOFF_SECS[0]);
+    }
+
+    #[test]
+    fn only_failures_whose_time_has_come_are_retried_in_order() {
+        let ledger = CoverBackfillLedger {
+            failures: vec![failure(7, 1, 300), failure(3, 1, 100), failure(5, 2, 100)],
+        };
+        assert_eq!(ledger.due(99, 8), Vec::<i64>::new(), "都没到点");
+        assert_eq!(ledger.due(100, 8), vec![3, 5], "先到点的先来；同一刻按书号");
+        assert_eq!(ledger.due(100, 1), vec![3], "一趟只给有界条数");
+        assert_eq!(ledger.due(299, 8), vec![3, 5], "300 那条要等到 300 之后");
+        assert_eq!(ledger.due(400, 8), vec![3, 5, 7], "到点的都排上，仍按时刻与书号");
+    }
+
+    #[test]
+    fn a_full_ledger_drops_the_earliest_retry() {
+        let mut ledger = CoverBackfillLedger::default();
+        for id in 0..COVER_BACKFILL_LEDGER_CAP as i64 {
+            ledger.note_failure(id, 1_000 + id);
+        }
+        assert_eq!(ledger.failures.len(), COVER_BACKFILL_LEDGER_CAP);
+        ledger.note_failure(9_999, 5_000);
+        assert_eq!(ledger.failures.len(), COVER_BACKFILL_LEDGER_CAP, "账本不该无界长");
+        assert!(
+            ledger.failures.iter().all(|failure| failure.id != 0),
+            "丢的是最早该重试的那条"
+        );
+    }
+
+    #[test]
+    fn a_second_failure_pushes_the_retry_out() {
+        let mut ledger = CoverBackfillLedger::default();
+        ledger.note_failure(4, 1_000);
+        assert_eq!(ledger.failures[0].retry_at, 1_030, "第一次失败等 30 秒");
+        ledger.note_failure(4, 1_010);
+        assert_eq!(ledger.failures[0].failures, 2);
+        assert_eq!(ledger.failures[0].retry_at, 1_130, "第二次失败等 2 分钟");
+        ledger.clear(4);
+        assert!(ledger.failures.is_empty(), "补成了就销账");
+    }
 }

@@ -573,7 +573,7 @@ impl ComputedStyle {
 ///
 /// 一期没有连字词典，所以 `Auto` 与 `Manual` 的**行为**相同：都只在已有的连字符处断，
 /// 不会把 `sais` 拆成 `sa-is`。差别留在「作者的意图有没有被记下来」——词典接上时不用
-/// 回头改书的样式表。这条边界记在 `plans/facts.md` 的 CSS 一节。
+/// 回头改书的样式表。这条边界记在 CSS 的忽略清单里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Hyphens {
     /// CSS 初值：已有连字符可断，不主动造连字符。
@@ -706,7 +706,7 @@ pub enum Positioning {
     /// 与 [`Self::Absolute`] 的分界就在游标：排完这一块的兄弟仍按它**没挪**时的位置接，
     /// 所以挪出去的那一截会压在邻居身上（浏览器同样如此，那是作者要的效果）。
     /// 偏移的取用规则、百分比基准与不跟着挪的那几路，全写在 `layout::collect` 的
-    /// `shift_relative` 与 `doc/css-没接住.md`。
+    /// `shift_relative`。
     Relative,
 }
 
@@ -971,7 +971,7 @@ pub struct ComputedStyle {
     /// 字间额外宽度（px）。CSS 初值 `normal` 折成 0；它叠在**每个字符之后**（含最后一个），
     /// 所以折行、行宽、绘制与命中四处都要算它。
     ///
-    /// 这四处**必须同批改**（见 `plans/阅读管线.md` §11 第 15 条）：只改宽度表会出现
+    /// 这四处**必须同批改**：只改宽度表会出现
     /// 「断行提前了、字却还挤在一起」，比不做更糟。绘制按字形所在字符序号右推，
     /// 命中/选区按同一偏移推 `char_edges`。
     pub letter_spacing: f32,
@@ -1350,7 +1350,7 @@ pub(super) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 真会把后面的行带折窄，见 `layout::collect` 的 `PlacedFloat`。
     // `columns` / `column-gap` 留下：分片器认的是**视口**栏数（`FragmentOptions::columns`，
     // 由界面或读者给），作者写的块级 `column-count` 要改排版期的折行宽度，还没接。
-    // 详见 `plans/facts.md` 与 `css/computed.rs` 的忽略清单。
+    // 详见 `css/computed.rs` 的忽略清单。
     "columns",
     "column-gap",
     // 列表标记 2026-10-15 起真的画了，所以 `list-style` 与 `list-style-type` 从这份

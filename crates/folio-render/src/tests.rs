@@ -1309,7 +1309,7 @@ fn a_written_width_narrows_the_block_and_auto_margins_center_it() {
 /// `max-width` 夹的是**折行宽度**，不只是那块矩形 —— 写着它的段落每行只剩六字。
 ///
 /// 这一条正是「按元素排名的落差表」量不到的那一格：声明早就 `Applied`，表上不留痕迹，
-/// 而排版层从前不读它。`plans/facts.md` 给那张表写的口径本来就点明了「不含几何影响」，
+/// 而排版层从前不读它。那张表的统计口径本来就点明了「不含几何影响」，
 /// 这几条排版断言就是那一侧的替身。
 #[test]
 fn a_max_width_shortens_every_line_of_the_paragraph() {
@@ -3689,7 +3689,7 @@ fn an_rtl_line_hangs_from_the_start_edge() {
 ///
 /// 反转只做一次、做在这一层：绘制（`ui::reader::scene`）、命中与选中矩形
 /// （`content::hit`）都只吃 `LineBox::fragments` 这一份顺序，两处各反一次就又分叉了。
-/// 区间不许动 —— 锚点、进度、批注都按它算（`plans/Locator.md`）。
+/// 区间不许动 —— 锚点、进度、批注都按它算。
 #[test]
 fn rtl_reverses_fragment_order_but_not_the_byte_ranges() {
     let html = "<p>abcd<i>ef</i></p>";
@@ -4126,7 +4126,7 @@ fn a_min_width_raises_a_float_the_author_left_undimensioned_enough() {
 ///
 /// 这一组是直接问 [`image_size`] 本身，不绕排版：它是一张图的**唯一**算式，
 /// 而从前 `min-*` 在这里根本不参与 —— 声明在层叠期报了 `Applied`，屏上一点不变，
-/// 正是 `plans/facts.md` 记过的那条「Applied ≠ 排版层读了」的缝。
+/// 正是「Applied ≠ 排版层读了」那条缝。
 #[test]
 fn image_size_folds_the_min_pair_and_the_box_sizing_pair() {
     use crate::ports::image_size;

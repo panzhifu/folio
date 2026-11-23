@@ -148,7 +148,7 @@ impl Store {
         };
         // 一笔事务：删掉那一行与记下墓碑必须同生同死。分两条裸语句中间被杀（Android
         // 直接杀进程），下次同步就没有任何东西说「这条删过」，于是它在别的设备上活着回来
-        // —— 而读者已经看不见它了（`plans/基础设施.md` §1.3 那条「两写一账」）。
+        // —— 而读者已经看不见它了（「两写一账」）。
         let tx = conn.unchecked_transaction()?;
         let stamp = super::sync_order::next_mark_version(
             &tx,

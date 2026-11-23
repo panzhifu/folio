@@ -52,8 +52,7 @@ pub enum Format {
     /// Microsoft Compiled HTML Help：一个 ITSF 容器，里面是一组 HTML topic。
     ///
     /// 「一组 HTML + 那份 hhc 的读法」是格式，「ITSF + LZX」是它用的容器 ——
-    /// 与 [`Format::Epub`] 躺在 ZIP 上是同一刀分法（`plans/导入管线.md` §十：
-    /// 容器家族比格式少）。
+    /// 与 [`Format::Epub`] 躺在 ZIP 上是同一刀分法（容器家族比格式少）。
     Chm,
     /// Mobipocket / Kindle：PalmDB 容器里的一条正文流（KF7），或 SKEL/FRAG 拼出的多个
     /// 文件（KF8）。`.mobi` / `.azw` / `.azw3` / `.prc` 都归这一族。可重排。
@@ -236,8 +235,7 @@ pub struct Chapter {
     /// 容器内的条目名（EPUB 的 spine 项）。单文件格式是空串。
     ///
     /// 两个用处：相对资源（`<img src>`）的基准目录，以及 EPUB 那一路的
-    /// [`ChapterLocator::Entry`]。**不落库** —— 位置列里已经有了，见
-    /// `plans/text-out-of-db.md`。
+    /// [`ChapterLocator::Entry`]。**不落库** —— 位置列里已经有了。
     pub spine_href: String,
     /// 正文在哪儿。**这一格取代了「一个 `String` 加一个平行数组」**：
     /// 之前 `source` 空串 + 章位置两个东西拼出来「正文在不在手上」，还得靠约定保证等长；
@@ -340,7 +338,7 @@ impl Chapter {
 
 /// 一章正文在容器里的位置 —— 库里只存这个，不存正文。
 ///
-/// 判据与图片同一条（见 `plans/images-lazy.md`）：**库里只放「算出来贵、且原文件
+/// 判据与图片同一条：**库里只放「算出来贵、且原文件
 /// 给不了」的东西**。正文原文件给得了 —— 重开一次容器就回来了 —— 而一本二十万字的
 /// 中文书入库是 0.4 MB（还要再加一倍以上的全文索引），库于是与内容同量级。
 ///
@@ -464,7 +462,7 @@ pub struct ImageRes {
     /// 见的是逐页 SVG 与带 `image/svg+xml` 的封面），并在 manifest 上挂了 `fallback=`
     /// 指着同一张图的位图版本（folio-format 的 `format::epub::decodable_fallback`）。
     /// 那时**键不能换** —— 它是正文里那串 `src` 解出来的，而正文一个字都不许改
-    /// （`plans/Locator.md`：锚点坐标就建在源文本上）—— 要换的只是「去哪儿读字节」，
+    /// （锚点坐标就建在源文本上）—— 要换的只是「去哪儿读字节」，
     /// 那一格就是这里。
     ///
     /// 其余格式与没有降级路的条目都填 `href.clone()`。库里空串读回时同样算「与 `href`

@@ -439,7 +439,7 @@ pub(super) fn offset_of(view: &Entity<ReaderSession>, cx: &mut TestAppContext) -
 
 /// 合成书：仓库里那本三章的 `minimal-zh.epub`，**正文与样式表已经取回来**的那种。
 ///
-/// `document::open` 现在只给索引（库里就存这个，见 `plans/text-out-of-db.md`），
+/// `document::open` 现在只给索引（库里就存这个），
 /// 所以这里按位置把每一章的正文与样式文本补上 —— 这几条测的是排版，手上得有字
 /// 也得有样式。
 pub(super) fn epub_flow() -> FlowDoc {

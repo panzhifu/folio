@@ -7,7 +7,7 @@
 //! 不写 `cfg(mobile)`：两端都在首次启动时走这一屏，差别（安全区、选择器解析出的路径）
 //! 由外壳与宿主管，见 `shell::AppShell` 与 `shared::library`。
 //!
-//! 两端的控件都用普通按钮，不用浮层：浮层在 Android 上现在点不住（见 `plans/facts.md`），
+//! 两端的控件都用普通按钮，不用浮层：浮层在 Android 上现在点不住，
 //! 而这一步是进应用的前提，点不动就等于进不去。
 
 use gpui_kit::assets::IconName;

@@ -271,7 +271,7 @@ pub fn rects_for_range(
 /// 即使是超集也只多扫、不漏算；而它给的是**左闭右开的连续行号**，`CharLines` 只在
 /// 「字符区间随行号不减」成立时才给（否则返回 `None`，调用方退回整表扫）。
 /// 2026-10-15 之前这里是无条件 `0..layout.lines.len()`：一章 25 条批注实测每帧
-/// +1.7–2.2 ms（`plans/阅读管线.md` §十一 第 9 条）。
+/// +1.7–2.2 ms。
 pub fn rects_for_range_in(
     layout: &Layout,
     dom: &Dom,

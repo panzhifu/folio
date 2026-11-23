@@ -110,7 +110,7 @@ impl PageTextExt for PageText {
 }
 
 pub trait FlowDocExt {
-    /// 全书**规范化可见字数** —— 全局字符进度的分母（`plans/Locator.md` 第二节）。
+    /// 全书**规范化可见字数** —— 全局字符进度的分母。
     fn char_len(&self) -> Option<usize>;
 
     /// 已知道字数的那几章之和 + 还有几章不知道 —— 进度条在「部分章没算过」时

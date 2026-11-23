@@ -592,8 +592,7 @@ fn decoration_y(
 /// shaping 的**唯一入口**：一条 run → 一份几何。
 ///
 /// 走 `layout_line` 而不是 `shape_line`：后者要多造一份 `decoration_runs`（颜色、下划线、
-/// 删除线各一格），而我们从不读它 —— 装饰线是 [`paint_run`] 自己画的（`plans/阅读管线.md`
-/// §十四 记的就是这件事）。`layout_line` 直接给回 `Arc<LineLayout>`，也正是
+/// 删除线各一格），而我们从不读它 —— 装饰线是 [`paint_run`] 自己画的（记的就是这件事）。`layout_line` 直接给回 `Arc<LineLayout>`，也正是
 /// [`Document::shaped_line`](crate::ui::features::reader::model::chapter_layout::Document::shaped_line) 那张表要存的值。
 ///
 /// `Metric::ShapeLineCalls` 数的是**这一趟**，所以它的口径是「shaping 表未命中一次」，

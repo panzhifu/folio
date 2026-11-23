@@ -280,8 +280,7 @@ pub trait Document: Send + Sync {
 
     /// 第 `index` 章的**引擎就绪 XHTML**，需要时才去容器里取。
     ///
-    /// 库里只存位置不存正文（见 [`crate::ChapterLocator`] 与
-    /// `plans/text-out-of-db.md`），所以这是「读一本已经打开的书」唯一的正文入口：
+    /// 库里只存位置不存正文（[`crate::ChapterLocator`]），所以这是「读一本已经打开的书」唯一的正文入口：
     ///
     /// - 位置是 [`ChapterLocator::Inline`]：正文就在手上（测试、旧库兜底），直接给。
     /// - 位置是 [`ChapterLocator::Entry`]：让 provider 解一个 zip 条目（EPUB）。

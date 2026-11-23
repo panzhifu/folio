@@ -19,7 +19,7 @@ pub struct BookDocument {
     /// 那时取字节一律回空 —— 与「容器丢了」是同一个表现（那块地方空着，正文照排）。
     provider: Option<Box<dyn DocumentProvider>>,
     path: Option<PathBuf>,
-    /// **开一次的容器句柄**（`plans/导入管线.md` §十）。
+    /// **开一次的容器句柄**。
     ///
     /// 与 `provider` 并存而不是取代它：`Container` 管的是「按条目名取字节」这件
     /// 与格式无关的事，而封面怎么认、字体清单怎么读、`@font-face` 指哪个条目
@@ -51,7 +51,7 @@ pub struct BookDocument {
     ///
     /// 驻留实测：600 章（约 13 万字）改写后的 XHTML 是 405 KB，一千二百万字级别的书约 4 MB。
     /// 这一条**取代**了 `reader::Book::texts` 那个 ±3 章窗口在同一条路上吃的亏：窗口还在，
-    /// 只是它后面的重解没了（口径见 `plans/text-out-of-db.md`「缓存的上界就是这一本书」）。
+    /// 只是它后面的重解没了（「缓存的上界就是这一本书」）。
     ///
     /// `None` = 这一本的整本重读**没把正文带回来**（provider 没覆盖 `read`，给出的还是位置）
     /// 或那一趟失败了 —— 那就照旧每章回容器取一次，不拿空字符串糊弄读者。
@@ -63,8 +63,8 @@ pub struct BookDocument {
 impl BookDocument {
     /// 从文件读一本：选 provider → 读成 [`Content`] → 校验结构完整性。
     ///
-    /// 走的是 [`DocumentProvider::index`]：**只读索引，不解正文**。正文不在库里
-    /// （见 `plans/text-out-of-db.md`），导入时解出来再丢掉等于白付一次全量解压 ——
+    /// 走的是 [`DocumentProvider::index`]：**只读索引，不解正文**。正文不在库里，
+    /// 导入时解出来再丢掉等于白付一次全量解压 ——
     /// 一本 1000 多章的 EPUB 就是白解 1000 多个 zip 条目。
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_with(path, crate::ParseBudget::Auto, None)

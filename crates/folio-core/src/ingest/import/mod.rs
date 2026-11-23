@@ -40,7 +40,7 @@ pub use maintenance::CoverBackfillReport;
 pub use maintenance::{COVER_BACKFILL_VERSION, backfill_copies, backfill_covers};
 // 测试要能抹掉记号来验「下一版升级再跑一趟」；生产编译里这一行不存在。
 #[cfg(test)]
-use maintenance::COVER_BACKFILL_KEY;
+use maintenance::{COVER_BACKFILL_CURSOR_KEY, COVER_BACKFILL_KEY, COVER_BACKFILL_LEDGER_KEY};
 pub use maintenance::sweep_orphan_copies;
 pub use maintenance::sweep_partials;
 pub use pipeline::import_from;
@@ -171,7 +171,6 @@ pub trait Source: Send + Sync + 'static {
 
 /// 落库成功的一条结果。界面拿 `book_id` 清封面缓存、重查架面；
 /// `dest` 与 `title` 只为日志与测试 —— 章节表已经落库，正文按位置回容器取
-/// （见 `plans/text-out-of-db.md`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registered {
     pub book_id: i64,
@@ -202,7 +201,7 @@ pub struct ImportOutcome {
 }
 
 /// 一批导入的分类计数。界面上那句「成功 N / 已存在 M / 拒绝 K（按类别）」读它，
-/// 而不是逐条 toast（`plans/基础设施.md` §3.2：批量作业的错误要能聚合报表）。
+/// 而不是逐条 toast（批量作业的错误要能聚合报表）。
 ///
 /// 类别取自 [`crate::error::Error::import_reject`]，是类型而不是文案 —— 改中文措辞
 /// 不会把报表的分组改散。
@@ -287,7 +286,7 @@ pub fn submit_import(
 /// 这条线程随作业结束（通道关闭）自然退出。`on_event` 里再怎么阻塞都在它自己的线程上。
 ///
 /// 线程创建失败才 panic：起不来确实无法继续，与 [`crate::ingest::watch`] / [`crate::net::transfer`]
-/// 两处同一条纪律（`plans/基础设施.md` §3.3）。
+/// 两处同一条纪律。
 pub fn forward<F>(handle: TaskHandle<Vec<ImportOutcome>>, mut on_event: F)
 where
     F: FnMut(TaskEvent<Vec<ImportOutcome>>) + Send + 'static,
@@ -302,5 +301,7 @@ where
         .expect("起导入事件转发线程");
 }
 
+#[cfg(test)]
+mod cover_backfill_tests;
 #[cfg(test)]
 mod tests;

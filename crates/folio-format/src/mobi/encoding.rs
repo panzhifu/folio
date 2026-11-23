@@ -36,8 +36,7 @@ pub(crate) fn is_supported(codepage: u32) -> bool {
 /// 按头里声明的那一格解成 UTF-8。
 ///
 /// 非法字节一律降级成 `U+FFFD` 而不是失败：正文坏一格与整本读不出来是两件事，
-/// 读者看到的应该是前者（`plans/导入管线.md` 第五节：判定失败的候选不能在库里留记录，
-/// 但**已经收进来的书**坏了一个字节不该翻脸不认）。
+/// 读者看到的应该是前者（判定失败的候选不能在库里留记录，但**已经收进来的书**坏了一个字节不该翻脸不认）。
 pub(crate) fn decode_text(bytes: &[u8], codepage: u32) -> String {
     match codepage {
         65002 => {

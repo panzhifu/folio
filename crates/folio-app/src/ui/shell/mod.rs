@@ -287,7 +287,7 @@ fn field_holds_focus(window: &Window) -> bool {
         .any(|context| context.primary().is_some_and(|entry| entry.key == "Input"))
 }
 
-/// 配置落盘的去抖窗口（`plans/基础设施.md` §2.5）。拖一次字号滑条会产出几十次改动，
+/// 配置落盘的去抖窗口。拖一次字号滑条会产出几十次改动，
 /// 逐次 `save` 就是逐次文件写；攒几百毫秒，一次落盘。退出时由 `on_app_quit` 兜底 flush。
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
 
@@ -340,7 +340,7 @@ pub struct AppShell {
     /// 的话，系统翻了面而偏好一个字没动，这一帧就永远不会重涂。
     applied: Option<(Appearance, ThemeMode)>,
     /// 上一次已经同步给监听服务的 `library` 一节。配置观察者比较它，
-    /// 只有书库目录或监听那几项真的变了才重启监听（`plans/基础设施.md` §2.5）。
+    /// 只有书库目录或监听那几项真的变了才重启监听。
     watched_library: Library,
     /// 待落盘的去抖任务。每来一次配置改动就换掉它（drop 即取消计时），
     /// 安静 [`SAVE_DEBOUNCE`] 之后才真的写一次盘（§2.5）。
@@ -1027,7 +1027,7 @@ impl AppShell {
             return;
         }
         // 栈底再往后该做什么，问平台边界：`#[cfg(mobile)]` 写在外壳里就是越界
-        // （`plans/基础设施.md` §5.9 —— 平台判断只允许出现在 `host` 与 `platform`）。
+        // （—— 平台判断只允许出现在 `host` 与 `platform`）。
         match host::back_at_root(cx) {
             host::BackAtRoot::Quit => cx.quit(),
             host::BackAtRoot::SendToBack => {

@@ -1080,7 +1080,7 @@ fn cover_backfill_restores_a_lost_cover_and_runs_only_once() {
 
 /// 「还有别人指着这个文件吗」这一问要问得出数。
 ///
-/// 内容寻址之后「两行共用一个副本」是 `plans/导入管线.md` §六 明确会出现的状态，而它现在
+/// 内容寻址之后「两行共用一个副本」是会出现的状态，而它现在
 /// 还**造不出来**：`books.path` 上有 UNIQUE，两条行不可能同时记着同一个路径。这一条测试
 /// 因此钉三件事 —— 计数在没人用时是 0、改指到别的行身上会被 UNIQUE 挡回来（也就是
 /// [`backfill_copies`] 里那句「只认身份不改名」为什么会存在），以及这个口子在
@@ -1600,7 +1600,7 @@ fn a_plain_text_book_is_titled_by_its_source_name_not_by_its_hash() {
 }
 
 /// 报表分类计数：一批里成功 / 已存在 / 各类拒绝要分得开，而**认不出类别的错误不许
-/// 被悄悄少算**（`plans/基础设施.md` §3.2 那条「批量作业要出报表」的最小一半）。
+/// 被悄悄少算**（「批量作业要出报表」的最小一半）。
 #[test]
 fn a_batch_tallies_into_a_report_with_rejects() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1652,8 +1652,7 @@ fn a_batch_tallies_into_a_report_with_rejects() {
 /// 1. **拒**，不是收下来画一整章乱码（那就是加这一条之前实际在发生的事）；
 /// 2. 报表里算**加密**那一栏，不是「读不动」—— 后者叫读者重新导入一次，前者要他换一本
 ///    无加密的书，是三个动作里唯一现在就该说清的那一个；
-/// 3. 库里**一行都不留**（`plans/导入管线.md` §五那条硬规则：判定或解析失败的候选
-///    最终不能在库里留下记录），书库根也没见过它。
+/// 3. 库里**一行都不留**（那条硬规则：判定或解析失败的候选最终不能在库里留下记录），书库根也没见过它。
 #[test]
 fn an_encrypted_epub_is_refused_and_leaves_no_library_record() {
     use std::io::Write as _;
@@ -1743,7 +1742,7 @@ fn an_encrypted_epub_is_refused_and_leaves_no_library_record() {
     );
 }
 
-// ---- 重扫的线程归属（`plans/阅读管线.md` §七：开书那一屏不等重扫）----
+// ---- 重扫的线程归属（开书那一屏不等重扫）----
 
 /// 一张纯色 PNG，用来当 CBZ 的一页。
 fn png(w: u32, h: u32) -> Vec<u8> {

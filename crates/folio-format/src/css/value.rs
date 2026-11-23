@@ -146,7 +146,7 @@ pub(super) fn parse_break_when(value: &str) -> Option<BreakWhen> {
 /// `sideways-rl` / `sideways-lr` 折进 `vertical-*` 那一两格：两者的差别**只在拉丁**
 /// （sideways 连拉丁一起转 90°，vertical 让汉字直立、只转拉丁），而这台渲染器根本没有
 /// 字形旋转通道（`Window::paint_glyph` 没有旋转参数），于是竖排里的拉丁本来就显式降级成
-/// 「直立」—— 那一档降级见 `plans/README.md` M8。降级之后两档在屏上是同一个画面，
+/// 「直立」—— 那一档是显式降级。降级之后两档在屏上是同一个画面，
 /// 所以合起来报 `Applied` 比按不认识计数更诚实：竖排的那一本照样竖，写法没被丢。
 ///
 /// SVG 遗留的那一族（`tb-rl`、`tb-lr`、`lr`、`lr-tb`、`rl`）不接：本机书目里没出现过，

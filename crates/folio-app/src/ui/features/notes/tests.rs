@@ -129,6 +129,8 @@ fn boot_window(cx: &mut TestAppContext, store: Store) -> (Entity<NotesView>, Any
         notes.update(cx, |notes, cx| notes.refresh(cx));
     })
     .expect("窗口应能渲染");
+    // 取数（含封面读盘）在后台线程上：等那一趟回来，渲染帧才找得到卡片。
+    cx.run_until_parked();
     cx.update_window(handle, |_, window, cx| window.render_frame(cx))
         .expect("首帧应画出来");
     (notes, handle)

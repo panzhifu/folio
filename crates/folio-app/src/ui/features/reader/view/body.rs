@@ -972,8 +972,7 @@ impl Render for ReaderSession {
         let page_percent: SharedString = chrome::percent_label(self.progress()).into();
         // 页面底色放在 `column` 自己身上（父背景先于所有子节点画）：字形元素铺满
         // 整个版心，若把不透明背景挂在它身上、它又在图片之后才入树，白底会把先画的
-        // 图片整个盖住 —— 封面章整页空白的根因（gpui 的 z-order 是「相交即 +1，
-        // 后画者居上」，见 plans/facts.md）。层级从此固定为：页底 → 块级装饰 →
+        // 图片整个盖住 —— 封面章整页空白的根因（gpui 的 z-order 是「相交即 +1，后画者居上」）。层级从此固定为：页底 → 块级装饰 →
         // 字形 → 图片。
         //
         // 底色在**装配那一步**才挂（见函数末尾）：整页画那一档要把这层底色让开，

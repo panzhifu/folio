@@ -11,7 +11,7 @@
 //!
 //! 一格的三种状态都要看得出来是它的：第一次上屏时淡到位（[`Enter`]），指过去描边
 //! 加投影，按下去暗一截。桌面与手机各吃到其中一部分 —— 悬停只有指针那边有，
-//! 按压两端都有（轻点在移动端合成成 MouseDown/MouseUp，见 `plans/facts.md`）。
+//! 按压两端都有（轻点在移动端合成成 MouseDown/MouseUp）。
 //!
 //! 封面走 gpui 的 `img` 元素，纹理上传由它负责（正文里的 `<img>` 用的是同一条路径，
 //! 见 `reader_view`）；解码只在这一处调用 [`crate::ui::foundation::images::cover_image`]。
@@ -83,6 +83,20 @@ fn hover_shadow() -> Vec<BoxShadow> {
     vec![BoxShadow::new(px(0.), px(2.), hsla(0., 0., 0., 0.18)).blur_radius(px(6.))]
 }
 
+/// 一条库行的卡片档缩略图路径；没有 `cover_ref`（老库、或本来就没封面）时是 `None`。
+///
+/// 缩略图落在 `<书库>/.thumbs/<尺寸>/<封面哈希>.jpg`（见 `assets::thumb`），路径只由
+/// `cover_root` + `cover_ref` 决定 —— 所以取一张封面不必先回库查一遍。
+fn thumb_of(item: &ShelfItem) -> Option<std::path::PathBuf> {
+    let root = item.cover_root.as_deref()?;
+    let cover = item.cover_ref.as_ref()?;
+    Some(folio_core::content::assets::thumb::thumb_path(
+        root,
+        folio_core::infra::paths::THUMB_CARD_PX,
+        cover,
+    ))
+}
+
 /// 一片格子第一次上屏时的「落定」。
 ///
 /// 交代的是「这些书刚摆上来」这一件变化：整片从透明淡到位，越靠后的格子起步越晚。
@@ -129,7 +143,16 @@ pub(in crate::ui::features::shelf) struct Card {
     pub(in crate::ui::features::shelf) id: i64,
     pub(in crate::ui::features::shelf) title: SharedString,
     pub(in crate::ui::features::shelf) authors: SharedString,
+    /// 封面解码结果。**只对真正上屏的那几格解**（`ShelfView::cover_visible` 在
+    /// `uniform_list` 的 item 闭包里填）：整架一次解一遍的话，一千本书就是一千次
+    /// 文件打开 —— 冷态每次首开都是毫秒级（见 `.thumbs` 那一段的实测），而其中
+    /// 绝大多数格子根本不在视口里。
     pub(in crate::ui::features::shelf) cover: Option<Arc<Image>>,
+    /// 卡片档缩略图在磁盘上的位置，建卡时从 `cover_root` + `cover_ref` 推出。
+    ///
+    /// 存路径而不是存那两个字段：解封面这条路上只需要「去哪儿读」，而缩略图是
+    /// 首选来源（原图只在缩略图缺席时兜底）。路径是纯派生数据，不再回库查一遍。
+    pub(in crate::ui::features::shelf) thumb: Option<std::path::PathBuf>,
     pub(in crate::ui::features::shelf) opened_at: Option<i64>,
     /// 这一格的元素 id 与 group 键。**重查那一趟拼一次**，不在每帧的 item 闭包里
     /// `format!`：`uniform_list` 每帧都会把可见的那几排重造一遍。
@@ -208,43 +231,33 @@ impl ShelfView {
         }
     }
 
-    /// 一条库行 → 一张卡。封面没解过才解，解不出的那本记住 `None`。
+    /// 一条库行 → 一张卡。**封面不在这一步解**。
     ///
-    /// 解码结果记在架面那份 [`ShelfView::covers`] 里：改一个搜索词会把同一本书再查
-    /// 出来一遍，没缓存的话每敲一个字都要把整个架面的 JPEG 重解一遍；`None` 也要存 ——
-    /// 不记住这次失败，每查一次都会再试一遍同样的失败。
+    /// 整架一次解一遍是一千次文件打开，而真正上屏的通常只有十几本：冷态下每次首开
+    /// 都是毫秒级（`.thumbs` 那一段的实测），解不可见的行全是白付。解在
+    /// `uniform_list` 的 item 闭包里做，见 [`ShelfView::cover_visible`]。
     ///
-    /// **架上解的是缩略图，不是原图**（`plans/导入管线.md` §八「缩略图」那一段）：
-    /// 卡片档只有几百像素，而原图常见 800×1200 —— 网格里那点面积用不上原图的像素，
-    /// 而 `Image` 持有的是**编码字节**，所以省下来的是整屏的常驻内存。
-    ///
-    /// 生成是**懒**的：第一次真要显示这一格时才做，做完落在 `<书库>/.thumbs/`，
-    /// 跨会话不再重做。取不到缩略图（老库没有 `cover_ref`、原图是坏字节、
-    /// 目录写不进去）就**退回原图** —— 缩略图是可丢弃的加速品，不是功能的入口。
-    ///
-    /// 只有「信息」那一屏用原图（`book_info` 走 `store.book_cover`）：那里封面是主视觉，
-    /// 要大。
-    pub(in crate::ui::features::shelf) fn card(
-        &mut self,
-        item: ShelfItem,
-        cover: Option<Arc<Image>>,
-    ) -> Card {
+    /// 这里只把卡片档缩略图的路径推出来（`cover_root` + `cover_ref`，纯派生，不问库）：
+    /// 缩略图是架上那一格的首选来源，原图只在它缺席时兜底 —— 见 [`Self::resolve_cover`]。
+    pub(in crate::ui::features::shelf) fn card(&mut self, item: ShelfItem) -> Card {
+        let thumb = thumb_of(&item);
         Card {
             id: item.id,
             opened_at: item.last_opened_at,
             title: item.title.into(),
             authors: item.authors.join(AUTHOR_SEP).into(),
-            cover,
+            cover: None,
+            thumb,
             group: format!("shelf-card-{}", item.id).into(),
             cover_id: format!("shelf-cover-{}", item.id).into(),
         }
     }
 
-    /// 一格封面：会话内解过就直接用，没解过才去磁盘。
+    /// 一格封面（同步）：只给组卡那几格用 —— 数量是「几个组」，不是「几本书」。
     ///
-    /// **字节从文件来**（v16：库里不存封面字节），走 `Store::book_cover` 那一条
-    /// 「按 `cover_ref` 去 `covers/` 取」。文件不在就是 `None` —— 界面画占位，
-    /// 这是有意的（封面是装饰，不是内容的入口）。
+    /// **先读缩略图、再考虑原图**：架上那一格只要卡片档那几百像素，而 `Image` 持有的是
+    /// 编码字节，原图常见 800×1200 —— 先读原图等于白读一份大文件。缩略图缺席
+    /// （老库没生成、`.thumbs` 被清掉）才回库取原图兜底；可丢弃的加速品，做不出来就画原图。
     ///
     /// 解码结果记在架面那份 [`ShelfView::covers`] 里：改一个搜索词会把同一本书再查
     /// 出来一遍，没缓存的话每敲一个字都要把整个架面的 JPEG 重解一遍；`None` 也要存 ——
@@ -253,48 +266,38 @@ impl ShelfView {
         &mut self,
         item: &ShelfItem,
     ) -> Option<Arc<Image>> {
-        // 水墨翻档：上一档解出来的封面整份作废（缓存键里没有「哪一档」这一格）。
+        self.refresh_cover_generation();
+        if let Some(cached) = self.covers.get(&item.id) {
+            return cached.clone();
+        }
+        let decoded = thumb_of(item)
+            .as_deref()
+            .and_then(|path| std::fs::read(path).ok())
+            .as_deref()
+            .and_then(cover_image)
+            .or_else(|| {
+                let bytes = self.store.as_ref()?.book_cover(item.id).ok().flatten()?;
+                cover_image(&bytes)
+            });
+        self.covers.insert(item.id, decoded.clone());
+        decoded
+    }
+
+    /// 这一帧的封面缓存还对不对：水墨翻档与后台补齐都会让上一批解码作废。
+    ///
+    /// 缓存键里没有「哪一档」也没有「哪一趟」，所以不能只删 `None`：上一档解出来的
+    /// 彩色封面会原样留着继续画。整份清掉，可见行下一帧按需重解。
+    pub(in crate::ui::features::shelf) fn refresh_cover_generation(&mut self) {
         let ink = crate::ui::foundation::images::ink_images();
         if self.covers_ink != ink {
             self.covers.clear();
             self.covers_ink = ink;
         }
-        // 后台补齐作业把封面写回了 `covers/`：缓存里那些 `None` 都是补齐之前判的，
-        // 这一帧起全部重查一次。没有别的地方能通知到架面（作业跑在池子里的线程上）。
         let epoch = folio_core::cover_epoch();
         if self.covers_epoch != epoch {
             self.covers.clear();
             self.covers_epoch = epoch;
         }
-        if let Some(cached) = self.covers.get(&item.id) {
-            return cached.clone();
-        }
-        let decoded = self
-            .store
-            .as_ref()
-            .and_then(|store| store.book_cover(item.id).ok().flatten())
-            .and_then(|bytes| {
-                // 先试磁盘上那份缩略图（导入时已生成，见 `land_cover`）；
-                // 没有或读不动就退回原图 —— 缩略图是可丢弃的加速品。
-                let small = item
-                    .cover_root
-                    .as_deref()
-                    .zip(item.cover_ref.as_ref())
-                    .and_then(|(root, cover)| {
-                        let path = folio_core::content::assets::thumb::thumb_path(
-                            root,
-                            folio_core::infra::paths::THUMB_CARD_PX,
-                            cover,
-                        );
-                        std::fs::read(path).ok()
-                    });
-                small
-                    .as_deref()
-                    .and_then(cover_image)
-                    .or_else(|| cover_image(&bytes))
-            });
-        self.covers.insert(item.id, decoded.clone());
-        decoded
     }
 
     /// 一张卡 → 一格元素。
@@ -378,12 +381,12 @@ impl ShelfView {
             .gap_1()
             .cursor_pointer()
             // 按下去当场暗一截（`press_dim`），不等人把书打开才回话：移动端那一下轻点
-            // 在这里合成成 MouseDown/MouseUp（`plans/facts.md` Android 那一段），所以
+            // 在这里合成成 MouseDown/MouseUp（Android 那一段），所以
             // 这一条两端都吃得到。抬起不做动画而是立刻给 —— 指针跟着手指走，慢半拍的
             // 高亮比没有高亮更容易指错。
             .opacity(enter.progress(index) * selection_dim * press_dim)
             // 按下记「哪一张被按住了」，抬起或按到别处就清 —— 封面靠这一格收一档。
-            // 移动端的轻点会合成成 MouseDown/MouseUp（`plans/facts.md`），两端都吃得到。
+            // 移动端的轻点会合成成 MouseDown/MouseUp，两端都吃得到。
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 press_in.update(cx, |this, cx| {
                     if this.pressed_card != Some(book_id) {
@@ -640,7 +643,9 @@ mod tests {
 
     use std::time::Duration;
 
-    use super::{ENTER_DELAY_CAP, Enter};
+    use super::{ENTER_DELAY_CAP, Enter, thumb_of};
+    use folio_core::content::format::CoverRef;
+    use folio_core::store::ShelfItem;
 
     /// 一格从透明到到位要多久。测试里自己定一个数：进度只认「过去多久 vs 这一档」，
     /// 真值由主题的 `motion.duration_normal` 给（见 [`super::ShelfView::enter_clock`]）。
@@ -686,5 +691,53 @@ mod tests {
     fn a_settled_shelf_does_not_replay() {
         assert_eq!(enter(None, 0, 30), 1.0);
         assert_eq!(enter(None, 29, 30), 1.0);
+    }
+
+    fn item(cover_ref: Option<CoverRef>, root: Option<&str>) -> ShelfItem {
+        ShelfItem {
+            id: 7,
+            title: "书".into(),
+            authors: Vec::new(),
+            format: "epub".into(),
+            cover: None,
+            last_opened_at: None,
+            progress: None,
+            cover_ref,
+            cover_root: root.map(std::path::PathBuf::from),
+        }
+    }
+
+    /// 一格封面指去看得最便宜的那一份：卡片档缩略图，在 `.thumbs` 里，用封面哈希做名。
+    ///
+    /// 建卡那一刻就把路径推出来了（`cover_root` + `cover_ref`），解封面因此不必先回库；
+    /// 而路径不是 `covers/` 那份原图 —— 架上只要几百像素，原图常见 800×1200。
+    #[test]
+    fn the_card_points_at_the_card_thumb() {
+        let cover = CoverRef {
+            hash: "0123456789abcdef".into(),
+            mime: "image/jpeg".into(),
+        };
+        let thumb = thumb_of(&item(Some(cover), Some("/library"))).expect("有描述就该有缩略图路径");
+        assert_eq!(thumb.file_name().unwrap(), "0123456789abcdef.jpg");
+        assert!(
+            thumb.to_string_lossy().contains(".thumbs"),
+            "缩略图路径不在 .thumbs 里：{thumb:?}"
+        );
+        assert!(
+            !thumb.to_string_lossy().contains("/covers/"),
+            "架上那一格指到了原图：{thumb:?}"
+        );
+    }
+
+    /// 没有封面描述、或没有书库根：没有可读的缩略图，别去猜一个路径。
+    #[test]
+    fn without_cover_or_root_there_is_no_thumb() {
+        let cover = CoverRef {
+            hash: "0123456789abcdef".into(),
+            mime: "image/jpeg".into(),
+        };
+        assert_eq!(thumb_of(&item(None, Some("/library"))), None);
+        assert_eq!(thumb_of(&item(Some(cover), None)), None);
+        assert_eq!(thumb_of(&item(None, None)), None);
     }
 }

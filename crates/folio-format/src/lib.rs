@@ -231,7 +231,7 @@ pub const INDEX_VERSION: i64 = 15;
 /// `.md` 算进去、另一处不算，症状是同一本书每次开都重扫、或永远不重扫。
 ///
 /// 只有 `.txt` 那一条依赖，而它依赖的是**编译好且在用**的那一份：将来读者那一层
-/// （`plans/纯文本小说.md` 步骤四）换掉生效表时，改的是 [`novel::rules`] 里「生效那份」
+/// 换掉生效表时，改的是 [`novel::rules`] 里「生效那份」
 /// 怎么取，这一格不必动。
 pub fn rules_hash(format: Format) -> Option<String> {
     match format {
@@ -251,7 +251,7 @@ pub fn rules_hash(format: Format) -> Option<String> {
 ///
 /// 解析不了时回 `None`（坏 XHTML、空片段）：**绝不用字节数估**。字节↔字符的比例
 /// 在各章之间不均匀（中英混排、标签密度），估出来的百分比会不单调 ——
-/// 读者往下读而进度条后退，是产品上不可接受的（`plans/导入管线.md` §八 第 3 条）。
+/// 读者往下读而进度条后退，是产品上不可接受的。
 pub fn visible_chars(xhtml: &str) -> Option<usize> {
     Some(text_map(xhtml).chars())
 }
@@ -297,8 +297,7 @@ fn body_of(dom: &crate::dom::Dom) -> crate::dom::NodeId {
 /// **不进 [`FlowDoc`]、也不进 SQLite**：字体是**锦上添花**的那一层 —— 容器不在时的
 /// 表现是「回到今天的样子」（读者字体照常排，只是没有补缺字的那一份），
 /// 而不是少一页正文。于是 `fonts_at` 每次开书去容器现读一次，几个小文件、一次解压，
-/// 不常驻。（正文也不在库里，但它有 [`ChapterLocator`] 那条位置线，
-/// 见 `plans/text-out-of-db.md`；字体没有，只能每次现读。）
+/// 不常驻。（正文也不在库里，但它有 [`ChapterLocator`] 那条位置线；字体没有，只能每次现读）
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontBytes {
     /// 容器内的规范路径，与 `@font-face` 的 `src` 改写后同形（见 `css::FontSrc::Url`）。

@@ -212,16 +212,6 @@ fn progress_of(
     Some(((read + offset) / total as f32).clamp(0.0, 1.0))
 }
 
-/// 封面补齐那一趟要读的一行：`BookRow` 不带封面描述，而补齐既要判「指针在不在」
-/// 也要判「那个文件还在不在」。
-#[derive(Debug, Clone)]
-pub struct CoverBackfillRow {
-    pub id: i64,
-    pub path: String,
-    pub cover_hash: Option<String>,
-    pub cover_mime: Option<String>,
-}
-
 /// 源文件探测的失败原因；这只是当前快照，不授权删除书库记录。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceUnavailable {
@@ -374,20 +364,20 @@ impl Store {
     }
 
     /// 从 covers/ 读取封面，文件缺失返回 None；不从数据库读取或缓存封面字节。
+    ///
+    /// 锁只圈元数据查询，`fs::read` 在锁外：书架与笔记屏的每一本都走这一条。
     pub fn book_cover(&self, id: i64) -> Result<Option<Vec<u8>>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let row: Option<(String, Option<String>, Option<String>, String)> = conn
-            .query_row(
-                "SELECT path, cover_hash, cover_mime, managed_root FROM books WHERE id = ?1",
+        let row: Option<(Option<String>, Option<String>, String, String)> = {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            conn.query_row(
+                "SELECT cover_hash, cover_mime, managed_root, path FROM books WHERE id = ?1",
                 params![id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
-            .optional()?;
-        let Some((path, hash, mime, managed_root)) = row else {
-            return Ok(None);
+            .optional()?
         };
-        let (Some(hash), Some(mime)) = (hash, mime) else {
-            // 没有描述 = 这本书没有封面（Markdown / TXT，或 EPUB 里没声明）。
+        // 没有描述 = 这本书没有封面（Markdown / TXT，或 EPUB 里没声明）。
+        let Some((Some(hash), Some(mime), managed_root, path)) = row else {
             return Ok(None);
         };
         let root = asset_root(&managed_root, Path::new(&path));
@@ -569,25 +559,6 @@ impl Store {
             .unwrap_or_else(|e| e.into_inner())
             .keys()
             .any(|(id, _)| *id == book_id)
-    }
-
-    /// 返回全部行的封面描述，包括已有哈希但文件可能丢失的行。
-    /// 此处不打开容器；调用方按 book_root + cover::resolve 检查文件。
-    pub fn rows_for_cover_backfill(&self) -> Result<Vec<CoverBackfillRow>> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let mut stmt =
-            conn.prepare("SELECT id, path, cover_hash, cover_mime FROM books ORDER BY id")?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok(CoverBackfillRow {
-                    id: r.get(0)?,
-                    path: r.get(1)?,
-                    cover_hash: r.get(2)?,
-                    cover_mime: r.get(3)?,
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
     }
 
     /// 写一本书的封面描述（补齐那一趟的落点）：只动这两列，不碰进度、批注与索引版本。

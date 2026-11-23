@@ -35,7 +35,7 @@
 //! `window.on_mouse_event` 只活到本帧事件分发结束，所以 [`register`] 是被 paint 调的，
 //! 不是反过来。
 //!
-//! 菜单条是压在正文之上的**真按钮**而不是浮层：见 `page.rs` 模块注释与 `plans/facts.md`。
+//! 菜单条是压在正文之上的**真按钮**而不是浮层：见 `page.rs` 模块注释。
 //! 它画出的位置经 `canvas` 回写进会话的 `menu_bounds`：压在它上面的一击属于菜单，
 //! 不算「点别处清除」（[`ReaderSession::tap_with_selection`]）。
 //!

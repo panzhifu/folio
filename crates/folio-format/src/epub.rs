@@ -1651,7 +1651,7 @@ fn parse_chapter(
     with_text: bool,
 ) -> (Chapter, Vec<u32>) {
     // 正文这一趟一定要解出来一次：`char_len` 是全局字符进度的分母，必须在导入时
-    // 算准（`plans/导入管线.md` §八第 3 条）。留下来与否只看 `with_text`。
+    // 算准。留下来与否只看 `with_text`。
     // 两条读法按「正文本身是不是产物」分开：
     // - `with_text`：整条读出来，正文与两样数都在那份字符串上拿。
     // - 只做索引（导入走这一档）：正文不是产物，边解压边扫，整章字符串不进内存
@@ -2021,7 +2021,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         });
     // 声明的那一条与**实际读**的那一条可以不同：SVG 封面在架子上就是一块空白，而作者常常
     // 已经把位图那一份挂在 `fallback=` 上了。封面落盘按它自己字节的哈希命名
-    // （`plans/导入管线.md` §八第 4 条），所以这里换的只是「去哪儿读」，没有第二处键要跟着改
+    // ，所以这里换的只是「去哪儿读」，没有第二处键要跟着改
     // —— 这一点和图片那条路正相反，那条的键来自正文 `<img src>`，动不得。
     let cover_at = cover_item.map(|item| {
         let declared = resolve(&base_dir, &item.href);
@@ -2054,7 +2054,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         let href = resolve(&base_dir, &item.href);
         // 声明的那一份这一版解不动（`image/svg+xml` 是主流那一个）就沿 `fallback=` 换一份。
         // **换的只是去哪儿读**：`href` 那格仍是正文 `<img src>` 解出来的那一条，因为排版与
-        // 绘制都按它查表，而正文一个字都不许改（锚点坐标建在源文本上，`plans/Locator.md`）。
+        // 绘制都按它查表，而正文一个字都不许改（锚点坐标建在源文本上）。
         // 尺寸也跟着换成从位图那份的头部读，所以这类书第一次知道这张图占多大 ——
         // 不换的话拿到的是 `(0, 0)`，排版按 1:1 兜底，字节也画不出来。
         let (source, media_type) = match decodable_fallback(item, &by_id) {
@@ -2076,7 +2076,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
 
     // 章节：spine 顺序就是阅读顺序；`locate` 只定位条目，真正的解压与 DOM 解析
     // 交给 worker。每个 spine 条目都要解一次正文，因为 `chapters.char_len` 是全局
-    // 字符进度的分母，必须在导入时算准（`plans/导入管线.md` §八第 3 条）。
+    // 字符进度的分母，必须在导入时算准。
     //
     // 目录查标题的表在这里建一次（真章的空壳回落与 worker 用的是同一份），
     // 交给每个 worker 查；`toc` 之后要 move 进 `FlowDoc`。

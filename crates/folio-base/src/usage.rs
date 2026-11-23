@@ -68,8 +68,7 @@ impl Area {
 
 /// 要量的那几处去处。
 ///
-/// 后四类挂在 [`Self::library`] 底下（书库根是读者确认过的那个目录，`covers` / `.thumbs`
-/// / `.staging` 是它的三个区，见 `plans/导入管线.md` 第一、八节）。书库没确认过时它是
+/// 后四类挂在 [`Self::library`] 底下（书库根是读者确认过的那个目录，`covers` / `.thumbs` / `.staging` 是它的三个区）。书库没确认过时它是
 /// `None`，那三类自然就没有字节。
 #[derive(Clone, Debug)]
 pub struct Areas {

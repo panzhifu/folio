@@ -3,7 +3,7 @@
 //! gpui 的接触点收进 [`FontSink`] 一个 trait（app 用 `TextSystemSink` 实现）——
 //! 与 folio-render 的 `Measure` 同一条边界画法：接口在这一层，实现在 app。
 //!
-//! 上一版的完整设计文档见 `doc/字体加载优化.md`；行内注释保留搬迁时的口径。
+//! 完整设计见 `doc/字体.md` 的加载管线一节；行内注释保留搬迁时的口径。
 
 use std::collections::HashMap;
 use std::hash::Hash;

@@ -77,7 +77,7 @@ pub(crate) struct PlainFamily {
 ///
 /// 三格都吃同一份生效那套表：`split` 用 `markers` / `gates`，`info` 用 `meta` 那几串别名，
 /// `toc` 从切好的章表建。**没接的只剩一格**：`volumes` 那族认得出来但不切，它要的是目录
-/// 的第二层（`plans/纯文本小说.md` 的后续）。
+/// 的第二层。
 const TEXT: PlainFamily = PlainFamily {
     format: Format::Text,
     split: split_by_rules,
@@ -107,7 +107,7 @@ pub(crate) fn read_normalized(path: &Path) -> Result<String> {
 
 /// 索引那一趟 / 全文那一趟，两族共用这一份形状：怎么切由 `family` 给。
 ///
-/// **字数在这一趟算**（`chapters.char_len`，见 `plans/导入管线.md` §八 第 3 条）：
+/// **字数在这一趟算**（`chapters.char_len`）：
 /// 单文件格式的 I/O 本来就躲不掉（切章要把整份文本过一遍），所以这一趟的正文
 /// 已经在手上，数一遍是白拿的。数的是**包装之后**那份 XHTML 的可见文本 ——
 /// 与 `Chapter::inline` 同一条口径，也与引擎真正吃到的东西同一份。

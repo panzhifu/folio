@@ -135,8 +135,7 @@ impl Store {
     ///
     /// 不派生第二条查询的理由写在 [`ReadingSummary`] 上 —— 这一屏的每个数必须来自同一批
     /// 行，否则「今天 + 前两天 = 窗口合计」这种关系会在两次查询之间被新写入的会话打断。
-    /// `chars` 这一列在这里**故意不参与**：它的口径还没定（见 `plans/Locator.md` 的开放
-    /// 问题），所以汇总不出来「字数」这个数，等口径定了再补。
+    /// `chars` 这一列在这里**故意不参与**：它的口径还没定（开放问题），所以汇总不出来「字数」这个数，等口径定了再补。
     pub fn reading_summary(&self, days: usize, tz_offset_secs: i64) -> Result<ReadingSummary> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let today = local_day(now(), tz_offset_secs);

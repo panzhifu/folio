@@ -64,7 +64,7 @@ pub fn desaturate_author(color: Color) -> Color {
 
 #[cfg(test)]
 mod tests {
-    // 这个 crate 里 `use super::*` 会把 lib test 目标弄挂（`plans/testing.md`），逐条引。
+    // 这个 crate 里 `use super::*` 会把 lib test 目标弄挂，逐条引。
     use super::{run_color, run_color_link};
     use folio_core::content::format::css::computed::Color;
     use gpui_kit::{Hsla, Rgba, black};

@@ -179,7 +179,7 @@ pub const INDENT_STEPS: SliderSteps = SliderSteps {
     nudge: 0.5,
 };
 /// 版心：这一格满程 200 档，± 已经走到 100 像素一档仍要 40 下 —— 量程本身偏大，
-/// 见 `doc/排版设置操控.md` §三 那一条（它该改成档而不是像素）。
+/// 该改成档而不是像素。
 pub const MAX_MEASURE_STEPS: SliderSteps = SliderSteps {
     slide: 20.0,
     nudge: 100.0,

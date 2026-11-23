@@ -17,7 +17,7 @@
 //!
 //! 章节的源文本**已经是引擎就绪的 XHTML**（契约见 `format::Chapter`），provider
 //! 在解析时就把 Markdown / TXT 包好了，所以这里没有「按格式先包一层」的分支，
-//! `Format` 也不参与这条链（见 `plans/README.md` 的架构决策 ④）。
+//! `Format` 也不参与这条链。
 
 use std::collections::HashMap;
 use std::sync::Arc;

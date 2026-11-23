@@ -72,7 +72,7 @@ impl Dom {
     ///
     /// 这里记一次 [`Metric::DomParses`](crate::metrics::Metric::DomParses)：解析与读者偏好
     /// 无关，是章的**解析产物**，所以「改一次字号又重解析一遍」是能被数出来的浪费
-    /// （`plans/阅读管线.md` §十二那条计数断言用的就是这一格）。
+    /// （那条计数断言用的就是这一格）。
     pub fn parse(bytes: &[u8]) -> Dom {
         crate::metrics::Metric::DomParses.count();
         if bytes.len() > crate::limits::MAX_DOM_BYTES {

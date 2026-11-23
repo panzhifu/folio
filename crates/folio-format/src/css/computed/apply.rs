@@ -135,7 +135,7 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         // 写在子元素上并不会去掉父元素的下划线，这是那条规则最有名的坑）。对我们的
         // 行内/块级盒来说，「传播」与「继承」算出来的结果一致，所以这里按继承实现，
         // 差别只留在原子行内盒（inline-block、图片）上 —— 那种盒一期没有内容会吃到
-        // 父级装饰，见 `plans/facts.md`。
+        // 父级装饰。
         underline: parent.underline,
         line_through: parent.line_through,
         // `vertical-align` **不**继承（CSS 规定），所以 `baseline_shift` 不在这里出现：
@@ -1047,7 +1047,7 @@ pub(super) fn apply(
             // （`layout::collect` 的 `is_inline_flow` 与它给 `is_item` 那一个判据），所以
             // 从前存进去的 `InlineBlock` 没有人读 —— 屏上与 `display: block` 一模一样，而
             // `examples/css-gap` 报 `Applied`。行内块要的是 shrink-to-fit 的宽与「占一行内
-            // 位置」两件事，那一档还没做（见 `doc/css-没接住.md` 里 max-content 那条），
+            // 位置」两件事，那一档还没做
             // 所以这里宁可将它报成没接住。本机四本真书 `display: inline-block` 0 处。
             //
             // 表格四档 2026-10-29 接上：`layout::table` 抽网格、分列宽、摆格子。

@@ -231,7 +231,7 @@ fn log_event(event: &TaskEvent<Vec<ImportOutcome>>) {
                 }
             }
             // 一批一句总结。自动导入不打扰读者，但日志里要查得出这批是怎么结清的
-            // （`plans/基础设施.md` §3.2：批量作业要出报表）。
+            // （批量作业要出报表）。
             tracing::info!(
                 "watch: 一批 {} 本结清 —— {}",
                 outcomes.len(),

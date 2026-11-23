@@ -9,11 +9,12 @@ pub(in crate::ui::features::shelf) mod grid;
 pub(in crate::ui::features::shelf) mod network_import;
 pub(in crate::ui::features::shelf) mod scan;
 pub(in crate::ui::features::shelf) mod sheets;
+mod covers;
 mod source_details;
 pub(in crate::ui::features::shelf) mod status;
 pub(in crate::ui::features::shelf) mod toolbar;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ use gpui_kit::{
     Task, UniformListScrollHandle, WeakEntity, Window, canvas, div, px, uniform_list,
 };
 
-use super::components::book_card::{Card, Enter, GroupCard, TILE_SLOTS};
+use super::components::book_card::{Card, Enter, GroupCard};
 use super::components::book_menu;
 use crate::ui::components::{
     BottomSheetEvent, BottomSheetState, SearchBox, SearchBoxEvent, SearchDebounce, TopBar,
@@ -221,7 +222,7 @@ pub struct ShelfView {
     ///
     /// 导入会把文件**拷一份**进硬盘，所以位置要先说定。没定过的时候点导入不开选择器，
     /// 而是就地换成这块面板 —— 用普通按钮而不是浮层：浮层（长按菜单那条路）在
-    /// Android 上现在点不住，见 `plans/facts.md`。
+    /// Android 上现在点不住。
     pub(in crate::ui::features::shelf) confirming: bool,
     /// 封面解码结果，按书的主键存着。
     ///
@@ -237,6 +238,11 @@ pub struct ShelfView {
     /// 解这批封面时后台补齐作业走到第几趟（`folio_core::cover_epoch`）。
     /// 补回一本就把 `None` 缓存作废 —— 否则封面文件已经出现在 `covers/`，架面还画占位。
     pub(in crate::ui::features::shelf) covers_epoch: u64,
+    /// 已经派出去、还没回来的封面解码（书号）。同一本书只派一次：`uniform_list`
+    /// 每帧都会重造可见行，不拦的话一帧内就能给同一格排上十几个同样的作业。
+    ///
+    /// 回来之后从这一格拿走、写进 [`Self::covers`] 并 `notify` —— 下一帧那一格才有图。
+    covers_pending: HashSet<i64>,
     _search_watch: Subscription,
     /// 导入那条异步链：等选择器 → 把选中的文件交给后端管线 → 收事件直到这批结束。
     /// Task 一 drop 链就断，于是「选了文件但界面已经忘了」；而断在管线跑到一半时，
@@ -397,7 +403,11 @@ impl ShelfView {
                     let next = updates.read(cx).epoch();
                     if next != epoch {
                         epoch = next;
-                        this.covers.clear();
+                        // 只重查库行（书名、作者、进度、分组都可能变了）。封面不跟着清：
+                        // 封面文件的变化有自己的信号（`folio_core::cover_epoch`，补齐与
+                        // 重落地都会 bump）。从前这里连 `covers` 一起清 —— 巡检每 15 s
+                        // 就可能变一次 epoch，于是整架封面被重读一遍，而其中绝大多数
+                        // 封面根本没动过。
                         this.force_reload(cx);
                     }
                 }
@@ -493,6 +503,7 @@ impl ShelfView {
             covers: HashMap::new(),
             covers_ink: false,
             covers_epoch: folio_core::cover_epoch(),
+            covers_pending: HashSet::new(),
             _search_watch,
             _import: None,
             importing: None,
@@ -628,15 +639,10 @@ impl ShelfView {
                         .collect::<Vec<_>>(),
                     None => items,
                 };
-                // 先把封面解析出来再收集：`map(|item| self.card(item))` 那种写法同时借
-                // `self` 的不可变与可变两半，编译器不让过。
-                self.items = items
-                    .into_iter()
-                    .map(|item| {
-                        let cover = self.resolve_cover(&item);
-                        self.card(item, cover)
-                    })
-                    .collect();
+                // 封面**不在这里解**：整架一千本就是一千次文件打开，而真正上屏的
+                // 通常只有十几本。解在 `uniform_list` 的 item 闭包里按可见行做
+                // （[`Self::cover_visible`]），这里只把缩略图路径推出来。
+                self.items = items.into_iter().map(|item| self.card(item)).collect();
             }
             Some(Err(err)) => tracing::error!("ShelfView: 查书架失败 {err}"),
             None => {
@@ -680,40 +686,6 @@ impl ShelfView {
         if let Some(page) = self.group_page.as_ref().and_then(|page| page.upgrade()) {
             page.update(cx, |page, cx| page.force_reload(cx));
         }
-    }
-
-    /// 架面那几张组卡：每个组一张，卡上是这个组最后丢进去的那几本的封面。
-    ///
-    /// 封面走的是 [`Self::resolve_cover`] 那一条，与书卡同一份缓存：组卡与下面那片书
-    /// 十有八九是同一批封面，解两遍是白解。
-    ///
-    /// 查不动就是一片空的：架面少一排卡看着像「还没建组」，比摆几张假卡或整屏报错好。
-    fn tile_cards(&mut self) -> Vec<GroupCard> {
-        let Some(store) = &self.store else {
-            return Vec::new();
-        };
-        let Ok(tiles) = store.collection_tiles(TILE_SLOTS) else {
-            tracing::error!("ShelfView: 查组卡失败，架面那一排卡是空的");
-            return Vec::new();
-        };
-        tiles
-            .into_iter()
-            .map(|(collection, items)| {
-                let covers = items.iter().map(|item| self.resolve_cover(item)).collect();
-                GroupCard {
-                    id: collection.id,
-                    group: format!("shelf-tile-{}", collection.id).into(),
-                    face_id: format!("shelf-tile-face-{}", collection.id).into(),
-                    name: collection.name.into(),
-                    count: collection.book_count,
-                    // 这一组的「最近被翻开」取它自己那条序的头一本：`collection_tiles` 里
-                    // 那一串走的就是 `SHELF_ORDER`（最近在先），头一本的 `last_opened_at`
-                    // 就是库给组卡排序用的那个 `MAX(last_opened_at)` —— 同一把尺，不是近似。
-                    opened_at: items.first().and_then(|item| item.last_opened_at),
-                    covers,
-                }
-            })
-            .collect()
     }
 
     /// 架面那一条流的格子顺序：第 `ix` 格该从 `tiles` 还是 `items` 取。
@@ -1044,9 +1016,9 @@ impl ShelfView {
                 }
             }
         }
-        // 一句分类总结（`plans/基础设施.md` §3.2：批量作业要能聚合报表）。逐本的指名道姓
+        // 一句分类总结（批量作业要能聚合报表）。逐本的指名道姓
         // 在日志里（上面那几条 `Err`），界面上只报「几本、为什么」那一句 ——
-        // 可折叠的作业卡片仍是待决（`plans/导入管线.md` §十一 待决第 7 条）。
+        // 可折叠的作业卡片仍是待决。
         let report = ImportReport::tally(&outcomes);
         tracing::info!(
             "ShelfView: 一批 {} 本结清 —— {}",
@@ -2003,16 +1975,21 @@ impl ShelfView {
                                     ix,
                                     cx,
                                 ),
-                                Cell::Book(at) => this.card_element(
-                                    &this.items[at],
-                                    &labels,
-                                    cover_height,
-                                    &enter,
-                                    ix,
-                                    scroll_scale,
-                                    &mut *window,
-                                    cx,
-                                ),
+                                Cell::Book(at) => {
+                                    // 这一格这一帧真要上屏：封面在这里按需解。
+                                    // 缓存命中就直接贴，没解过就派作业、这一帧先画占位。
+                                    this.cover_visible(at, cx);
+                                    this.card_element(
+                                        &this.items[at],
+                                        &labels,
+                                        cover_height,
+                                        &enter,
+                                        ix,
+                                        scroll_scale,
+                                        &mut *window,
+                                        cx,
+                                    )
+                                }
                             }))
                             .into_any_element()
                     });
