@@ -6,7 +6,9 @@
 use std::sync::Arc;
 
 use super::ports::Measure;
-use folio_format::css::computed::{Color, ComputedStyle, TextShadow};
+use folio_format::css::computed::{
+    Color, ComputedStyle, EmphasisPosition, EmphasisStyle, TextShadow,
+};
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
 /// 由 `Measure` 的实现决定它对应哪个真实 family。
@@ -86,6 +88,11 @@ pub struct RunStyle {
     /// 共享一份 `Arc<[TextShadow]>` 而不是 `Vec`：`RunStyle` 每行每个 run 都要 clone 进
     /// `LineRun`（一章一万多次），有影子的 run 是极少数，空表克隆只加一次引用计数。
     pub text_shadows: Arc<[TextShadow]>,
+    /// `text-emphasis` 着重号形状、颜色与位置（2026-11-23）。`None` 形状 = 不画。
+    /// 绘制层在每个非空白字形旁画一个小圆点（实心/空心），位置由 `emphasis_position` 定。
+    pub emphasis: EmphasisStyle,
+    pub emphasis_color: Option<Color>,
+    pub emphasis_position: EmphasisPosition,
 }
 
 impl std::hash::Hash for RunStyle {
@@ -108,6 +115,9 @@ impl std::hash::Hash for RunStyle {
         for shadow in self.text_shadows.iter() {
             shadow.hash(state);
         }
+        (self.emphasis as u8).hash(state);
+        self.emphasis_color.hash(state);
+        (self.emphasis_position as u8).hash(state);
     }
 }
 
@@ -187,6 +197,9 @@ impl RunStyle {
             line_through: style.line_through,
             link: style.link,
             text_shadows: style.text_shadows.clone(),
+            emphasis: style.text_emphasis,
+            emphasis_color: style.text_emphasis_color,
+            emphasis_position: style.text_emphasis_position,
         }
     }
 

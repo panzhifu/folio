@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use folio_core::content::format::css::computed::{TextShadow, WritingMode};
+use folio_core::content::format::css::computed::{
+    EmphasisPosition, EmphasisStyle, TextShadow, WritingMode,
+};
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode, cjk_latin_gap};
 use gpui_kit::{
@@ -80,6 +82,11 @@ pub struct GlyphRun {
     /// 与 `hit`/选区同一句规则（见 `folio_core::layout::Justify`）。
     pub justify: Option<Justify>,
     pub justify_shift: f32,
+    /// `text-emphasis` 着重号：形状、颜色（`None` = 跟字色）、位置。绘制层在每个非空白
+    /// 字形旁画一个小圆点/空心圈，位置由 `emphasis_position` 决定（横排 over 在字上方）。
+    pub emphasis: EmphasisStyle,
+    pub emphasis_color: Option<Hsla>,
+    pub emphasis_position: EmphasisPosition,
     /// 折页那一档给这条 run 的裁剪：这个字按它的**平面位置**判还在不在这一张纸上。
     ///
     /// 两张纸各带一个，而且两侧的判据严格互补（[`turn_animation::Cut::keeps`] 用的是带符号
@@ -121,6 +128,9 @@ impl GlyphRun {
             letter_spacing: 0.0,
             justify: None,
             justify_shift: 0.0,
+            emphasis: EmphasisStyle::None,
+            emphasis_color: None,
+            emphasis_position: EmphasisPosition::Over,
             cut: None,
         }
     }
@@ -171,6 +181,19 @@ impl GlyphRun {
     /// `text-shadow` 的图层表，直接来自 `RunStyle`（场景层从 `RowUnit` 递过来）。
     pub fn shadowed(mut self, shadows: Arc<[TextShadow]>) -> Self {
         self.text_shadows = shadows;
+        self
+    }
+
+    /// `text-emphasis` 着重号：形状、颜色（`None` 跟字色）、位置。
+    pub fn emphasis(
+        mut self,
+        style: EmphasisStyle,
+        color: Option<Hsla>,
+        position: EmphasisPosition,
+    ) -> Self {
+        self.emphasis = style;
+        self.emphasis_color = color;
+        self.emphasis_position = position;
         self
     }
 
@@ -911,7 +934,45 @@ fn paint_run(
             );
         }
     }
+    // 着重号（`text-emphasis`）：整条 run 一个字一个字画完字之后，再逐字点/圈。
+    if run.emphasis != EmphasisStyle::None && run.cut.is_none() {
+        paint_emphasis(window, origin, run, &shaped);
+    }
     glyphs
+}
+
+/// `text-emphasis` 着重号：逐字形在基线**上方**（over）或**下方**（under）点一个小方块近似圆点。
+///
+/// 近似说明（如实记录）：`ShapedGlyph` 不带字形前进量，这里按字符类别估每字中心
+/// （CJK ~1em、拉丁/空格 ~0.5em），空白字符不点。`open dot` / `triangle` / `sesame`
+/// 这些变体统一画成实心小方块 —— 形状区分留待后续，先保证「着重号出现在该在的位置」。
+/// 横竖两轴经 `flow.project_delta` 折成物理位移，竖排不会画到错的一侧。
+fn paint_emphasis(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun, shaped: &LineLayout) {
+    let fs = run.font_size;
+    let color = run.emphasis_color.unwrap_or(run.color);
+    let dot = (fs * 0.16).max(1.0);
+    let depth = match run.emphasis_position {
+        EmphasisPosition::Over => -fs * 0.85,
+        EmphasisPosition::Under => fs * 0.15,
+    };
+    for_each_glyph(run, shaped, |x, y, _run, glyph| {
+        let Some(ch) = run.text.get(glyph.index..).and_then(|s| s.chars().next()) else {
+            return;
+        };
+        if ch.is_whitespace() {
+            return;
+        }
+        let advance = if (ch as u32) >= 0x2e80 { fs } else { fs * 0.5 };
+        let (ddx, ddy) = run.flow.project_delta(advance * 0.5, depth);
+        let center = point(origin.x + px(x + ddx), origin.y + px(y + ddy));
+        window.paint_quad(fill(
+            Bounds::new(
+                point(center.x - px(dot / 2.0), center.y - px(dot / 2.0)),
+                size(px(dot), px(dot)),
+            ),
+            color,
+        ));
+    });
 }
 
 #[cfg(test)]

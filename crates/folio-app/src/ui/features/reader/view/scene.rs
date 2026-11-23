@@ -490,6 +490,12 @@ impl Scene {
                             // 影子与装饰线同一条来路：`RunStyle` → `RowUnit` → 这里。
                             // 绘制层在影子非空时先铺一趟影子再画字（见 `paint::paint_run`）。
                             .shadowed(unit.text_shadows.clone())
+                            // 着重号：颜色缺省跟字色，绘制层在每个非空白字形旁画点。
+                            .emphasis(
+                                unit.emphasis,
+                                unit.emphasis_color.map(|c| run_color(Some(c), foreground)),
+                                unit.emphasis_position,
+                            )
                             // 字距与两端对齐：绘制在 run 内按字符序号 / 隙序号逐字右推，
                             // 与 `hit`/选区同一句规则。
                             .spacing(

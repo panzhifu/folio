@@ -12,7 +12,8 @@ use folio_core::content::anchor::{CharLines, TextMap};
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{
-    Color, ComputedStyle, Length, StyledDom, TextAlign, TextShadow, WritingMode, cascade,
+    Color, ComputedStyle, EmphasisPosition, EmphasisStyle, Length, StyledDom, TextAlign,
+    TextShadow, WritingMode, cascade,
 };
 use folio_core::content::format::css::{Origin, PageMargins, RuleSet, chapter_style_rules};
 use folio_core::content::hit::{Hit, paragraph_range_indexed};
@@ -325,6 +326,11 @@ pub struct RowUnit {
     /// `None` = 这一行不两端对齐。
     pub justify: Option<Justify>,
     pub justify_shift: f32,
+    /// `text-emphasis` 着重号：形状、颜色、位置（2026-11-23）。绘制层据它在每个字形旁
+    /// 画小圆点。形状 `None` 时整片不画。
+    pub emphasis: EmphasisStyle,
+    pub emphasis_color: Option<Color>,
+    pub emphasis_position: EmphasisPosition,
 }
 
 /// 行内图片在行内的 x。
@@ -1026,6 +1032,9 @@ impl Document {
                             letter_spacing: run.style.letter_spacing,
                             justify,
                             justify_shift: justify.map_or(0.0, |j| j.shift(gap_cursor)),
+                            emphasis: run.style.emphasis,
+                            emphasis_color: run.style.emphasis_color,
+                            emphasis_position: run.style.emphasis_position,
                         }));
                     }
                     // 这一段点过的隙数（空格或字符，看摊法）；空片段也照数，与排版同源。
@@ -1069,6 +1078,10 @@ impl Document {
                             // 标记挂在流动之外，不参与两端对齐。
                             justify: None,
                             justify_shift: 0.0,
+                            // 列表标记不带着重号（它本身是装饰）。
+                            emphasis: marker.style.emphasis,
+                            emphasis_color: marker.style.emphasis_color,
+                            emphasis_position: marker.style.emphasis_position,
                         }));
                     }
                 }
