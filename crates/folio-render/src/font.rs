@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use super::ports::Measure;
 use folio_format::css::computed::{
-    Color, ComputedStyle, EmphasisPosition, EmphasisStyle, TextShadow,
+    Color, ComputedStyle, DecorationStyle, EmphasisPosition, EmphasisStyle, TextShadow,
 };
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
@@ -80,6 +80,10 @@ pub struct RunStyle {
     /// 所以排版层只负责把它带到 run 上。
     pub underline: bool,
     pub line_through: bool,
+    /// `text-decoration-style`：实线、双线、点线、虚线、波浪线。只作用在两条装饰线上。
+    pub decoration_style: DecorationStyle,
+    /// `text-decoration-color`。`None` = 跟字色（CSS 的 `currentColor`）。
+    pub decoration_color: Option<Color>,
     /// 这一段在不在一条链接里（[`ComputedStyle::link`]）。作者没写 `color` 时，绘制层拿它
     /// 换**当前主题**的链接色；作者写了就照作者的走。
     pub link: bool,
@@ -109,6 +113,8 @@ impl std::hash::Hash for RunStyle {
         self.baseline_shift.to_bits().hash(state);
         self.underline.hash(state);
         self.line_through.hash(state);
+        (self.decoration_style as u8).hash(state);
+        self.decoration_color.hash(state);
         self.link.hash(state);
         // 影子表：条数 + 逐条按值（`TextShadow` 自己实现了 Hash，f32 走 `to_bits`）。
         self.text_shadows.len().hash(state);
@@ -195,6 +201,8 @@ impl RunStyle {
             baseline_shift: style.baseline_shift,
             underline: style.underline,
             line_through: style.line_through,
+            decoration_style: style.decoration_style,
+            decoration_color: style.decoration_color,
             link: style.link,
             text_shadows: style.text_shadows.clone(),
             emphasis: style.text_emphasis,
@@ -296,7 +304,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::RunStyle;
-    use folio_format::css::computed::{ComputedStyle, TextShadow};
+    use folio_format::css::computed::{Color, ComputedStyle, DecorationStyle, TextShadow};
 
     fn shadow(dy: f32) -> TextShadow {
         TextShadow {
@@ -328,5 +336,29 @@ mod tests {
         let plain = RunStyle::new(&ComputedStyle::default());
         assert!(plain.text_shadows.is_empty());
         assert_ne!(a, plain);
+    }
+
+    /// `text-decoration-style` / `-color` 也要进 run 样式：只带两个布尔的话，波浪线
+    /// 与红线下划线到绘制层就退化成同一条实线、跟字色。
+    #[test]
+    fn the_run_style_carries_decoration_style_and_color() {
+        let wavy = ComputedStyle {
+            underline: true,
+            decoration_style: DecorationStyle::Wavy,
+            decoration_color: Some(Color(255, 0, 0, 255)),
+            ..Default::default()
+        };
+        let run = RunStyle::new(&wavy);
+        assert!(run.underline);
+        assert_eq!(run.decoration_style, DecorationStyle::Wavy);
+        assert_eq!(run.decoration_color, Some(Color(255, 0, 0, 255)));
+        assert_ne!(
+            run,
+            RunStyle::new(&ComputedStyle {
+                underline: true,
+                ..Default::default()
+            }),
+            "形状不同必须去重成两格"
+        );
     }
 }

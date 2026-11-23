@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use folio_core::content::format::css::computed::{
-    EmphasisPosition, EmphasisStyle, TextShadow, WritingMode,
+    DecorationStyle, EmphasisPosition, EmphasisStyle, TextShadow, WritingMode,
 };
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode, cjk_latin_gap};
@@ -28,6 +28,9 @@ use gpui_kit::{
 
 use crate::ui::features::reader::components::selection::{self, SelectionVisual};
 use crate::ui::features::reader::model::session::ReaderSession;
+
+mod decorations;
+use decorations::{decoration_y, paint_emphasis, paint_rule, paint_shadows};
 
 /// 一条已经定好位置的 run，等于 `folio_core::layout::LineRun` 的绘制侧投影。
 /// `x` / `baseline` 相对本元素原点（行框左上角，未滚动时就是版心左上角）。
@@ -53,6 +56,9 @@ pub struct GlyphRun {
     /// 那条样式方法的默认值一致 —— 两端各定一个数的话，同一本书在两处会画得不一样。
     pub underline: bool,
     pub line_through: bool,
+    /// 装饰线形状与颜色（`text-decoration-style` / `-color`）。颜色 `None` = 跟字色。
+    pub decoration_style: DecorationStyle,
+    pub decoration_color: Option<Hsla>,
     /// `text-shadow` 的图层表（CSS 可继承、可多值）。空表是常态，克隆只加一次引用计数。
     ///
     /// 影子必须在**整条 run 的正文字画完之前**先铺完：逐字「先画影子再画字」时，
@@ -119,6 +125,8 @@ impl GlyphRun {
             flow: WritingMode::HorizontalTb,
             underline: false,
             line_through: false,
+            decoration_style: DecorationStyle::Solid,
+            decoration_color: None,
             text_shadows: Arc::default(),
             // 默认按字号一档（UA 的 `line-height: normal` 近似）。真排版会用
             // `RunStyle::box_height()` 覆盖它，见 [`GlyphRun::in_box`]。
@@ -175,6 +183,13 @@ impl GlyphRun {
     pub fn decorate(mut self, underline: bool, line_through: bool) -> Self {
         self.underline = underline;
         self.line_through = line_through;
+        self
+    }
+
+    /// 装饰线的形状与颜色。颜色 `None` = 跟字色（CSS 的 `currentColor`）。
+    pub fn decoration(mut self, style: DecorationStyle, color: Option<Hsla>) -> Self {
+        self.decoration_style = style;
+        self.decoration_color = color;
         self
     }
 
@@ -589,29 +604,6 @@ impl Default for GlyphsElement {
     }
 }
 
-/// 两条装饰线的 y，全按 gpui `paint_line` 的式子来，不自定比例。
-///
-/// 输入是「这一 run 的基线 y、inline box 高、shaping 报的 ascent/descent」。gpui 里
-/// 盒顶在 `origin.y`、基线落在 `盒顶 + padding_top + ascent`，其中
-/// `padding_top = (line_height − ascent − descent) / 2`；下划线再往下一条
-/// `descent × 0.618`（gpui 的 `UNDERLINE_DESCENT_OFFSET_FACTOR`，它把那个数包在公开函数
-/// [`gpui::underline_y_offset`] 里），删除线落在 `盒顶 + (ascent/2 + padding_top + ascent) / 2`。
-/// 自己猜一个「基线下 2px」那种数，换字号就会露出：线与字之间的缝会跟着字号涨缩，
-/// 而 gpui 自己画的那条不会 —— 两条线就会在不同字号的段落里对不齐。
-fn decoration_y(
-    baseline: Pixels,
-    box_height: Pixels,
-    ascent: Pixels,
-    descent: Pixels,
-) -> (Pixels, Pixels) {
-    let padding_top = (box_height - ascent - descent) / 2.;
-    let baseline_offset = padding_top + ascent;
-    let top = baseline - baseline_offset;
-    let underline = top + baseline_offset + descent * 0.618;
-    let strikethrough = top + (ascent * 0.5 + baseline_offset) * 0.5;
-    (underline, strikethrough)
-}
-
 /// shaping 的**唯一入口**：一条 run → 一份几何。
 ///
 /// 走 `layout_line` 而不是 `shape_line`：后者要多造一份 `decoration_runs`（颜色、下划线、
@@ -635,12 +627,12 @@ pub(in crate::ui::features::reader) fn shape(window: &Window, run: &GlyphRun) ->
         // 就无从切起 —— 它们不影响回来的几何，留着是为了哪天传多条 run 时口径不漂。
         underline: run.underline.then_some(UnderlineStyle {
             thickness: px(1.),
-            color: Some(run.color),
-            wavy: false,
+            color: Some(run.decoration_color.unwrap_or(run.color)),
+            wavy: run.decoration_style == DecorationStyle::Wavy,
         }),
         strikethrough: run.line_through.then_some(StrikethroughStyle {
             thickness: px(1.),
-            color: Some(run.color),
+            color: Some(run.decoration_color.unwrap_or(run.color)),
         }),
     };
     let layout =
@@ -683,27 +675,6 @@ fn wants_synthetic_bold_when(font: &Font, same_face: bool) -> bool {
 
 fn wants_synthetic_bold(font: &Font) -> bool {
     font.weight.0 >= 600.0
-}
-
-/// 一层 `text-shadow` 要画几份、各偏移多少、各用多少不透明度（相对文字色的 alpha）。
-///
-/// 模糊半径没有对应的绘制原语（gpui 只有纯色四边形与字形），所以按半径摊成对角副本：
-/// `blur = 1px` 时是中心一份加四份 0.5px 的淡边，这个尺寸下与真高斯在屏上分不出来。
-/// 副本数封顶 5 份、半径封顶 3px —— 真书里这个值普遍是 1，作者写大了也只是多画几遍，
-/// 不会把一帧画成几十份。
-fn shadow_copies(shadow: TextShadow) -> Vec<(f32, f32, f32)> {
-    if shadow.blur < 0.5 {
-        return vec![(shadow.dx, shadow.dy, 1.0)];
-    }
-    let r = (shadow.blur / 2.0).min(3.0);
-    let alpha = 0.6;
-    vec![
-        (shadow.dx, shadow.dy, alpha),
-        (shadow.dx + r, shadow.dy + r, alpha),
-        (shadow.dx + r, shadow.dy - r, alpha),
-        (shadow.dx - r, shadow.dy + r, alpha),
-        (shadow.dx - r, shadow.dy - r, alpha),
-    ]
 }
 
 /// 走一遍这一条 run 的字形，按阅读序算好每个字的**物理位置**（相对元素原点），
@@ -788,42 +759,6 @@ fn for_each_glyph(
     kept
 }
 
-/// 把一条 run 的 `text-shadow` 铺到当前的绘制位置（通常是**字形那一层之前**）。
-///
-/// 逐字「先影子后字」的写法不行：后一个字的影子会压住前一个字的笔画 —— 偏移只有一两 px，
-/// 而字形本来就互相压边。所以整条 run 的影子先铺完，字再统一画一遍。
-///
-/// 调用点必须在 `paint_layer` **外面**，原因见 [`GlyphsElement::paint`] 里那段注释：
-/// 层里所有精灵共用一个 `order`，场景会按图集 tile 号再排一次，白影可能排到字后面去。
-fn paint_shadows(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun) {
-    if run.text.is_empty() || run.text_shadows.is_empty() {
-        return;
-    }
-    let font_size = px(run.font_size);
-    let shaped = match &run.shaped {
-        Some(layout) => layout.clone(),
-        None => shape(window, run),
-    };
-    for shadow in run.text_shadows.iter() {
-        let base = crate::ui::foundation::style::run_color(shadow.color, run.color);
-        for (dx, dy, alpha) in shadow_copies(*shadow) {
-            let shade = Hsla {
-                a: base.a * alpha,
-                ..base
-            };
-            for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
-                let _ = window.paint_glyph(
-                    point(origin.x + px(x + dx), origin.y + px(y + dy)),
-                    shaped_run.font_id,
-                    glyph.id,
-                    font_size,
-                    shade,
-                );
-            });
-        }
-    }
-}
-
 fn paint_run(
     window: &mut Window,
     origin: Point<Pixels>,
@@ -882,8 +817,13 @@ fn paint_run(
         // 所以这里自己走 `paint_quad`。
         // 「离基线多远」仍按横排那一份式子算：把基线喂 0，拿回来的就是纯深度；
         // 深度与长度都经同一处投影换成物理的 x / y —— `vertical-rl` 的正深度往**左**。
+        //
+        // 竖排这一档只按**实线**画：波浪/点/虚线要在行的推进轴上切段或折线，而竖排的
+        // 轴是转置过的；本书语料里 `text-decoration-style` 与竖排没有同时出现，先保住
+        // 颜色，不在这里再发明一套斜向几何。
         let (u, s) = decoration_y(px(0.0), px(run.box_height), shaped.ascent, shaped.descent);
         let width = shaped.width;
+        let color = run.decoration_color.unwrap_or(run.color);
         for (on, depth) in [
             (run.underline, f32::from(u)),
             (run.line_through, f32::from(s)),
@@ -901,7 +841,7 @@ fn paint_run(
                     ),
                     size(px(lx), px(lt)),
                 ),
-                run.color,
+                color,
             ));
         }
     } else if (run.underline || run.line_through) && run.cut.is_none() {
@@ -912,25 +852,25 @@ fn paint_run(
             shaped.descent,
         );
         let width = shaped.width;
+        let color = run.decoration_color.unwrap_or(run.color);
         if run.underline {
-            window.paint_underline(
+            paint_rule(
+                window,
                 point(baseline_x, underline_y),
                 width,
-                &UnderlineStyle {
-                    thickness: px(1.),
-                    color: Some(run.color),
-                    wavy: false,
-                },
+                color,
+                run.decoration_style,
+                true,
             );
         }
         if run.line_through {
-            window.paint_strikethrough(
+            paint_rule(
+                window,
                 point(baseline_x, strikethrough_y),
                 width,
-                &StrikethroughStyle {
-                    thickness: px(1.),
-                    color: Some(run.color),
-                },
+                color,
+                run.decoration_style,
+                false,
             );
         }
     }
@@ -941,40 +881,6 @@ fn paint_run(
     glyphs
 }
 
-/// `text-emphasis` 着重号：逐字形在基线**上方**（over）或**下方**（under）点一个小方块近似圆点。
-///
-/// 近似说明（如实记录）：`ShapedGlyph` 不带字形前进量，这里按字符类别估每字中心
-/// （CJK ~1em、拉丁/空格 ~0.5em），空白字符不点。`open dot` / `triangle` / `sesame`
-/// 这些变体统一画成实心小方块 —— 形状区分留待后续，先保证「着重号出现在该在的位置」。
-/// 横竖两轴经 `flow.project_delta` 折成物理位移，竖排不会画到错的一侧。
-fn paint_emphasis(window: &mut Window, origin: Point<Pixels>, run: &GlyphRun, shaped: &LineLayout) {
-    let fs = run.font_size;
-    let color = run.emphasis_color.unwrap_or(run.color);
-    let dot = (fs * 0.16).max(1.0);
-    let depth = match run.emphasis_position {
-        EmphasisPosition::Over => -fs * 0.85,
-        EmphasisPosition::Under => fs * 0.15,
-    };
-    for_each_glyph(run, shaped, |x, y, _run, glyph| {
-        let Some(ch) = run.text.get(glyph.index..).and_then(|s| s.chars().next()) else {
-            return;
-        };
-        if ch.is_whitespace() {
-            return;
-        }
-        let advance = if (ch as u32) >= 0x2e80 { fs } else { fs * 0.5 };
-        let (ddx, ddy) = run.flow.project_delta(advance * 0.5, depth);
-        let center = point(origin.x + px(x + ddx), origin.y + px(y + ddy));
-        window.paint_quad(fill(
-            Bounds::new(
-                point(center.x - px(dot / 2.0), center.y - px(dot / 2.0)),
-                size(px(dot), px(dot)),
-            ),
-            color,
-        ));
-    });
-}
-
 #[cfg(test)]
 mod tests {
     //! 装饰线的纵向落点。gpui 的 `TestWindow` 不暴露绘制场景（M5 重构时就
@@ -983,9 +889,8 @@ mod tests {
     //!
     //! 点名导入而不是 `use super::*`：`gpui_kit` 转出整个 `gpui`，里面有个叫 `test` 的属性宏，
     //! glob 会让 `#[test]` 递归展开成它。
-    use super::{
-        WAVE_LENGTH, decoration_y, shadow_copies, wants_synthetic_bold_when, wave_half_waves,
-    };
+    use super::decorations::shadow_copies;
+    use super::{WAVE_LENGTH, decoration_y, wants_synthetic_bold_when, wave_half_waves};
     use folio_core::content::format::css::computed::TextShadow;
     use gpui_kit::{Font, FontWeight, Pixels, px};
 

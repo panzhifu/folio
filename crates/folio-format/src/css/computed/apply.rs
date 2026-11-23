@@ -151,6 +151,10 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         // 父级装饰。
         underline: parent.underline,
         line_through: parent.line_through,
+        // 形状与颜色跟着同一条「传播按继承近似」走：子元素只继承了下划线布尔，
+        // 而线还是子元素那份样式画的，不带上这两格就会把波浪线画成实线、红线变字色。
+        decoration_style: parent.decoration_style,
+        decoration_color: parent.decoration_color,
         // `vertical-align` **不**继承（CSS 规定），所以 `baseline_shift` 不在这里出现：
         // 上标只该抬高它自己那一小段，而不是让整段正文跟着上浮。
         // orphans / widows 在 CSS 里是**可继承**的（分片属性里只有这两个继承），
@@ -1153,6 +1157,31 @@ pub(super) fn apply(
             Some((underline, line_through)) => {
                 style.underline = underline;
                 style.line_through = line_through;
+                // 简写里的线型与颜色（`underline wavy #f00`）只在真简写上认：
+                // `text-decoration-line` 按规范只收线种，不能顺手把 `wavy` 吃掉。
+                if matches!(
+                    decl.property.as_str(),
+                    "text-decoration" | "-webkit-text-decoration"
+                ) && (underline || line_through)
+                {
+                    // 简写没写的部分按初值重置（`solid` / 跟字色），与 CSS 一致；
+                    // 不然前一条 `text-decoration-style: wavy` 会漏到这一条后面。
+                    style.decoration_style = DecorationStyle::Solid;
+                    style.decoration_color = None;
+                    for token in value.split_whitespace() {
+                        match token.to_ascii_lowercase().as_str() {
+                            "double" => style.decoration_style = DecorationStyle::Double,
+                            "dotted" => style.decoration_style = DecorationStyle::Dotted,
+                            "dashed" => style.decoration_style = DecorationStyle::Dashed,
+                            "wavy" => style.decoration_style = DecorationStyle::Wavy,
+                            "solid" => style.decoration_style = DecorationStyle::Solid,
+                            _ => {}
+                        }
+                        if let Some(color) = parse_color(token) {
+                            style.decoration_color = Some(color);
+                        }
+                    }
+                }
                 true
             }
             None => false,

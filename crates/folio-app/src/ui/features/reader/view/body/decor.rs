@@ -7,11 +7,13 @@ use gpui_kit::component::StyledExt as _;
 
 use super::images::painted_picture;
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
-use crate::ui::features::reader::view::scene::{BlockDecor, BlockPicture};
+use crate::ui::features::reader::view::scene::{
+    BlockDecor, BlockOutline, BlockPicture, BlockShadow,
+};
 use folio_core::content::format::css::computed::BorderStyle;
 use gpui_kit::{
-    AnyElement, App, Background, Corners, Entity, EntityId, Hsla, IntoElement, ParentElement as _,
-    PathBuilder, Pixels, Point, RenderImage, Styled, Window, div, img, point, px,
+    AnyElement, App, Background, BoxShadow, Corners, Entity, EntityId, Hsla, IntoElement,
+    ParentElement as _, PathBuilder, Pixels, Point, RenderImage, Styled, Window, div, img, point, px,
 };
 
 /// 把要盖在纸上的那一个多边形填进场景。顶点已经带在元素坐标里（与字形的 `run.x` /
@@ -110,6 +112,117 @@ pub(super) fn fill_rounded_quad(
             bottom_left: px(radius[3]),
         })
         .into_any_element()
+}
+
+/// 把作者写的阴影层折成 gpui 的 [`BoxShadow`]。
+///
+/// CSS 的第四个数是 `spread`，引擎这一版只收到第三个数（模糊），所以 `spread` 恒为 0；
+/// 负模糊在 CSS 里非法，`blur` 已是解析期的既成数，这里只把非有限值挡掉。
+fn box_shadows(layers: &[BlockShadow]) -> Vec<BoxShadow> {
+    layers
+        .iter()
+        .filter(|layer| layer.blur.is_finite() && layer.dx.is_finite() && layer.dy.is_finite())
+        .map(|layer| {
+            let shadow = BoxShadow::new(px(layer.dx), px(layer.dy), layer.color)
+                .blur_radius(px(layer.blur.max(0.0)));
+            if layer.inset {
+                shadow.inset()
+            } else {
+                shadow
+            }
+        })
+        .collect()
+}
+
+/// 一块没有内容的盒子，只用来让 gpui 画它自己的 `box-shadow`（外阴影或内阴影）。
+///
+/// 阴影的几何与圆角都取自这块装饰的边框盒；背景、边框由别的元素画。外阴影必须在
+/// 底色**之前**入树、内阴影在底色之后，否则会盖错一层。
+fn shadow_child(
+    x: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    radius: [f32; 4],
+    shadows: Vec<BoxShadow>,
+) -> AnyElement {
+    div()
+        .absolute()
+        .left(px(x))
+        .top(px(top))
+        .w(px(width))
+        .h(px(height))
+        .corner_radii(Corners {
+            top_left: px(radius[0]),
+            top_right: px(radius[1]),
+            bottom_right: px(radius[2]),
+            bottom_left: px(radius[3]),
+        })
+        .shadow(shadows)
+        .into_any_element()
+}
+
+/// `outline`：画在边框盒外侧的一圈，`offset` 是它与边框之间的缝（可为负）。
+///
+/// 四边各一条，复用 [`push_border`] 的分档画法 —— 轮廓的 `dashed` / `dotted` 与边框
+/// 是同一条规则，不该有两套。轮廓**不占几何**，所以这里只按作者给的宽和偏移往外扩。
+fn push_outline(parts: &mut Vec<AnyElement>, decor: &BlockDecor, outline: BlockOutline) {
+    let width = outline.width;
+    if width <= 0.0 || !width.is_finite() {
+        return;
+    }
+    let offset = if outline.offset.is_finite() {
+        outline.offset
+    } else {
+        0.0
+    };
+    let x = decor.x - offset - width;
+    let top = decor.top - offset - width;
+    let outer_w = decor.width + 2.0 * (offset + width);
+    let outer_h = decor.height + 2.0 * (offset + width);
+    if outer_w <= 0.0 || outer_h <= 0.0 {
+        return;
+    }
+    push_border(
+        parts,
+        x,
+        top,
+        outer_w,
+        width,
+        outline.color,
+        outline.style,
+        0,
+    );
+    push_border(
+        parts,
+        x,
+        top + outer_h - width,
+        outer_w,
+        width,
+        outline.color,
+        outline.style,
+        2,
+    );
+    push_border(
+        parts,
+        x,
+        top,
+        width,
+        outer_h,
+        outline.color,
+        outline.style,
+        3,
+    );
+    push_border(
+        parts,
+        x + outer_w - width,
+        top,
+        width,
+        outer_h,
+        outline.color,
+        outline.style,
+        1,
+    );
 }
 
 /// 沿一条边框带子的长边切出「实、空、实…」，返回每段的 `(起点, 长度)`。
@@ -285,6 +398,23 @@ pub(super) fn decoration_child(
     cx: &mut App,
 ) -> Vec<AnyElement> {
     let mut parts = Vec::new();
+    // 外阴影在底色之前：CSS 的 `box-shadow` 画在盒子后面；内阴影在底色之后、边框之前。
+    let drop: Vec<BlockShadow> = decor
+        .box_shadows
+        .iter()
+        .copied()
+        .filter(|shadow| !shadow.inset)
+        .collect();
+    if !drop.is_empty() {
+        parts.push(shadow_child(
+            decor.x,
+            decor.top,
+            decor.width,
+            decor.height,
+            decor.radius,
+            box_shadows(&drop),
+        ));
+    }
     // 作者声明的底色**照画**，水墨那一档也一样：那一档是「正常版式、全黑白」，不是
     // 「把书里的颜色撤掉」。墨水下这块颜色已经在 `Scene` 里去过饱和，这里不另判一档。
     if let Some(background) = decor.background {
@@ -304,6 +434,22 @@ pub(super) fn decoration_child(
             continue;
         };
         parts.push(background_child(&decor, picture, rendered));
+    }
+    let inset: Vec<BlockShadow> = decor
+        .box_shadows
+        .iter()
+        .copied()
+        .filter(|shadow| shadow.inset)
+        .collect();
+    if !inset.is_empty() {
+        parts.push(shadow_child(
+            decor.x,
+            decor.top,
+            decor.width,
+            decor.height,
+            decor.radius,
+            box_shadows(&inset),
+        ));
     }
     let [top, right, bottom, left] = decor.border;
     if top.0 > 0.0 {
@@ -354,5 +500,48 @@ pub(super) fn decoration_child(
             1,
         );
     }
+    if let Some(outline) = decor.outline {
+        push_outline(&mut parts, &decor, outline);
+    }
     parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockShadow, box_shadows};
+    use gpui_kit::{hsla, px};
+
+    /// 阴影层原样进 gpui：顺序、偏移、模糊、`inset` 都对；非有限数挡掉，负模糊归 0。
+    #[test]
+    fn box_shadows_keep_order_and_inset() {
+        let out = box_shadows(&[
+            BlockShadow {
+                dx: 1.0,
+                dy: 2.0,
+                blur: 3.0,
+                inset: false,
+                color: hsla(0.0, 0.0, 0.0, 0.5),
+            },
+            BlockShadow {
+                dx: 0.0,
+                dy: 0.0,
+                blur: -1.0,
+                inset: true,
+                color: hsla(0.0, 0.0, 0.0, 0.2),
+            },
+            BlockShadow {
+                dx: f32::NAN,
+                dy: 0.0,
+                blur: 0.0,
+                inset: false,
+                color: hsla(0.0, 0.0, 0.0, 0.1),
+            },
+        ]);
+        assert_eq!(out.len(), 2, "非有限偏移那一层不画");
+        assert_eq!((out[0].offset.x, out[0].offset.y), (px(1.0), px(2.0)));
+        assert_eq!(out[0].blur_radius, px(3.0));
+        assert!(!out[0].inset);
+        assert_eq!(out[1].blur_radius, px(0.0), "负模糊归 0");
+        assert!(out[1].inset);
+    }
 }

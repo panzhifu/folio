@@ -44,6 +44,188 @@ pub struct Rule {
     pub origin: Origin,
     /// 同一层叠来源内的出现顺序，用于 specificity 打平时后者优先。
     pub order: u32,
+    /// 这条规则所在的 `@media` 宽度条件。`None` = 无条件。条件要等读者视口宽
+    /// （[`RuleSet::retain_for_viewport`]）才知道成不成立；解析期不替视口做决定。
+    pub media: Option<MediaCondition>,
+}
+
+/// 一条 `@media` 里**能判**的那部分：逗号列表任一成立即命中。
+///
+/// 只判 `width` / `min-width` / `max-width`（`device-width` 同义）。`orientation`、
+/// `color`、`hover` 这些判不了的条件按成立处理 —— 与从前「判不了照收」同一条降级，
+/// 不能因为手机上没有陀螺仪就把整块版面丢掉。
+///
+/// `alternatives` 为空表示这条 `@media` 里没有可判条件（`screen`、`all`、`print`
+/// 已在解析期处理完），永远成立。
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaCondition {
+    alternatives: Vec<MediaRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MediaRange {
+    min: Option<f32>,
+    max: Option<f32>,
+}
+
+impl MediaCondition {
+    /// 视口宽（CSS px，逻辑像素）下这条条件成不成立。边界按 CSS 的闭区间。
+    pub fn matches(&self, viewport_px: f32) -> bool {
+        self.alternatives.is_empty()
+            || self.alternatives.iter().any(|range| {
+                range.min.is_none_or(|min| viewport_px >= min)
+                    && range.max.is_none_or(|max| viewport_px <= max)
+            })
+    }
+
+    /// 嵌套 `@media` 是交集：两条条件的可选区间两两组合。
+    fn and(&self, other: &Self) -> Self {
+        if self.alternatives.is_empty() {
+            return other.clone();
+        }
+        if other.alternatives.is_empty() {
+            return self.clone();
+        }
+        let mut alternatives = Vec::new();
+        for a in &self.alternatives {
+            for b in &other.alternatives {
+                alternatives.push(MediaRange {
+                    min: match (a.min, b.min) {
+                        (Some(x), Some(y)) => Some(x.max(y)),
+                        (x, y) => x.or(y),
+                    },
+                    max: match (a.max, b.max) {
+                        (Some(x), Some(y)) => Some(x.min(y)),
+                        (x, y) => x.or(y),
+                    },
+                });
+            }
+        }
+        Self { alternatives }
+    }
+}
+
+/// `@media` 的判定结果。宽度条件不能在解析期判定，只能原样挂到规则上。
+enum MediaDecision {
+    /// 全是要打印的查询：整块丢掉（与从前一样记入诊断）。
+    Skip,
+    /// 没有可判条件（或含 `screen` / `all`）：照收，不挂条件。
+    Always,
+    Conditional(MediaCondition),
+}
+
+/// 把 `@media` 后面的查询串折成「跳过 / 无条件 / 宽度条件」。
+///
+/// 查不了的类型与特性一律按成立处理：本机没有哪个阅读器能判 `hover` / `pointer`，
+/// 按不成立会把一整块响应式版面直接删掉。真正能判的只有宽度。
+fn media_decision(query: &str) -> MediaDecision {
+    let mut alternatives = Vec::new();
+    let mut unconditional = false;
+    for part in split_top_level(query, ',') {
+        let low = part.trim().to_ascii_lowercase();
+        if low.is_empty() {
+            unconditional = true;
+            continue;
+        }
+        // `not screen` 是「非屏幕」，`not print` 才是要给阅读器的；`only` 只是
+        // 给老浏览器的噪音。
+        let (negated, rest) = match low.strip_prefix("not ") {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, low.as_str()),
+        };
+        let rest = rest.strip_prefix("only ").unwrap_or(rest).trim_start();
+        let type_end = rest
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .unwrap_or(rest.len());
+        let media_type = &rest[..type_end];
+        let rest = rest[type_end..].trim_start();
+        match media_type {
+            "print" => {
+                if !negated {
+                    continue;
+                }
+                unconditional = true;
+                continue;
+            }
+            // 不认识的媒体类型（`speech` 之类）判不了，照收。
+            "" | "screen" | "all" => {
+                // `not` 后面跟了真类型才是「非这个媒体」；`not (min-width…)`
+                // 是否定整个条件，本版不判，落回「照收」。
+                if negated && !media_type.is_empty() {
+                    continue;
+                }
+            }
+            _ => {
+                unconditional = true;
+                continue;
+            }
+        }
+
+        let mut range = MediaRange {
+            min: None,
+            max: None,
+        };
+        let mut saw_width = false;
+        let mut tail = rest;
+        while let Some(open) = tail.find('(') {
+            let Some(close) = tail[open..].find(')').map(|at| open + at) else {
+                break;
+            };
+            let feature = &tail[open + 1..close];
+            tail = &tail[close + 1..];
+            let Some((name, value)) = feature.split_once(':') else {
+                continue;
+            };
+            let Some(px) = media_length_px(value.trim()) else {
+                continue;
+            };
+            match name.trim() {
+                "min-width" | "min-device-width" => {
+                    range.min = Some(range.min.map_or(px, |known| known.max(px)));
+                    saw_width = true;
+                }
+                "max-width" | "max-device-width" => {
+                    range.max = Some(range.max.map_or(px, |known| known.min(px)));
+                    saw_width = true;
+                }
+                "width" | "device-width" => {
+                    range.min = Some(px);
+                    range.max = Some(px);
+                    saw_width = true;
+                }
+                _ => {}
+            }
+        }
+        if saw_width {
+            alternatives.push(range);
+        } else {
+            // 这一段只剩判不了的条件（`orientation` 等），按成立处理。
+            unconditional = true;
+        }
+    }
+    if unconditional {
+        MediaDecision::Always
+    } else if alternatives.is_empty() {
+        MediaDecision::Skip
+    } else {
+        MediaDecision::Conditional(MediaCondition { alternatives })
+    }
+}
+
+/// `@media` 里的长度：只收 px / em / rem。`em` 在媒体查询里相对**初始字号**
+/// （16px），不是正文当前字号 —— 用它折正文的 `em` 会随读者调字号把断点一起拖走。
+fn media_length_px(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(v) = value.strip_suffix("px") {
+        return v.trim().parse().ok();
+    }
+    if let Some(v) = value.strip_suffix("rem") {
+        return v.trim().parse::<f32>().ok().map(|n| n * 16.0);
+    }
+    if let Some(v) = value.strip_suffix("em") {
+        return v.trim().parse::<f32>().ok().map(|n| n * 16.0);
+    }
+    None
 }
 
 /// `@font-face` 的一条声明。**只存声明，不存字节** —— 字节由 `format` 那层按
@@ -206,7 +388,7 @@ impl RuleSet {
             tracing::warn!("CSS 超过容量或嵌套预算，忽略此样式表");
             return set;
         }
-        set.consume(&strip_comments(text), origin);
+        set.consume(&strip_comments(text), origin, None);
         set
     }
 
@@ -226,6 +408,16 @@ impl RuleSet {
         self.ignored_rules.append(&mut other.ignored_rules);
     }
 
+    /// 丢掉当前视口下不成立的 `@media` 规则。
+    ///
+    /// 书级 `RuleSet` 是全书共享的，**不能**在解析期按某个宽度裁死；阅读器每趟排版
+    /// 克隆一份再调这里。视口宽是 CSS 的逻辑像素（窗口宽），不是版心栏宽 ——
+    /// `@media (max-width: 40em)` 问的是屏幕，不是正文那一栏。
+    pub fn retain_for_viewport(&mut self, viewport_px: f32) {
+        self.rules
+            .retain(|rule| rule.media.as_ref().is_none_or(|m| m.matches(viewport_px)));
+    }
+
     /// 记一条「整块都没接住」的原文。计数与原文分开：`ignored` 是既有口径，
     /// `ignored_rules` 只服务点名的量具；两处的增减必须同批（所有调用点都在
     /// `ignored +=` 旁边）。
@@ -238,7 +430,7 @@ impl RuleSet {
         });
     }
 
-    fn consume(&mut self, text: &str, origin: Origin) {
+    fn consume(&mut self, text: &str, origin: Origin, media: Option<&MediaCondition>) {
         let mut rest = text;
         loop {
             let Some(open) = find_unquoted(rest, '{') else {
@@ -266,27 +458,36 @@ impl RuleSet {
             if let Some(at) = prelude.strip_prefix('@') {
                 let name = at.split_whitespace().next().unwrap_or("");
                 match name.to_ascii_lowercase().as_str() {
-                    // `@media`：**只认「这条查询说的是不是纸」那一件事**。
-                    // `print` 独有的块整块丢掉 —— 那是给纸质排版的页眉页脚与分页，
-                    // 收进来就是错；含 `screen` 或 `all`、以及条件写不清的
-                    // （`(min-width: 800px)` 这类，我们的版心由读者设，判不了）照收。
+                    // `@media`：`print` 独有的块整块丢掉（那是纸质排版的页眉页脚与
+                    // 分页）；含 `screen` / `all`、以及判不了的类型与特性的照收。
+                    // 宽度条件不在这里裁 —— 解析期不知道读者视口，只把条件挂到规则上，
+                    // 由 [`RuleSet::retain_for_viewport`] 在每趟排版前筛。
                     "media" => {
-                        let prelude = prelude.trim_start_matches('@').to_ascii_lowercase();
-                        let query = prelude.strip_prefix("media").unwrap_or("");
-                        let print_only = query.contains("print")
-                            && !query.contains("screen")
-                            && !query.contains("all");
-                        if print_only {
-                            // 丢掉一个块不算「一条声明没接住」，但也不是没看见 ——
-                            // 计一条，让 `css-gap` 的 ignored 说出这本书里有打印样式。
-                            self.ignored += 1;
-                            self.note_rule("print-media", &prelude, body, 1);
+                        let at = prelude.trim_start_matches('@');
+                        let query = if at.len() >= 5 && at[..5].eq_ignore_ascii_case("media") {
+                            &at[5..]
                         } else {
-                            self.consume(body, origin);
+                            at
+                        };
+                        match media_decision(query) {
+                            MediaDecision::Skip => {
+                                // 丢掉一个块不算「一条声明没接住」，但也不是没看见 ——
+                                // 计一条，让 `css-gap` 的 ignored 说出这本书里有打印样式。
+                                self.ignored += 1;
+                                self.note_rule("print-media", prelude, body, 1);
+                            }
+                            MediaDecision::Always => self.consume(body, origin, media),
+                            MediaDecision::Conditional(condition) => {
+                                let combined = media.map_or_else(
+                                    || condition.clone(),
+                                    |outer| outer.and(&condition),
+                                );
+                                self.consume(body, origin, Some(&combined));
+                            }
                         }
                     }
                     // `@supports`：判不了特性支持，照旧把内容收进来（本机语料 0 处）。
-                    "supports" => self.consume(body, origin),
+                    "supports" => self.consume(body, origin, media),
                     // @font-face 不属于任何元素，但**要留下来**：它是「这本书带了自己的字体」
                     // 的唯一线索，落到 ignored 就等于对着一份 30MB 的内嵌字体装看不见。
                     "font-face" => {
@@ -332,6 +533,7 @@ impl RuleSet {
                     declarations,
                     origin,
                     order: self.rules.len() as u32,
+                    media: media.cloned(),
                 });
             }
         }

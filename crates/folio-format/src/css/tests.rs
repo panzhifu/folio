@@ -478,6 +478,43 @@ fn print_only_media_blocks_are_dropped_while_screen_ones_are_kept() {
     );
 }
 
+/// `@media` 的宽度条件按**视口**筛：手机不套宽屏规则，桌面不套窄屏规则。
+/// `em` 按媒体查询的初始字号 16px 折，不跟读者的正文字号走。
+#[test]
+fn media_width_conditions_follow_the_viewport() {
+    let css = "@media (max-width: 420px) { p { color: #ff0000 } } \
+               @media (min-width: 40em) { p { background-color: #00ff00 } }";
+    let probe = |width: f32| {
+        let mut set = rules(css);
+        set.retain_for_viewport(width);
+        let dom = Dom::parse("<p>x</p>".as_bytes());
+        let styled = cascade(&dom, &set, &ComputedStyle::default(), "");
+        let style = styled.get(first_p(&dom)).expect("p 应有样式");
+        (style.color, style.background_color)
+    };
+    let red = Some(Color(0xff, 0x00, 0x00, 255));
+    let green = Some(Color(0x00, 0xff, 0x00, 255));
+    assert_eq!(probe(390.0), (red, None), "窄屏只吃 max-width");
+    assert_eq!(probe(800.0), (None, green), "宽屏只吃 min-width");
+    assert_eq!(probe(639.0), (None, None), "40em 是 640px，639 还不到");
+    assert_eq!(probe(640.0), (None, green), "边界按闭区间");
+}
+
+/// 逗号是「或」：`print` 那一支丢掉，剩下那支仍按视口判。
+#[test]
+fn comma_separated_media_keeps_the_screen_branch() {
+    let css = "@media print, (min-width: 700px) { p { color: #ff0000 } }";
+    let at = |width: f32| {
+        let mut set = rules(css);
+        set.retain_for_viewport(width);
+        let dom = Dom::parse("<p>x</p>".as_bytes());
+        let styled = cascade(&dom, &set, &ComputedStyle::default(), "");
+        styled.get(first_p(&dom)).and_then(|s| s.color)
+    };
+    assert_eq!(at(800.0), Some(Color(0xff, 0x00, 0x00, 255)));
+    assert_eq!(at(600.0), None);
+}
+
 /// 阅读页首帧要从 `books.css` 里同步认出「整页底色」：从前它得等异步排版
 /// 把 `<body background-color>` 折成装饰块才画上去，读者先看见自己选的纸色、
 /// 再跳成书里那一档。这几条钉住「只认根规则、后者胜、透明当没写」。

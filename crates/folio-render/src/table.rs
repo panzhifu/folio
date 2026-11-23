@@ -8,6 +8,8 @@
 //!
 //! - CSS 2.1 的 **auto** 表格布局（§17.5.2.2 那个算法的简化版）。`table-layout: fixed`
 //!   不认，判不认识。
+//! - `display: table` / 行组下**直接挂着的 cell** 会补出匿名行（CSS §17.2.1）；
+//!   `inline-table` 仍按块排（行内原子盒那一套没做）。
 //! - `colspan` / `rowspan` 认（HTML 属性，上限 64 格）：跨格只排一次，宽度取它跨过的
 //!   那几列之和，固有宽按列数均摊；行高先按单行格算，再让跨行格把缺口**均摊**进去
 //!   （CSS 按比例摊，这里取均分）。
@@ -54,19 +56,41 @@ pub(super) struct Grid {
 pub(super) fn collect_grid(dom: &Dom, styles: &StyledDom, table: NodeId) -> Grid {
     let display_of = |node: NodeId| styles.get(node).map(|s| s.display);
     let mut raw: Vec<Vec<NodeId>> = Vec::new();
+    // 浏览器会在 `display: table` 下把直接挂着的 cell 包进一个**匿名行**；行组里
+    // 直接挂着的 cell 也一样。不补这一层，`<div style="display:table"><div
+    // style="display:table-cell">…` 这种「章题两列骨架」整块没有格子，内容全丢。
+    // 连续的 cell 归同一行；碰到真的 row / 别的东西就先结清。
+    let mut anonymous: Option<Vec<NodeId>> = None;
     for child in dom.element_children(table) {
         match display_of(child) {
-            Some(Display::TableRow) => raw.push(cells_of(dom, &display_of, child)),
+            Some(Display::TableRow) => {
+                flush_row(&mut raw, &mut anonymous);
+                raw.push(cells_of(dom, &display_of, child));
+            }
             Some(Display::TableRowGroup) => {
+                flush_row(&mut raw, &mut anonymous);
+                let mut group_cells: Option<Vec<NodeId>> = None;
                 for row in dom.element_children(child) {
-                    if display_of(row) == Some(Display::TableRow) {
-                        raw.push(cells_of(dom, &display_of, row));
+                    match display_of(row) {
+                        Some(Display::TableRow) => {
+                            flush_row(&mut raw, &mut group_cells);
+                            raw.push(cells_of(dom, &display_of, row));
+                        }
+                        Some(Display::TableCell) => {
+                            group_cells.get_or_insert_with(Vec::new).push(row);
+                        }
+                        _ => flush_row(&mut raw, &mut group_cells),
                     }
                 }
+                flush_row(&mut raw, &mut group_cells);
             }
-            _ => {}
+            Some(Display::TableCell) => {
+                anonymous.get_or_insert_with(Vec::new).push(child);
+            }
+            _ => flush_row(&mut raw, &mut anonymous),
         }
     }
+    flush_row(&mut raw, &mut anonymous);
     let mut slots: Vec<Vec<Option<NodeId>>> = vec![Vec::new(); raw.len()];
     let mut cells = Vec::new();
     for (row, nodes) in raw.iter().enumerate() {
@@ -109,6 +133,15 @@ pub(super) fn collect_grid(dom: &Dom, styles: &StyledDom, table: NodeId) -> Grid
         slots,
         cells,
         columns,
+    }
+}
+
+/// 结清一行匿名 cell：`None` / 空行什么都不做（别在网格里留一条空行）。
+fn flush_row(raw: &mut Vec<Vec<NodeId>>, row: &mut Option<Vec<NodeId>>) {
+    if let Some(cells) = row.take()
+        && !cells.is_empty()
+    {
+        raw.push(cells);
     }
 }
 
@@ -261,19 +294,54 @@ mod tests {
     use super::{Column, collapse_side_wins, collect_grid, solve_columns};
     use folio_format::css::computed::BorderStyle;
     use folio_format::css::computed::{ComputedStyle, Display, cascade};
+    use folio_format::css::{Origin, RuleSet};
     use folio_format::dom::Dom;
 
     fn grid(html: &str, css: &str) -> (usize, usize) {
+        grid_of(html, css, "table")
+    }
+
+    /// 按标签找表格根：`display: table` 不一定是 `<table>`，章题骨架就挂在 `div` 上。
+    fn grid_of(html: &str, css: &str, tag: &str) -> (usize, usize) {
         let dom = Dom::parse(html.as_bytes());
-        let styles = cascade(&dom, &Default::default(), &ComputedStyle::default(), "");
-        let _ = css;
+        let rules = RuleSet::parse(css, Origin::Author);
+        let styles = cascade(&dom, &rules, &ComputedStyle::default(), "");
         let table = dom
             .elements()
-            .find(|(_, n)| n.tag.as_ref().map(|t| t.local.as_ref()) == Some("table"))
+            .find(|(_, n)| n.tag.as_ref().map(|t| t.local.as_ref()) == Some(tag))
             .map(|(id, _)| id)
-            .expect("文档里应有 <table>");
+            .unwrap_or_else(|| panic!("文档里应有 <{tag}>"));
         let grid = collect_grid(&dom, &styles, table);
         (grid.slots.len(), grid.columns)
+    }
+
+    /// `display: table` 下直接挂着的 cell 要补出一条匿名行，否则章题两列骨架
+    /// 整块没有格子、内容全丢。
+    #[test]
+    fn direct_cells_form_an_anonymous_row() {
+        let html = "<div class=\"grid\"><div class=\"c\">甲</div><div class=\"c\">乙</div></div>";
+        let (rows, columns) = grid_of(
+            html,
+            ".grid { display: table } .c { display: table-cell }",
+            "div",
+        );
+        assert_eq!(
+            (rows, columns),
+            (1, 2),
+            "两个直接挂着的 cell 同处一条匿名行"
+        );
+    }
+
+    /// 行组里直接挂着的 cell 同样补匿名行；真的 row 与匿名的不能串成一行。
+    #[test]
+    fn a_row_group_gets_its_own_anonymous_rows() {
+        let html = "<div class=\"grid\"><div class=\"g\"><div class=\"c\">甲</div>\
+                    <div class=\"r\"><div class=\"c\">乙</div></div>\
+                    <div class=\"c\">丙</div></div></div>";
+        let css = ".grid { display: table } .g { display: table-row-group } \
+                   .r { display: table-row } .c { display: table-cell }";
+        let (rows, columns) = grid_of(html, css, "div");
+        assert_eq!((rows, columns), (3, 1), "匿名 / 真行 / 匿名 三行各归各的");
     }
 
     /// 三行两列；行组（`<tbody>`）要展开一层，`<caption>` 不进网格。

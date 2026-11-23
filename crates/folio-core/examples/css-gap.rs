@@ -40,6 +40,9 @@ use folio_core::content::format::css::computed::{
 };
 use folio_core::content::format::css::{IgnoredRule, Origin, RuleSet, chapter_style_rules};
 
+/// 统计用的视口宽（CSS 逻辑像素）：`@media` 的宽度条件按它判，排版影响也按它排。
+const VIEWPORT: f32 = 600.0;
+
 /// 一个属性的落地面。`elements` 是**这个属性上有任何一条胜出且没接住的声明**的元素数。
 #[derive(Debug, Default)]
 struct Gap {
@@ -114,7 +117,10 @@ fn survey(path: &Path) -> Result<String, String> {
     // 索引路径（懒加载）下 `FlowDoc` 里只有位置清单、正文与样式表都不在手上，
     // 这两处才按清单回容器取。工具若读 `flow.css`，对正经导入的书一律是空串。
     let css = doc.stylesheet();
-    let rules = RuleSet::parse(&css, Origin::Author);
+    let mut rules = RuleSet::parse(&css, Origin::Author);
+    // 量的是「这个视口下的这本书」：`@media` 宽度条件按 600px 视口筛，
+    // 与下面排版影响那一趟同宽。想看另一档就把 `VIEWPORT` 改掉。
+    rules.retain_for_viewport(VIEWPORT);
     let stats = measure(doc.as_ref(), flow, &rules);
     // 「没东西可接」有两种：清单里一份样式表都没有，和样式表写了但没落到任何元素上。
     // 两种都不该被读成「全部接住」，所以判据放到数完之后 —— 章内 `<style>` 也算作者
@@ -247,6 +253,7 @@ fn measure(doc: &dyn Document, flow: &FlowDoc, rules: &RuleSet) -> Totals {
         note_ignored(&mut tot, &own.ignored_rules);
         let mut used = rules.clone();
         used.extend(own);
+        used.retain_for_viewport(VIEWPORT);
         let styled = cascade(&dom, &used, &base, &base_dir);
         for (id, _) in dom.elements() {
             tot.elements += 1;
@@ -390,6 +397,7 @@ fn without_unsupported(rules: &RuleSet) -> RuleSet {
                 declarations,
                 origin: rule.origin,
                 order: rule.order,
+                media: rule.media.clone(),
             });
         }
     }
@@ -440,6 +448,7 @@ fn geometry(
         let base_dir = folio_core::content::format::dir_of(&chapter.spine_href);
         let mut used = rules.clone();
         used.extend(chapter_style_rules(&dom, &base_dir));
+        used.retain_for_viewport(VIEWPORT);
         // 「这些属性还没做」那一臂要把没接住的声明从**并好章内样式的那一份**里丢，
         // 只丢书级那一份的话，章内写的落差声明会两臂都留着，排版差量就成了 0。
         let used = if strip {

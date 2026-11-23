@@ -381,6 +381,8 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
                 ),
             ],
             pictures,
+            box_shadows: style.box_shadows.clone(),
+            outline: style.outline.filter(|(w, _, _, _)| *w > 0.0),
         });
     }
     out

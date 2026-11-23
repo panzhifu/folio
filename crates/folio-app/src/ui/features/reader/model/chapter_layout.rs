@@ -12,8 +12,7 @@ use folio_core::content::anchor::{CharLines, TextMap};
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{
-    Color, ComputedStyle, EmphasisPosition, EmphasisStyle, Length, StyledDom, TextAlign,
-    TextShadow, WritingMode, cascade,
+    ComputedStyle, Length, StyledDom, TextAlign, WritingMode, cascade,
 };
 use folio_core::content::format::css::{Origin, PageMargins, RuleSet, chapter_style_rules};
 use folio_core::content::hit::{Hit, paragraph_range_indexed};
@@ -22,8 +21,8 @@ use folio_core::infra::task::{TaskError, TaskEvent, TaskHandle, TaskManager};
 use folio_core::layout::fragment::{Fragment, FragmentOptions, fragments};
 use folio_core::layout::page::PageList;
 use folio_core::layout::{
-    BlockCache, DecorSeed, FontKey, Justify, Layout, LayoutInputs, LayoutKey, LayoutOptions,
-    LineBox, LineFragment, content_hash, layout_with_blocks, quantize_px,
+    BlockCache, DecorSeed, Justify, Layout, LayoutInputs, LayoutKey, LayoutOptions, LineBox,
+    LineFragment, content_hash, layout_with_blocks, quantize_px,
 };
 use folio_core::{Reader, TextDirection};
 use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window};
@@ -31,6 +30,10 @@ use gpui_kit::{App, LineLayout, SharedString, TextSystem, Window};
 use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob, TextSystemSink};
 use crate::ui::features::reader::model::measure::GpuiMeasure;
 use crate::ui::foundation::images::ChapterImages;
+
+mod row_unit;
+
+pub use row_unit::RowUnit;
 
 /// 打开统一文档接口；界面按 `kind()` 分流，不再按格式查 provider。
 /// `Arc` 供书本状态与图片字节来源共用文档。
@@ -285,54 +288,6 @@ pub enum RowFragment {
     Image(RowImage),
 }
 
-/// 一条文本片段物化一次之后的全部绘制输入。
-///
-/// 故意**不存**的两样，存了就是把失效问题从一处拆成两处：
-///
-/// - 解析好的 `gpui_kit::Font`：`FontCache` 已经有「换书 `reset`、改偏好 `clear`」那条
-///   纪律（`reader/measure.rs`），表里再存一份就是第二个真相。这里存 `FontKey`，
-///   每帧现解析——那是一次哈希查表加一次 `Arc` 克隆，不是这笔开销的主角。
-/// - 主题色：`LayoutKey` 里没有主题，把 `run_color` 的结果烘进表就是「换了夜间模式
-///   但线还是旧色」那种看不出来的错。这里存 CSS 那一格 `Option<Color>`，每帧现落回主题。
-#[derive(Clone, Debug)]
-pub struct RowUnit {
-    /// 在**本行片段数组**里的槽位。连同行号一起构成 shaping 表的键
-    /// （[`Document::shaped`]）。槽位连图片一起数，所以文本片段的槽位不会随图片增减漂移。
-    pub slot: u32,
-    /// 文本句柄。这一格就是这次缓存的主体：从前每帧从归一化串里切一个新的出来。
-    pub text: SharedString,
-    pub font: Arc<FontKey>,
-    pub font_size: f32,
-    /// 相对**行首**的 x（章内量）。
-    pub x: f32,
-    /// 基线偏移，px，正数往上。来自 `vertical-align`，绘制层把它从行的基线里减掉。
-    pub baseline_shift: f32,
-    /// 这一片的 inline box 高。绘制层用它定装饰线的纵向落点，而 shaping 里没有这个数。
-    pub box_height: f32,
-    pub underline: bool,
-    pub line_through: bool,
-    /// `text-shadow` 与 `letter-spacing` 一样，是**逐 run** 的：CSS 里它可继承，
-    /// 所以通常在块上写一次，但一条子元素的声明要能盖掉它。绘制层拿它画偏移副本。
-    pub text_shadows: Arc<[TextShadow]>,
-    /// CSS 声明的文字色。`None` = 书里没写，每帧落到主题前景。
-    pub color: Option<Color>,
-    /// 这一段在不在一条 `<a href>` 里（`ComputedStyle::link`）。`color` 为 `None` 时绘制层
-    /// 拿它落到主题的链接色 —— 出版工具的目录页普遍不写颜色，而那栏看着必须是能点的。
-    pub link: bool,
-    /// 字距（px），来自 `letter-spacing`。绘制时按字形所在字符序号右推 `ls × k`。
-    pub letter_spacing: f32,
-    /// 两端对齐：这一段起点已累计的右推量（px），以及这一行的摊法。绘制时字形再按
-    /// **运行内**的隙序号右推 `justify.extra × 局部隙序号`，与 `hit`/选区同一句规则。
-    /// `None` = 这一行不两端对齐。
-    pub justify: Option<Justify>,
-    pub justify_shift: f32,
-    /// `text-emphasis` 着重号：形状、颜色、位置（2026-11-23）。绘制层据它在每个字形旁
-    /// 画小圆点。形状 `None` 时整片不画。
-    pub emphasis: EmphasisStyle,
-    pub emphasis_color: Option<Color>,
-    pub emphasis_position: EmphasisPosition,
-}
-
 /// 行内图片在行内的 x。
 ///
 /// 文本 run 的 `x` 只是**原始前进量**，两端对齐的额外位移由每个 run 的
@@ -492,6 +447,14 @@ fn typeset_job(mut input: TypesetInput) -> Result<Typeset, TaskError> {
     // 读者层的段间距。放在这里而不是 `Document::new`：那一份 `rules` 跟着作者 CSS 存，
     // 偏好一改就会让「章的样式」看起来也变了。
     rules.extend(Document::reader_rules(&input.prefs));
+    // `@media` 的宽度问的是**视口**（窗口/屏幕），不是版心栏宽：窄屏的
+    // `max-width: 420px` 与宽屏的 `min-width: 40em` 各自只在自己那一档生效。
+    // 窗口宽变化会换 `LayoutKey`，这一趟重新克隆规则再筛，书级规则表保持原样。
+    let viewport = input
+        .key
+        .screen_width
+        .map_or(input.key.width as f32, |width| width as f32);
+    rules.retain_for_viewport(viewport);
     let styles = cascade(
         &artifacts.dom,
         &rules,
@@ -1026,6 +989,8 @@ impl Document {
                             box_height: run.style.box_height(),
                             underline: run.style.underline,
                             line_through: run.style.line_through,
+                            decoration_style: run.style.decoration_style,
+                            decoration_color: run.style.decoration_color,
                             text_shadows: run.style.text_shadows.clone(),
                             color: run.style.color,
                             link: run.style.link,
@@ -1070,6 +1035,8 @@ impl Document {
                             box_height: marker.style.box_height(),
                             underline: false,
                             line_through: false,
+                            decoration_style: marker.style.decoration_style,
+                            decoration_color: None,
                             text_shadows: marker.style.text_shadows.clone(),
                             color: marker.style.color,
                             // 列表标记不是链接的一部分：`<li><a>…` 里那个点/数字不该跟着染蓝。

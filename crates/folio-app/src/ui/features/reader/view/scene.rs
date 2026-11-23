@@ -21,53 +21,18 @@ use crate::ui::features::reader::model::chapter_layout::{Document, RowFragment};
 use crate::ui::features::reader::model::measure::FontCache;
 use crate::ui::features::reader::model::session::StackMotionView;
 use crate::ui::features::reader::view::paint::GlyphRun;
+
+mod decor;
 use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::{desaturate, desaturate_author, run_color, run_color_link};
+pub(in crate::ui::features::reader) use decor::full_page_picture;
+pub use decor::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
+use decor::{overscan_backdrop, page_color_is_drawn_by_reader};
 
 /// 这一行是不是当前那张的左右邻居。两头之外的不预解：一叠可能有八张，
 /// 全排全清会把图集 24 MB 的封顶挤爆，反而把眼前这一张挤走。
 fn stack_neighbor(index: u16, current: u16) -> bool {
     index == current.saturating_add(1) || index + 1 == current
-}
-
-/// 可见范围内一块盒子的块级装饰：背景色与四边边框（实心画）。
-///
-/// 位置与尺寸是**边框盒**（含 padding 与边框自身，排版层 [`folio_core::layout::BlockBox`]
-/// 直接给出），坐标系与 [`VisibleImage`] 相同：相对本元素原点。
-#[derive(Debug, Clone, PartialEq)]
-pub struct BlockDecor {
-    pub x: f32,
-    pub top: f32,
-    pub width: f32,
-    pub height: f32,
-    /// `background-color`。`None` = 书里没写这一条 —— 别拿不透明色去盖主题底色。
-    pub background: Option<Hsla>,
-    /// 四个角的圆角半径（px），顺序 `[左上, 右上, 右下, 左下]`，由排版层按盒尺寸折好。
-    ///
-    /// 只作用于**底色**那一块四边形；边框仍是四条轴对齐的直条，所以圆角盒配粗边框时
-    /// 四角是直的（见 `body::decoration_child`）。
-    pub radius: [f32; 4],
-    /// `[上, 右, 下, 左]` 的 `(宽, 色, 画法)`，宽 0 不画。画法有四档：`solid` 一整条，
-    /// `double` 拆成两条 1/3 细线，`dotted` / `dashed` 按段切开；其余（`groove` / `ridge` /
-    /// `inset` / `outset`）在解析期就没接住，到不了这里（见 `css::value::parse_border_style`）。
-    pub border: [(f32, Hsla, BorderStyle); 4],
-    /// `background-image` 的那些层，按 CSS 书写顺序（**先画的在屏幕上更靠上**，
-    /// 所以绘制侧要倒着摆）。空 = 这一块没有背景图。
-    ///
-    /// 位置是**相对这一块自己的边框盒左上角**，与 `x`/`top` 同一套平移已经在外层加过，
-    /// 所以竖排那条路上的 `slide` 不用在这里再算一次。
-    pub pictures: Vec<BlockPicture>,
-}
-
-/// 一块背景图在这一块里要画的几张像素：哪张图 + 摆在哪儿。
-///
-/// **像素不在这里**，与 [`VisibleImage`] 同一条理由：解没解好由图集答，摆位与字节无关。
-#[derive(Clone, Debug, PartialEq)]
-pub struct BlockPicture {
-    /// 这一张图的活儿（按容器路径向图片索引现取）。
-    pub image: crate::ui::foundation::images::DecodeRequest,
-    /// 一格 `(左, 上, 宽, 高)`，相对这一块边框盒左上角。`repeat` 一族才会多于一个数。
-    pub tiles: Vec<(f32, f32, f32, f32)>,
 }
 
 /// 一块背景图最多摆多少格。
@@ -487,6 +452,11 @@ impl Scene {
                             // （见 `paint::decoration_y`），它是样式给的数，shaping 里没有。
                             .in_box(unit.box_height)
                             .decorate(unit.underline, unit.line_through)
+                            .decoration(
+                                unit.decoration_style,
+                                unit.decoration_color
+                                    .map(|color| run_color(Some(color), foreground)),
+                            )
                             // 影子与装饰线同一条来路：`RunStyle` → `RowUnit` → 这里。
                             // 绘制层在影子非空时先铺一趟影子再画字（见 `paint::paint_run`）。
                             .shadowed(unit.text_shadows.clone())
@@ -620,6 +590,12 @@ impl Scene {
             for edge in &mut decor.border {
                 edge.1 = desaturate(edge.1);
             }
+            for shadow in &mut decor.box_shadows {
+                shadow.color = desaturate(shadow.color);
+            }
+            if let Some(outline) = &mut decor.outline {
+                outline.color = desaturate(outline.color);
+            }
         }
     }
 }
@@ -734,56 +710,28 @@ fn place_decorations(
                 edge(seed.border[3]),
             ],
             pictures,
+            box_shadows: seed
+                .box_shadows
+                .iter()
+                .map(|shadow| BlockShadow {
+                    dx: shadow.dx,
+                    dy: shadow.dy,
+                    blur: shadow.blur,
+                    inset: shadow.inset,
+                    color: run_color(shadow.color, foreground),
+                })
+                .collect(),
+            outline: seed
+                .outline
+                .map(|(width, color, style, offset)| BlockOutline {
+                    width,
+                    color: run_color(color, foreground),
+                    style,
+                    offset,
+                }),
         });
     }
     out
-}
-
-/// 整窗背板四边各外扩多少逻辑像素。
-///
-/// 背板的 `top` 是「章基线 − 滚量」那个浮点排版量（见 `body::reflowable` 的 `art_top`），
-/// `height` 也来自章盒；取整到物理像素时上下各会差不到 1px。那一丝缝里露的是
-/// `reader-page` 的纸底（浅色主题下近白）—— 读者报的「全屏图片上面和下方各透一条
-/// 很细的白光」。让背板四边都盖过窗口一条，缝就不落在窗口里了。
-const BACKDROP_OVERSCAN: f32 = 2.0;
-
-/// 一块装饰的底色是不是**整页纸色**，因而应当由读者那一层画、不在这儿画。
-///
-/// 根块的 `background-color`（`body { background: … }`）在浏览器里铺的是整张纸，
-/// 而阅读器此前有**两条**路画它：`reading_theme::resolve` 早把同一个色铺成
-/// `column.bg(reading.bg)`，这里又把 `DecorSeed.background` 折成一块 `fill_rounded_quad`
-/// 叠上去（见 `body::decor::decoration_child`）。两条路取的色不完全同源
-/// （一条过 `to_hsla`、一条过层叠期 `run_color`），第二条在排版结果回来时才出现，
-/// 于是读者看见「先读者选的纸色，再跳成书色」那一段 —— 底色到底画几遍、谁说了算，
-/// 从前没人回答。
-///
-/// 判据（三条同时成立）：
-///
-/// - 是根块（`index == 0`，章盒的第一个块就是 `<html>`/`<body>`）；
-/// - 这块就是**整章**那一盒（`y == 0` 且高 ≥ 章高的 95%）。正文里某一块自己写了
-///   `background` 的是真装饰，照画；
-/// - 这一章**没有可读正文**（`picture_only_chapter`）。有正文的章里，块盒高只到
-///   正文末尾，不等于整页 —— 硬把它当纸色会漏掉页尾那一截（根块底色曾在页尾被
-///   一段白截断，段间距那一行原来就是这么补的）。那一档维持老行为：由装饰块画，
-///   因为正文盒没有铺到纸底。
-fn page_color_is_drawn_by_reader(
-    index: usize,
-    seed: &DecorSeed,
-    picture_only_chapter: bool,
-) -> bool {
-    index == 0 && picture_only_chapter && seed.y.abs() < 0.5 && seed.height > 0.0
-}
-
-/// 四边外扩、中心不动：`x/top` 各减一份、`width/height` 各加两份，
-/// 于是 `x + width/2` 与 `top + height/2` 原样，cover 的格子只跟着放大 2px，
-/// 画面不挪位（[`backdrop_decor`] 用它）。
-fn overscan_backdrop(x: f32, top: f32, width: f32, height: f32) -> (f32, f32, f32, f32) {
-    (
-        x - BACKDROP_OVERSCAN,
-        top - BACKDROP_OVERSCAN,
-        width + 2.0 * BACKDROP_OVERSCAN,
-        height + 2.0 * BACKDROP_OVERSCAN,
-    )
 }
 
 /// 一整窗的背板：一层（或多层）背景图按**窗口尺寸**摆好，坐标就是阅读会话坐标。
@@ -832,29 +780,9 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
         radius: [0.0; 4],
         border: [(0.0, hsla(0.0, 0.0, 0.0, 0.0), BorderStyle::None); 4],
         pictures: out,
+        box_shadows: Vec::new(),
+        outline: None,
     })
-}
-
-/// 整页画的背板图：一张图按 `size`（cover / contain）铺满整窗（居中）。
-///
-/// 盘上的图按屏幕比例挑过；挑不到整屏变体时，比例差得远的用 `contain` —— 宁可上下
-/// 留一条底色，也不把一幅横图裁成中间一条。
-pub(in crate::ui::features::reader) fn full_page_picture(
-    href: &str,
-    size: BackgroundSize,
-) -> DecorPicture {
-    DecorPicture {
-        href: href.to_string(),
-        size,
-        position: BackgroundPosition {
-            x: BackgroundAxis::Fraction(0.5),
-            y: BackgroundAxis::Fraction(0.5),
-        },
-        repeat: BackgroundRepeat {
-            x: BackgroundTile::NoRepeat,
-            y: BackgroundTile::NoRepeat,
-        },
-    }
 }
 
 #[cfg(test)]
@@ -868,11 +796,15 @@ mod tests {
     //! 以及背景图的固有尺寸与字节。
 
     use super::place_decorations;
-    use super::{BlockDecor, DecorSeed, Scene, overscan_backdrop, stack_neighbor};
+    use super::{
+        BlockDecor, BlockOutline, BlockShadow, DecorSeed, Scene, overscan_backdrop, stack_neighbor,
+    };
     use crate::ui::features::reader::view::paint::GlyphRun;
     use crate::ui::foundation::images::ChapterImages;
     use folio_core::content::format::css::computed::TextShadow;
     use gpui_kit::{Font, Rgba, SharedString, hsla};
+
+    use folio_core::content::format::css::computed::ShadowLayer;
 
     /// 一本「一张图都没有」的书：`place_decorations` 现在要拿它现问固有尺寸与字节，
     /// 而这几条测试只管底色、边框与裁剔，背景图那一格一律走「取不到就跳过」那一条。
@@ -921,6 +853,8 @@ mod tests {
 
     /// 一条 300×60 的底色种子：下边一条 `double`、左边一条 `solid`，`None` 的色走主题前景。
     fn seed(y: f32, height: f32) -> DecorSeed {
+        use std::sync::Arc;
+
         DecorSeed {
             x: 12.0,
             y,
@@ -936,6 +870,14 @@ mod tests {
                 (2.0, Some(Color(12, 34, 56, 255)), BorderStyle::Solid),
             ],
             pictures: Vec::new(),
+            box_shadows: Arc::from([ShadowLayer {
+                dx: 1.0,
+                dy: 2.0,
+                blur: 3.0,
+                inset: false,
+                color: Some(Color(9, 8, 7, 255)),
+            }]),
+            outline: Some((1.0, None, BorderStyle::Solid, 2.0)),
         }
     }
 
@@ -980,6 +922,27 @@ mod tests {
             "表里已经折好 currentColor 的那一条，色必须是块自己的，不是主题的"
         );
         assert_eq!(decor.border[0].0, 0.0, "宽 0 的边不画");
+        assert_eq!(
+            decor.box_shadows,
+            vec![BlockShadow {
+                dx: 1.0,
+                dy: 2.0,
+                blur: 3.0,
+                inset: false,
+                color: run_color(Some(Color(9, 8, 7, 255)), black()),
+            }],
+            "阴影的几何原样带过去，颜色走作者色"
+        );
+        assert_eq!(
+            decor.outline,
+            Some(BlockOutline {
+                width: 1.0,
+                color: black(),
+                style: BorderStyle::Solid,
+                offset: 2.0,
+            }),
+            "轮廓没写色时走主题前景，偏移保留"
+        );
     }
 
     /// 窗外的一条不产生绘制单元。
@@ -1382,6 +1345,19 @@ mod tests {
                 radius: [0.0; 4],
                 border: [(2.0, colored, BorderStyle::Solid); 4],
                 pictures: Vec::new(),
+                box_shadows: vec![BlockShadow {
+                    dx: 1.0,
+                    dy: 2.0,
+                    blur: 0.0,
+                    inset: false,
+                    color: colored,
+                }],
+                outline: Some(BlockOutline {
+                    width: 1.0,
+                    color: colored,
+                    style: BorderStyle::Solid,
+                    offset: 1.0,
+                }),
             }],
             ..Default::default()
         };
@@ -1415,6 +1391,9 @@ mod tests {
             assert_eq!(edge.1.s, 0.0, "边框还带着色相：{edge:?}");
             assert!((edge.1.a - colored.a).abs() < 1e-6, "边框 alpha 被改了");
         }
+        assert_eq!(decor.box_shadows[0].color.s, 0.0, "阴影还带着色相");
+        let outline = decor.outline.expect("轮廓被撤掉了");
+        assert_eq!(outline.color.s, 0.0, "轮廓还带着色相");
     }
 
     /// 叠图只预解左右两张邻居：往前滑、往回滑都一样直接清晰；隔了一张的不预解

@@ -6,9 +6,9 @@
 use crate::css::computed::{
     BackgroundAttachment, BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize,
     BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color, ComputedStyle,
-    DeclStatus, Direction, Display, Float, Hyphens, InlineVAlign, Length, ListStyle, RubyAlign,
-    RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode, cascade,
-    declaration_status,
+    DeclStatus, DecorationStyle, Direction, Display, Float, Hyphens, InlineVAlign, Length,
+    ListStyle, RubyAlign, RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode,
+    cascade, declaration_status,
 };
 use crate::css::{Declaration, Origin, RuleSet};
 use crate::dom::{Dom, NodeId};
@@ -1215,7 +1215,7 @@ fn text_decorations_are_recorded_per_line_kind() {
     assert_eq!(page.styled.ignored, 0);
 }
 
-/// 线型与颜色 token 认得但不改画法；`overline` 画不出来就整条不接。
+/// 线型与颜色 token 真进样式；`overline` 画不出来就整条不接。
 #[test]
 fn decoration_line_style_and_color_tokens_are_recognised_but_overline_is_not() {
     let page = author(
@@ -1224,6 +1224,8 @@ fn decoration_line_style_and_color_tokens_are_recognised_but_overline_is_not() {
     );
     let a = style(&page, class(&page, "a"));
     assert!(a.underline, "线型与颜色不改变「有没有下划线」这件事");
+    assert_eq!(a.decoration_style, DecorationStyle::Wavy);
+    assert_eq!(a.decoration_color, Some(Color(255, 0, 0, 255)));
     assert!(
         !style(&page, class(&page, "b")).underline,
         "overline 画不出来，不该显示成接住了"
@@ -1231,15 +1233,18 @@ fn decoration_line_style_and_color_tokens_are_recognised_but_overline_is_not() {
     assert_eq!(page.styled.ignored, 1, "只有 overline 那条计 ignored");
 }
 
-/// 装饰线在 CSS 里不是继承属性，但会向后代**传播**；词距则老老实实是可继承的。
+/// 装饰线在 CSS 里不是继承属性，但会向后代**传播**；形状与颜色跟着同一条走，
+/// 否则子元素里的波浪线会退回实线、红线变字色。词距则老老实实是可继承的。
 #[test]
 fn decoration_propagates_and_word_spacing_inherits() {
     let page = author(
         "<div class=outer><p><span class=inner>文</span></p></div>",
-        ".outer { text-decoration: underline; word-spacing: 6px }",
+        ".outer { text-decoration: underline wavy #f00; word-spacing: 6px }",
     );
     let inner = style(&page, class(&page, "inner"));
     assert!(inner.underline, "父元素的下划线要盖到子元素的文字上");
+    assert_eq!(inner.decoration_style, DecorationStyle::Wavy);
+    assert_eq!(inner.decoration_color, Some(Color(255, 0, 0, 255)));
     assert_eq!(inner.word_spacing, 6.0, "`word-spacing` 在 CSS 里可继承");
     // `vertical-align` **不**继承：上标只抬自己那一小段，不能让整段正文上浮。
     let page = author(

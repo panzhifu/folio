@@ -4482,6 +4482,22 @@ fn cells(dom: &Dom, laid: &Layout) -> Vec<(f32, f32, f32, f32)> {
         .collect()
 }
 
+/// 直接挂在 `display: table` 下的 cell（章题两列骨架的写法）要补匿名行：
+/// 两格并排、内容都在，而不是整块消失。
+#[test]
+fn direct_table_cells_form_an_anonymous_row() {
+    let html = "<div class=\"grid\"><div class=\"cell\">甲</div><div class=\"cell\">乙</div></div>";
+    let css = ".grid { display: table; width: 100px } .cell { display: table-cell }";
+    let (_dom, laid) = typeset(html, css, 200.0);
+    assert_eq!(laid.lines.len(), 2, "两个格子各有一行文本");
+    assert!(
+        laid.lines.iter().all(|line| line.y == 0.0),
+        "匿名行里的两格并排，行盒同在 y=0"
+    );
+    let xs: Vec<f32> = laid.lines.iter().map(|line| line.x).collect();
+    assert_eq!(xs, vec![0.0, 50.0], "定宽 100 平分给两列");
+}
+
 /// 两行两列：格子**并排**（不是一列串下来），第二行落在第一行的下缘。
 ///
 /// 版心 200、四格的固有宽都是 32（两字），所以两列各得 100 —— 摊满可用宽。

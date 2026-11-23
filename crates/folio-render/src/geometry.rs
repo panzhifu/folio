@@ -4,13 +4,14 @@
 //! `pub(super)`，即**只对 `layout` 内部开放**，不属于对外公开面。
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use folio_format::css::computed::ObjectFit;
 use folio_format::css::computed::{
     BackgroundAttachment, BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color,
-    ComputedStyle, Display, StyledDom, TextAlign, WritingMode,
+    ComputedStyle, Display, ShadowLayer, StyledDom, TextAlign, WritingMode,
 };
 use folio_format::dom::NodeId;
 use folio_format::metrics::Metric;
@@ -282,6 +283,11 @@ pub struct DecorSeed {
     /// 每帧现问 `ChapterImages` 才是对的，烘进这张表就是第二个真相。
     /// 摆位要的盒尺寸倒是已经在 `x/y/width/height` 里了。
     pub pictures: Vec<DecorPicture>,
+    /// `box-shadow` 的层列表（含 `inset`）。色在层叠期已是 `Color`；`None` 落本块字色。
+    /// 空 = 没有阴影。
+    pub box_shadows: Arc<[ShadowLayer]>,
+    /// `outline`：`(宽, 色, 画法, 偏移)`，画在边框盒**外侧**。`None` = 没有或宽 0。
+    pub outline: Option<(f32, Option<Color>, BorderStyle, f32)>,
     /// 这是**章节根**的一块 `background-attachment: fixed` 底图：书要的是一整页的画。
     ///
     /// 阅读器把它当整窗背板画（贴在窗口上、不进版心），并把这条种子从常规块装饰里
@@ -786,6 +792,8 @@ impl Layout {
                     ),
                 ],
                 pictures,
+                box_shadows: style.box_shadows.clone(),
+                outline: style.outline.filter(|(w, _, _, _)| *w > 0.0),
             });
         }
         out
