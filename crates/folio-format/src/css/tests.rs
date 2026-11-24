@@ -31,7 +31,8 @@ fn statement_at_rules_end_at_the_semicolon() {
     assert_eq!(set.rules.len(), 2, "两条普通规则都要活下来");
     assert_eq!(set.rules[0].declarations[0].property, "font-family");
     assert_eq!(set.rules[1].declarations[0].property, "color");
-    assert_eq!(set.ignored, 2, "@charset 与 @import 各计一条不支持");
+    // `@charset` 静默吞掉（字节入口已按 UTF-8 解码），只有 `@import` 计不支持。
+    assert_eq!(set.ignored, 1, "只有 @import 计一条不支持");
 }
 
 #[test]

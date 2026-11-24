@@ -1049,7 +1049,7 @@ impl<'a> Collector<'a> {
     /// 2. 抬升量 = 基字上沿 + 缝 + 注音下沿（under 时符号反），写进注音样式的 `baseline_shift`；
     ///    因 extent 要先落表才量得出，故先零位移铺入再逐 piece 换样式（注音一章几十到几百个）。
     /// 3. 横向落点 = `ruby-align` 偏移：注音排在容器末尾，挪回 `container − flow_offset`。
-    /// 注音字符在宽度表里是 0（`RunStyle::advance` 照自己字号走），对容器外流动不贡献前进量。
+    ///    注音字符在宽度表里是 0（`RunStyle::advance` 照自己字号走），对容器外流动不贡献前进量。
     fn push_ruby(&mut self, node: NodeId, pre: bool) -> bool {
         let children = self.dom.get(node).children.clone();
         let mut bases: Vec<NodeId> = Vec::new();

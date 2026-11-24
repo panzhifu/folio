@@ -33,4 +33,3 @@ pub enum FontSrc {
     /// （见 `BookFonts::for_document`）。http(s) 之类的来源仍然整条丢掉。
     System(String),
 }
-

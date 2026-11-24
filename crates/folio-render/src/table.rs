@@ -16,7 +16,7 @@
 //! - `border-collapse: collapse` 的**画**那一半做了（相邻两格公共边只画一条，见
 //!   `Layout::decor_seeds`），几何没做（不互相让出半个边宽）。
 //! - 格内竖直对齐做 `top` / `middle` / `bottom`（`CellVAlign`）。
-//! - `display: inline-table` 不认（要的是行内块那一套 shrink-to-fit）。
+//! - `display: inline-table` 按行内流摊平（行内原子盒的 shrink-to-fit 未做）。
 //! - 量固有宽时，格子的**百分比**左右内边距按 0 折 —— 那时还没有列宽可当基准。
 //!   绝对长度与 `em` 照常算。
 

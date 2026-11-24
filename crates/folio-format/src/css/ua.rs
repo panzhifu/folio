@@ -8,7 +8,9 @@
 //! 只做 `layout` 用得上的属性。顺序永远是 `inherit_from(parent)` → 本文件的
 //! UA 值 → 作者声明，所以作者写 `h2 { display: inline }` 时照样能盖掉这里。
 
-use super::computed::{ComputedStyle, Display, Length, ListStyle, inherit_from};
+use super::computed::{
+    ComputedStyle, Display, GeneratedContent, Length, ListStyle, QuotePair, inherit_from,
+};
 use super::value::{sub_shift, super_shift};
 
 /// 天生 inline 的标签。清单外的一律按 block 处理：
@@ -165,6 +167,26 @@ pub fn seed(parent: &ComputedStyle, tag: &str) -> ComputedStyle {
         }
         "u" | "ins" => {
             style.underline = true;
+        }
+        // 浏览器由 UA 表给 `q` 生成开合引号；作者没写 `q::before/after` 时靠这一条。
+        // 默认字符取 CSS 2.1 初值（“”‘’）；语言相关的「」『』不在这一层做。
+        "q" => {
+            style.quotes = Some([
+                QuotePair {
+                    open: '‘',
+                    close: '’',
+                },
+                QuotePair {
+                    open: '“',
+                    close: '”',
+                },
+            ]);
+            let mut before = style.clone();
+            before.content = GeneratedContent::OpenQuote;
+            let mut after = style.clone();
+            after.content = GeneratedContent::CloseQuote;
+            style.before = Some(Box::new(before));
+            style.after = Some(Box::new(after));
         }
         // 链接要有可见性：浏览器默认给 `<a>` 加下划线，出版书里的目录页、脚注引注
         // 都靠它认。只加下划线、不写颜色 —— `color` 可继承，UA 里钉一个固定色在暗色

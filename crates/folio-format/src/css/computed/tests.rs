@@ -6,16 +6,16 @@
 use crate::css::computed::{
     BackgroundAttachment, BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize,
     BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color, ComputedStyle,
-    DeclStatus, DecorationStyle, Direction, Display, Float, Hyphens, InlineVAlign, Length,
-    ListStyle, RubyAlign, RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode,
-    cascade, declaration_status,
+    DeclStatus, DecorationStyle, Direction, Display, Float, Hyphens, Length, ListStyle, RubyAlign,
+    RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode, cascade,
+    declaration_status,
 };
 use crate::css::{Declaration, Origin, RuleSet};
 use crate::dom::{Dom, NodeId};
 
-struct Page {
-    dom: Dom,
-    styled: StyledDom,
+pub(super) struct Page {
+    pub(super) dom: Dom,
+    pub(super) styled: StyledDom,
 }
 
 pub(super) fn page(html: &str, sheets: &[(&str, Origin)]) -> Page {
@@ -703,7 +703,10 @@ fn semicolon_inside_quotes_is_not_a_declaration_separator() {
         Some(Color(0, 128, 0, 255)),
         "引号里的分号不该把 color 切开"
     );
-    assert_eq!(page.styled.ignored, 0, "content 现在也接住了（生成盒按 display 间接触发）");
+    assert_eq!(
+        page.styled.ignored, 0,
+        "content 现在也接住了（生成盒按 display 间接触发）"
+    );
 }
 
 /// `p::first-letter` 的声明只进首字符那一份，元素自己一点不受影响。
@@ -3734,9 +3737,5 @@ fn ruby_alignment_inherits_and_the_prefixed_aliases_fold_into_it() {
     );
     assert_eq!(bad.styled.ignored, 1, "`justify` 仍要计不认识");
 }
-
-/// UA 表给 `<rt>` **半号字**。作者常常自己再写一遍（《诡秘之主》那条
-/// `ruby > rt { font-size: 0.5em }`），没写的书靠这一条兜住 —— 注音与基字同大时，
-/// 排在上方就是两行一样粗的字叠在一起。
 
 mod ruby;

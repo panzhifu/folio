@@ -2,11 +2,11 @@
 //! 从 `computed/tests.rs` 切出来只因为那个文件贴着行数上限；共享 helper 经 `super` 取用。
 
 use super::{author, class, page, style, tag};
-use crate::css::computed::{
-    ComputedStyle, InlineVAlign, Length, WritingMode,
-};
-use crate::css::Origin;
+use crate::css::computed::{InlineVAlign, Length, WritingMode};
 
+/// UA 表给 `<rt>` **半号字**。作者常常自己再写一遍（《诡秘之主》那条
+/// `ruby > rt { font-size: 0.5em }`），没写的书靠这一条兜住 —— 注音与基字同大时，
+/// 排在上方就是两行一样粗的字叠在一起。
 #[test]
 fn the_ua_sheet_halves_the_ruby_annotation() {
     let page = page("<p><ruby>愚者<rt>The Fool</rt></ruby></p>", &[]);

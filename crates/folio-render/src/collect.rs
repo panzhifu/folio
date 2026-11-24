@@ -3,6 +3,7 @@
 //! 从 `layout` 主模块切出来只为了一个文件能一次读完；跨文件的条目用
 //! `pub(super)`，即**只对 `layout` 内部开放**，不属于对外公开面。
 
+mod grid_layout;
 mod table_layout;
 
 use std::ops::Range;
@@ -502,24 +503,15 @@ impl<'a> Ctx<'a> {
 
     /// 流内块级盒的横向求解（CSS 2.1 §10.3.3），返回 `(左边距, 边框盒宽)`。
     ///
-    /// `avail` 是包含块的内容宽，同时是 `width` / `margin` / `padding` 这一族百分比的
-    /// 折算基准 —— CSS 规定它们全部折自包含块宽，不折自这一块自己。三条规则照规范走：
+    /// `avail` 是包含块内容宽，也是 `width`/`margin`/`padding` 百分比的折算基准。规则：
+    /// - `width: auto` 吃掉余量；写了 `width`/`max-width` 就按折出的边框盒宽定下来
+    ///   （作者数先过 [`ComputedStyle::content_size`] 折 box-sizing）。
+    /// - `min-width` 夹在 `max-width` **之后**（矛盾时 min 赢），也管 `width: auto`，
+    ///   因此填满后仍可被抬到溢出（`spare < 0` 时 `auto` 左边距收 0）。
+    /// - 余量归 `margin: auto`（两边都 auto 均分、一边 auto 全给它）；都非 auto 时留右边。
+    /// - 装不下按溢出排，不缩作者写的数（over-constrained 改的也是右边距）。
     ///
-    /// - `width: auto` 吃掉「减去两边与边框内边距之后的余量」，与这一格改之前逐字相同；
-    ///   写了 `width` 或 `max-width` 就按折出的边框盒宽定下来（`max-width` 夹在**内容宽**
-    ///   上再加边框与内边距，因为作者写的那三个数一律先过 [`ComputedStyle::content_size`]
-    ///   —— `box-sizing: border-box` 时那一格里已经含着边框与内边距）。
-    /// - `min-width` 夹在 `max-width` **之后**（CSS 2.1 §10.4：两者写出矛盾时赢的是
-    ///   `min-width`），并且它同样管 `width: auto` 那一档 —— 填满之后还可以被抬到溢出，
-    ///   浏览器就是这么溢出（`spare < 0` 那一支跟着把 `auto` 左边距收 0）。
-    /// - 装不满时的余量归 `margin: auto`：两边都 `auto` 就均分，只有一边 `auto` 就全给它。
-    ///   这一条就是「定宽块默认贴左缘、写着 `margin: 0 auto` 才居中」那一条的分界。
-    ///   两边都不是 `auto` 时余量天然留在右边，右边距不必动 —— 与浏览器同解。
-    /// - 装不下（`width` + 两边 > `avail`）时按溢出排，不缩作者写的数：over-constrained
-    ///   那一档规范改的也是右边距。
-    ///
-    /// 为什么这一格只有一份：流内摆放有两条路都要问它 —— [`Self::children`]（实排）与
-    /// [`Self::children_light`]（只量高）。抄两遍迟早漂，症状是滚动位置与屏幕上的块对不上。
+    /// 实排与只量高两条路都问这一份，抄两遍迟早漂。
     pub(super) fn solve_block_width(
         &self,
         style: &ComputedStyle,
@@ -1698,7 +1690,18 @@ impl<'a> Ctx<'a> {
     pub(super) fn is_inline_flow(&self, node: NodeId, style: &ComputedStyle) -> bool {
         self.dom.get(node).kind != NodeKind::Element
             || self.dom.is_element(node, "br")
-            || style.display == Display::Inline
+            // `inline-block` / `inline-table` / `inline-flex` / `inline-grid` 走**行内流**：
+            // 行内原子盒的 shrink-to-fit 与嵌套几何没做，所以内容按普通行内摊平（不换行、
+            // 不收缩）。对脚注图标（inline-block 裹图）与语调 fallback（inline-table 两层）
+            // 这比按块断行更接近作者意图；真正的原子盒留待专门一档。
+            || matches!(
+                style.display,
+                Display::Inline
+                    | Display::InlineBlock
+                    | Display::InlineTable
+                    | Display::InlineFlex
+                    | Display::InlineGrid
+            )
     }
 
     /// 直接子节点里有没有块级元素。只看一层：更深的嵌套由递归时重新判断。
@@ -2031,6 +2034,9 @@ impl<'a> Ctx<'a> {
         if matches!(style.display, Display::Flex | Display::InlineFlex) {
             return self.flex(node, x, y, width, basis, cb_h);
         }
+        if matches!(style.display, Display::Grid | Display::InlineGrid) {
+            return self.grid(node, x, y, width, basis, cb_h);
+        }
         let index = self.push_block(node, x, y, width, String::new(), true);
         let line_px = (style.font_size * style.line_height).max(1.0);
         let inner = if self.has_block_children(node) {
@@ -2212,6 +2218,9 @@ impl<'a> Ctx<'a> {
         // 决定每子项走 block 还是 block_light，所以这里复用它既准又不产多余行盒。
         if matches!(style.display, Display::Flex | Display::InlineFlex) {
             return self.flex(node, 0.0, 0.0, width, basis, cb_h);
+        }
+        if matches!(style.display, Display::Grid | Display::InlineGrid) {
+            return self.grid(node, 0.0, 0.0, width, basis, cb_h);
         }
         // 与 `block_uncached` 同一个基准：这一趟量高，那一趟实排，两边不许各拿一个数。
         let child_h = Self::child_height_basis(style, cb_h, pt + pb);
@@ -2455,25 +2464,15 @@ impl<'a> Ctx<'a> {
         cursor - y
     }
 
-    /// 首字下沉那一段的几何。三个条件缺一不可：这个块写过 `::first-letter`、
-    /// 第一个硬行里找得到一个**字母单元**、并且量得出宽度。字母单元按 UAX #29 的说法
-    /// 算（数字也算 —— 浏览器给 `1984` 的 `::first-letter` 上的就是那个 `1`），
-    /// 全段一个字母单元都没有（纯标点、纯图片）就不造这个盒。
+    /// 首字下沉的几何。三个条件缺一不可：块写过 `::first-letter`、首个硬行里找得到
+    /// **字母单元**（UAX #29，数字也算）、量得出宽度；全段只有标点/图片就不造这个盒。
     ///
-    /// 跨几行按字形的实际上下 extent 除以块自己的行盒高向上取整：用 extent 而不是
-    /// inline box 高，是因为 `line-height: 0.9`（首字下沉的经典写法）会把盒高压到字形
-    /// 以下，少算一行就让下一行的正文压在字的尾巴上。
+    /// 跨几行按字形上下 extent ÷ 块行盒高向上取整（不是 inline box 高：
+    /// `line-height: 0.9` 会把盒高压到字形以下，少算一行就让下一行压在字的尾巴上）。
     ///
-    /// 两个来源，同一个几何：
-    ///
-    /// 1. 作者写了 `::first-letter` —— CSS 的正路。
-    /// 2. 整段**第一个** piece 自己带 `float` 的行内盒 —— 中文转换本的章首下沉几乎全是
-    ///    这一种：`<p class="fp"><span class="first">这</span>一年的秋天……`，那个
-    ///    span 上写着 `font-size: 2em; float: left; line-height: 1`。《哈利·波特》
-    ///    301 章里有 199 章是它。
-    ///
-    /// 写在句子中间的浮动行内盒这一版**不**按下沉处理，照普通行内内容排：真正的行中
-    /// 浮动要在一条行带里插一个盒，那是另一套几何，而书里几乎不这么写。
+    /// 两个来源同一几何：作者写了 `::first-letter`（CSS 正路），或整段第一个 piece 自己
+    /// 带 `float` 的行内盒（中文转换本的章首下沉几乎全是这种）。句子中间的浮动行内盒
+    /// 不按下沉处理，照普通行内排 —— 行中浮动是另一套几何，书里几乎不这么写。
     fn drop_cap(
         &self,
         collected: &Collected,

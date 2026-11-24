@@ -1,6 +1,5 @@
-//! E1/E2/E3 块级 + 行内 + 图片布局。
-//! 几何用一份「汉字 1 em、拉丁 0.5 em」的 mock `Measure` 来断言，
-//! 真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
+//! E1/E2/E3 块级 + 行内 + 图片布局。几何用「汉字 1 em、拉丁 0.5 em」的 mock
+//! `Measure` 断言；真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
 use crate::wrap::{Sizes, collect};
 use crate::{
@@ -444,17 +443,11 @@ fn a_percent_margin_folds_against_the_parent_content_width() {
     );
 }
 
-/// 负的左外边距进 §10.3.3 那条求解式：`width: auto` 的块因此**变宽**并整体左移，
-/// 而不是被夹回 0。
-///
-/// 这一条是《斗战狂潮》全书目录那 1223 个 `<dt class="tocl2">` 的落点 —— 作者写
-/// `margin-left: -20px` 要的就是那 20px 悬挂。取值层认得它、也存得下 `Px(-20)`，
-/// 从前在排版期每个解析点被 `.max(0.0)` 归零，于是这条声明在 `css-gap` 那张表上
-/// 报「接住了」，屏上却一个字都没挪。
-///
-/// 2026-10-31 起根上的负边距会被收回页面左缘（判据见
-/// [`negative_margin_cannot_push_content_off_the_page`]），所以这一条按书里的真实
-/// 形状测：`dl` 的左内边距承接 `dt` 的负边距，悬挂落在缘内、不受那一刀。
+/// 负的左外边距进 §10.3.3 求解式：`width: auto` 的块因此**变宽**并整体左移，不被夹回 0。
+/// 取值层认得 `Px(-20)`，从前排版期每个解析点被 `.max(0.0)` 归零，于是 `css-gap`
+/// 报「接住了」、屏上却一个字没挪。根上的负边距会被收回页面左缘（见
+/// [`negative_margin_cannot_push_content_off_the_page`]），所以按书的真实形状测：
+/// `dl` 的左内边距承接 `dt` 的负边距，悬挂落在缘内。
 #[test]
 fn a_negative_margin_shifts_the_block_out_and_widens_it() {
     let html = format!("<dl><dt>{}</dt></dl>", "字".repeat(40));
@@ -3664,7 +3657,11 @@ fn cells(dom: &Dom, laid: &Layout) -> Vec<(f32, f32, f32, f32)> {
         .collect()
 }
 
+mod flex;
+mod generated;
+mod grid;
 mod index;
+mod inline;
 mod table;
 // 竖排：同一份几何在两根轴上的逐条对照（转置漏一面、接反轴、基线符号错都在这片露）。
 mod vertical;
@@ -5251,154 +5248,6 @@ fn synthetic_chapter_heading_keeps_its_background_and_border() {
     assert!(title.border[3].0 > 0.0, "左边框要进表：{title:?}");
 }
 
-// ---- Flex 容器（`display: flex` 一族，2026-11-23）----
-//
-// 度量桩：汉字 16px、拉丁 8px、行高 28。Flex 子项按主轴排，坐标全在逻辑域，
-// 竖排由 Layout::assemble 转置，所以同一套断言横竖共用。
-
-/// 按 tag 取子项的边框盒 `(x, y, w, h)`，按文档序。
-fn flex_boxes(dom: &Dom, laid: &Layout, tag_name: &str) -> Vec<(f32, f32, f32, f32)> {
-    laid.blocks
-        .iter()
-        .filter(|b| b.border_box && dom.tag_name(b.node) == Some(tag_name))
-        .map(|b| (b.x, b.y, b.width, b.height))
-        .collect()
-}
-
-#[test]
-fn flex_row_places_items_side_by_side() {
-    let html = "<div><i>甲</i><i>乙</i><i>丙</i></div>";
-    let css = "div { display: flex } i { font-size: 16px }";
-    let (dom, laid) = typeset(html, css, 200.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    assert_eq!(boxes.len(), 3, "三个 Flex 子项各有边框盒");
-    // 每项固有宽 16，不 grow、不 justify → 贴起点依次排：0/16/32，同一行 y。
-    assert_eq!(boxes[0].0, 0.0);
-    assert_eq!(boxes[1].0, 16.0);
-    assert_eq!(boxes[2].0, 32.0);
-    assert_eq!(boxes[0].1, boxes[1].1, "同一行 y 相同");
-}
-
-#[test]
-fn flex_row_gap_inserts_space_between_items() {
-    let html = "<div><i>甲</i><i>乙</i></div>";
-    let css = "div { display: flex; gap: 0 10px }";
-    let (dom, laid) = typeset(html, css, 200.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    // 两项各 16，column-gap=10 → 第二项起点 16+10=26。
-    assert_eq!(boxes[0].0, 0.0);
-    assert_eq!(boxes[1].0, 26.0, "gap 是主轴上的缝");
-}
-
-#[test]
-fn flex_row_grow_splits_free_space() {
-    let html = "<div><i>甲</i><i>乙</i></div>";
-    let css = "div { display: flex } i { flex: 1 }";
-    let (dom, laid) = typeset(html, css, 200.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    // 两项 grow=1、basis=auto(16)，自由 200-32=168 平分 → 各 16+84=100。
-    assert_eq!(boxes[0].2, 100.0, "第一项宽 100");
-    assert_eq!(boxes[1].2, 100.0, "第二项宽 100");
-    assert_eq!(boxes[1].0, 100.0, "第二项紧接第一项");
-}
-
-#[test]
-fn flex_row_space_between_pushes_items_to_edges() {
-    let html = "<div><i>甲</i><i>乙</i></div>";
-    let css = "div { display: flex; justify-content: space-between }";
-    let (dom, laid) = typeset(html, css, 200.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    // 两项各 16，自由 168 全摊到中间那一道缝 → 第二项起点 200-16=184。
-    assert_eq!(boxes[0].0, 0.0);
-    assert_eq!(boxes[1].0, 184.0);
-}
-
-#[test]
-fn flex_basis_percent_resolves_against_container() {
-    let html = "<div><i>甲</i><i>乙</i></div>";
-    let css = "div { display: flex } i { flex: 0 1 34% }";
-    let (dom, laid) = typeset(html, css, 200.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    // 每项 basis 34% × 200 = 68；grow=0 → 不撑开，各 68。
-    assert_eq!(boxes[0].2, 68.0);
-    assert_eq!(boxes[1].2, 68.0);
-    assert_eq!(boxes[1].0, 68.0);
-}
-
-#[test]
-fn flex_column_stacks_items_vertically() {
-    let html = "<div><i>甲</i><i>乙</i></div>";
-    let css = "div { display: flex; flex-direction: column }";
-    let (dom, laid) = typeset(html, css, 200.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    assert_eq!(boxes.len(), 2);
-    assert_eq!(boxes[0].0, boxes[1].0, "column 下交叉轴对齐起点相同");
-    assert!(boxes[1].1 > boxes[0].1, "column 下第二项在第一项下面");
-}
-
-#[test]
-fn flex_row_wrap_breaks_into_lines() {
-    let html = "<div><i>甲</i><i>乙</i><i>丙</i></div>";
-    let css = "div { display: flex; flex-wrap: wrap } i { flex: 0 1 50px }";
-    let (dom, laid) = typeset(html, css, 90.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    // 每项 basis 50，版心 90 → 一行放不下一对(100)，第二个子项换到下一行。
-    assert!(boxes[1].1 > boxes[0].1, "第二个子项换到下一行");
-}
-
-#[test]
-fn flex_in_vertical_writing_mode_transposes_to_columns() {
-    let html = "<div><i>甲</i><i>乙</i></div>";
-    let css = "body { writing-mode: vertical-rl } div { display: flex } i { flex: 1 }";
-    let (dom, laid) = typeset(html, css, 200.0);
-    let boxes = flex_boxes(&dom, &laid, "i");
-    assert_eq!(boxes.len(), 2);
-    // 竖排整份结果被转置：逻辑主轴 x 变成物理竖直方向 → 两个子项在同一物理 x、
-    // 不同的物理 y（沿列方向）；逻辑交叉 y 变成物理 x。
-    assert!(
-        (boxes[0].0 - boxes[1].0).abs() < 0.01,
-        "竖排下同一 Flex 行的两项物理 x 相同（转置后）：
-        {:?}",
-        boxes
-    );
-    assert!(boxes[1].1 > boxes[0].1, "竖排下两项沿竖直主轴排开");
-}
-
-#[test]
-fn flex_light_layout_agrees_with_full_on_height() {
-    use folio_format::css::computed::{ComputedStyle, cascade};
-    use folio_format::css::{Origin, RuleSet};
-    let html = "<div><i>甲</i><i>乙</i><i>丙</i></div>";
-    let css = "div { display: flex } i { flex: 1 }";
-    let (_, full) = typeset(html, css, 200.0);
-    let dom = Dom::parse(html.as_bytes());
-    let styles = cascade(
-        &dom,
-        &RuleSet::parse(css, Origin::Author),
-        &ComputedStyle::default(),
-        "",
-    );
-    let light = layout(
-        &dom,
-        &styles,
-        find(&dom, "body"),
-        LayoutOptions {
-            width: 200.0,
-            light: true,
-            allow_vertical: true,
-            page_height: None,
-            screen_width: None,
-            screen_height: None,
-        },
-        &Mono,
-        &NoImages,
-    );
-    assert_eq!(
-        light.height, full.height,
-        "轻量档与完整档对 Flex 容器的章高必须一致"
-    );
-}
-
 // ---- 层叠序（z-index，2026-11-23）----
 
 /// 每条行按 owner 的祖先链取最近的层叠上下文 z。正文 0、绝对定位海报 0、相对定位
@@ -5461,16 +5310,22 @@ fn visibility_hidden_keeps_layout_and_only_marks_the_hidden_runs() {
     assert!(runs[0].style.hidden, "hide 段标 hidden");
     assert!(!runs[1].style.hidden, "后代 visible 盖掉 hidden");
     assert!(!runs[2].style.hidden, "未声明的跟随父级");
-    let (_plain, plain) = typeset("<p><span>甲<span>乙</span></span>丙</p>", "p { text-indent: 0 }", 300.0);
-    assert_eq!(plain.lines.len(), laid.lines.len(), "行高与行数不受 visibility 影响");
+    let (_plain, plain) = typeset(
+        "<p><span>甲<span>乙</span></span>丙</p>",
+        "p { text-indent: 0 }",
+        300.0,
+    );
+    assert_eq!(
+        plain.lines.len(),
+        laid.lines.len(),
+        "行高与行数不受 visibility 影响"
+    );
 }
 
 /// hidden 的块不产生装饰种子，但块本身仍在（继续占位）。
 #[test]
 fn visibility_hidden_block_keeps_its_box_but_drops_decor_seeds() {
-    let dom = Dom::parse(
-        "<p class='a'>甲</p><p class='b'>乙</p>".as_bytes(),
-    );
+    let dom = Dom::parse("<p class='a'>甲</p><p class='b'>乙</p>".as_bytes());
     let styles = cascade(
         &dom,
         &RuleSet::parse(
@@ -5480,14 +5335,21 @@ fn visibility_hidden_block_keeps_its_box_but_drops_decor_seeds() {
         &ComputedStyle::default(),
         "",
     );
-    let laid = layout(&dom, &styles, find(&dom, "body"), LayoutOptions {
-        width: 300.0,
-        light: false,
-        allow_vertical: false,
-        page_height: None,
-        screen_width: None,
-        screen_height: None,
-    }, &Mono, &NoImages);
+    let laid = layout(
+        &dom,
+        &styles,
+        find(&dom, "body"),
+        LayoutOptions {
+            width: 300.0,
+            light: false,
+            allow_vertical: false,
+            page_height: None,
+            screen_width: None,
+            screen_height: None,
+        },
+        &Mono,
+        &NoImages,
+    );
     let seeds = laid.decor_seeds(&styles);
     assert_eq!(seeds.len(), 1, "hidden 块的边框不画，可见块仍画");
 }
@@ -5531,8 +5393,14 @@ fn generated_quotes_render_but_do_not_shift_anchor_offsets() {
     let html = "<p>前<q>中</q>后</p>";
     let css = "q { quotes: \"「\" \"」\" } q::before { content: open-quote } q::after { content: close-quote }";
     let (dom, laid) = typeset(html, css, 400.0);
-    let text: String = (0..laid.lines.len()).map(|i| laid.line_text(i)).collect::<Vec<_>>().join("");
-    assert!(text.contains('「') && text.contains('」'), "生成引号要出现在行文本里：{text}");
+    let text: String = (0..laid.lines.len())
+        .map(|i| laid.line_text(i))
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        text.contains('「') && text.contains('」'),
+        "生成引号要出现在行文本里：{text}"
+    );
     // 锚点坐标不含生成字符：可见文本里没有「」。
     let visible = folio_format::text_map::TextMap::build(&dom, find(&dom, "body"));
     assert!(!visible.text().contains('「'), "生成引号不进可见文本");
@@ -5545,7 +5413,10 @@ fn generated_dot_after_rt_is_emitted() {
     let html = "<p><ruby>注<rt>zhù</rt></ruby></p>";
     let css = "rt::after { content: \"●\" }";
     let (_dom, laid) = typeset(html, css, 400.0);
-    let text: String = (0..laid.lines.len()).map(|i| laid.line_text(i)).collect::<Vec<_>>().join("");
+    let text: String = (0..laid.lines.len())
+        .map(|i| laid.line_text(i))
+        .collect::<Vec<_>>()
+        .join("");
     assert!(text.contains('●'), "注音后该生成圆点：{text}");
 }
 
@@ -5555,16 +5426,24 @@ fn content_declaration_parses_literals_and_quotes() {
     use folio_format::css::computed::{GeneratedContent, cascade};
     let dom = Dom::parse("<q class='a'>x</q><q class='b'>y</q><q class='c'>z</q>".as_bytes());
     let css = ".a::after { content: \"●\" } .b::before { content: open-quote } .c::before { content: none } q { quotes: \"「\" \"」\" }";
-    let styles = cascade(&dom, &RuleSet::parse(css, Origin::Author), &ComputedStyle::default(), "");
+    let styles = cascade(
+        &dom,
+        &RuleSet::parse(css, Origin::Author),
+        &ComputedStyle::default(),
+        "",
+    );
     let find_q = |class: &str| -> folio_format::dom::NodeId {
-        dom.elements().find(|(id, _)| {
-            dom.attr(*id, "class") == Some(class)
-        }).map(|(id, _)| id).unwrap()
+        dom.elements()
+            .find(|(id, _)| dom.attr(*id, "class") == Some(class))
+            .map(|(id, _)| id)
+            .unwrap()
     };
     let a = styles.get(find_q("a")).unwrap();
     assert!(matches!(&a.after.as_ref().unwrap().content, GeneratedContent::Literal(s) if s == "●"));
     let b = styles.get(find_q("b")).unwrap();
-    assert!(matches!(&b.before.as_ref().unwrap().content, GeneratedContent::Literal(s) if s == "「"));
+    assert!(
+        matches!(&b.before.as_ref().unwrap().content, GeneratedContent::Literal(s) if s == "「")
+    );
     let c = styles.get(find_q("c")).unwrap();
     assert!(c.before.is_none(), "content:none 不建生成盒");
 }

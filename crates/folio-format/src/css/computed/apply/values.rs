@@ -7,16 +7,13 @@ use std::sync::Arc;
 
 use super::super::{
     BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundTile, BorderStyle, Color, ComputedStyle,
-    EmphasisPosition, EmphasisStyle, GridTrack, Length, QuotePair,
-    ShadowLayer, Transform,
+    BackgroundTile, BorderStyle, Color, ComputedStyle, EmphasisPosition, EmphasisStyle, GridTrack,
+    Length, QuotePair, ShadowLayer, Transform,
 };
 use crate::css::value::{
-    edge_length,
-    parse_background_image_layer, parse_background_position, parse_background_repeat,
-    parse_background_size,
-    parse_border_style, parse_color, parse_font_family_list, parse_font_size, parse_font_weight,
-    parse_line_height, parse_url_token, split_value_tokens,
+    edge_length, parse_background_image_layer, parse_background_position, parse_background_repeat,
+    parse_background_size, parse_border_style, parse_color, parse_font_family_list,
+    parse_font_size, parse_font_weight, parse_line_height, parse_url_token, split_value_tokens,
 };
 
 /// `font` 简写：`[[style] [weight] size [/ line-height] family]`。
@@ -90,7 +87,12 @@ pub(super) fn apply_font_shorthand(
 /// - 三值形态 `grow shrink basis`，basis 可为长度或 `auto`。
 ///
 /// 任一段解析失败整条作废。
-pub(super) fn apply_flex_shorthand(style: &mut ComputedStyle, own: f32, root_px: f32, value: &str) -> bool {
+pub(super) fn apply_flex_shorthand(
+    style: &mut ComputedStyle,
+    own: f32,
+    root_px: f32,
+    value: &str,
+) -> bool {
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.is_empty() || parts.len() > 3 {
         return false;
@@ -149,7 +151,12 @@ pub(super) fn apply_flex_shorthand(style: &mut ComputedStyle, own: f32, root_px:
 /// `transform`：只收会建立层叠上下文、绘制侧能兑现的 2D 基本型。
 /// `none` 清掉变换；`translate(x, y)` 与 `scale(s, [sy])` 各折一份。
 /// 其余（rotate / matrix / 3D）整条判不认识，如实计入 ignored。
-pub(super) fn apply_transform(style: &mut ComputedStyle, own: f32, root_px: f32, value: &str) -> bool {
+pub(super) fn apply_transform(
+    style: &mut ComputedStyle,
+    own: f32,
+    root_px: f32,
+    value: &str,
+) -> bool {
     let v = value.trim();
     if v.eq_ignore_ascii_case("none") {
         style.transform = None;
@@ -258,7 +265,12 @@ pub(super) fn apply_text_emphasis_style(style: &mut ComputedStyle, value: &str) 
 }
 
 /// `box-shadow`: 逗号分隔的多层，每层 `[inset] <dx> <dy> [blur] [color]`。
-pub(super) fn apply_box_shadow(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
+pub(super) fn apply_box_shadow(
+    style: &mut ComputedStyle,
+    value: &str,
+    own: f32,
+    root_px: f32,
+) -> bool {
     if value.trim().eq_ignore_ascii_case("none") {
         style.box_shadows = Arc::from(Vec::new());
         return true;
@@ -307,7 +319,12 @@ pub(super) fn apply_box_shadow(style: &mut ComputedStyle, value: &str, own: f32,
 }
 
 /// `outline: <width> <style> <color>`。宽度不占几何，绘制时画在边框盒外。
-pub(super) fn apply_outline(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
+pub(super) fn apply_outline(
+    style: &mut ComputedStyle,
+    value: &str,
+    own: f32,
+    root_px: f32,
+) -> bool {
     if value.trim().eq_ignore_ascii_case("none") {
         style.outline = None;
         return true;
@@ -393,7 +410,12 @@ pub(super) fn apply_quotes(style: &mut ComputedStyle, value: &str) -> bool {
 }
 
 /// `grid-template-columns`: 空格分隔的轨道（px/%/fr/minmax(N,M)/auto）。
-pub(super) fn apply_grid_tracks(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
+pub(super) fn apply_grid_tracks(
+    style: &mut ComputedStyle,
+    value: &str,
+    own: f32,
+    root_px: f32,
+) -> bool {
     if value.trim().eq_ignore_ascii_case("none") {
         style.grid_template_columns = Arc::from(Vec::new());
         return true;
@@ -448,6 +470,51 @@ pub(super) fn apply_grid_tracks(style: &mut ComputedStyle, value: &str, own: f32
     true
 }
 
+/// `grid-column` / `grid-row`：`N`、`N / M`、`span N`、`N / span M`。
+/// 只收正整数与 `span`；负线号与 `auto` 之外的自动关键字判不认识。
+pub(super) fn apply_grid_line(style: &mut ComputedStyle, column: bool, value: &str) -> bool {
+    let parts: Vec<&str> = value.split('/').map(str::trim).collect();
+    if parts.is_empty() || parts.len() > 2 {
+        return false;
+    }
+    let mut start: Option<u16> = None;
+    let mut span: u16 = 1;
+    let first = parts[0].to_ascii_lowercase();
+    if let Some(n) = first.strip_prefix("span ") {
+        match n.trim().parse::<u16>() {
+            Ok(v) if v > 0 => span = v,
+            _ => return false,
+        }
+    } else {
+        match first.parse::<u16>() {
+            Ok(v) if v > 0 => start = Some(v),
+            _ => return false,
+        }
+    }
+    if let Some(second) = parts.get(1) {
+        let low = second.to_ascii_lowercase();
+        if let Some(n) = low.strip_prefix("span ") {
+            match n.trim().parse::<u16>() {
+                Ok(v) if v > 0 => span = v,
+                _ => return false,
+            }
+        } else {
+            match low.parse::<u16>() {
+                Ok(end) if end > start.unwrap_or(1) => span = end - start.unwrap_or(1),
+                _ => return false,
+            }
+        }
+    }
+    if column {
+        style.grid_column_start = start;
+        style.grid_column_span = span;
+    } else {
+        style.grid_row_start = start;
+        style.grid_row_span = span;
+    }
+    true
+}
+
 /// 一条背景长手属性（`background-size` 那一族）的**图层列表**：按顶层逗号切，
 /// 每层各解一次。`url(a,b)` 里那个逗号在括号内，`split_top_level` 切不进去。
 /// 任何一层解不出就整条判不认识 —— 把六层里的第三层悄悄丢掉，屏上看不出原因。
@@ -479,14 +546,22 @@ pub(super) fn parse_background_image_list(value: &str) -> Option<Vec<Option<Stri
 }
 
 /// `background-size` 长手的一层列表。em/rem 按本元素字号折（`own`），交给 [`edge_length`]。
-pub(super) fn parse_background_size_list(value: &str, own: f32, root_px: f32) -> Option<Vec<BackgroundSize>> {
+pub(super) fn parse_background_size_list(
+    value: &str,
+    own: f32,
+    root_px: f32,
+) -> Option<Vec<BackgroundSize>> {
     background_layer_list(value, |part| {
         parse_background_size_fonted(part, own, root_px)
     })
 }
 
 /// 单层 `background-size`，em/rem 已按字号折。`auto` / `cover` / `contain` 与百分比/px 同旧语义。
-pub(super) fn parse_background_size_fonted(value: &str, own: f32, root_px: f32) -> Option<BackgroundSize> {
+pub(super) fn parse_background_size_fonted(
+    value: &str,
+    own: f32,
+    root_px: f32,
+) -> Option<BackgroundSize> {
     let parts = split_value_tokens(value);
     if parts.is_empty() || parts.len() > 2 {
         return None;

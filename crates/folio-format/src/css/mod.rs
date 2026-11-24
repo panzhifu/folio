@@ -8,10 +8,10 @@
 //! 清单外的声明**被忽略而不是报错**：为一两个 `transform` 让整本书排版失败是最糟的失败方式。
 
 mod budget;
-mod font_face;
-mod media;
 pub mod color;
 pub mod computed;
+mod font_face;
+mod media;
 pub mod selector;
 pub mod settings;
 pub mod ua;
@@ -229,14 +229,16 @@ impl RuleSet {
                 return;
             };
             let prelude = rest[..open].trim();
-            // 语句型 at-rule（`@charset` / `@import`）没有块，在分号处就结束了。
-            // 不先单独吞掉它，prelude 会把下一条规则的整串选择器一起吃进去，
-            // 于是 `@charset "utf-8"; body { … }` 里的 body 规则凭空消失。
+            // 语句型 at-rule 没有块、在分号处结束；不先吞掉它，prelude 会把下一条规则的
+            // 选择器一起吃进去。`@charset` 只对非 UTF-8 样式表有意义（字节入口已按 UTF-8
+            // 解码），静默吞掉不进 ignored。
             if prelude.starts_with('@')
                 && let Some(semi) = find_unquoted(&rest[..open], ';')
             {
-                self.ignored += 1;
-                self.note_rule("at-rule", prelude, rest[..semi].trim(), 1);
+                if !prelude.to_ascii_lowercase().starts_with("@charset") {
+                    self.ignored += 1;
+                    self.note_rule("at-rule", prelude, rest[..semi].trim(), 1);
+                }
                 rest = &rest[semi + 1..];
                 continue;
             }
@@ -418,14 +420,9 @@ pub fn style_text_of(dom: &Dom, id: NodeId) -> Option<String> {
 }
 
 /// 一份文档里所有 `<style>` 的正文，按文档顺序拼好。**不含** `<link>` 那一份 ——
-/// 外链的正文要按它自己的目录折 `url(...)`，那是调用方的事。
-///
-/// 宿主排版时给「章自己带样式」那一档建的规则表与量缺口的工具走这一条；
-/// `format::html` / `format::htmlz` 在同一趟里还要收 `<link>` 与 `<img>`，逐元素走
-/// [`style_text_of`]。从前这件事在 `format::html`、`format::htmlz` 与宿主各有一份
-/// 近乎同款的写法，于是「量 CSS 缺口的工具只读清单里那几份样式表、排版却连章内那块
-/// 一起读」这种分叉没人拦得住：报表会说「这本书全部接住」，而屏上真正生效的规则表里
-/// 明明有它没读到的那一块。
+/// 外链要按它自己的目录折 `url(...)`，那是调用方的事。
+/// 宿主排版与 css-gap 量具都走这一条：两处若各读一份，「报表说全部接住、屏上却还有
+/// 没读到的章内规则」这种分叉没人拦得住。
 pub fn style_tag_text(dom: &Dom) -> String {
     let mut css = String::new();
     for (id, _) in dom.elements() {

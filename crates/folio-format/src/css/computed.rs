@@ -10,8 +10,14 @@ mod cascade;
 mod types;
 mod types2;
 pub use cascade::cascade;
-pub use types2::{Hyphens, BreakWhen, Color, SvgPaint, SvgLineCap, SvgLineJoin};
-pub use types::{BackgroundLayer, BackgroundAttachment, BackgroundSize, BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundRepeat, BackgroundTile, BoxSizing, Float, Clear};
+pub use types::{
+    BackgroundAttachment, BackgroundAxis, BackgroundEdge, BackgroundLayer, BackgroundPosition,
+    BackgroundRepeat, BackgroundSize, BackgroundTile, BoxSizing, Clear, Float,
+};
+pub use types2::{
+    BreakWhen, CellVAlign, Color, Hyphens, InlineVAlign, Positioning, RubyAlign, RubyPosition,
+    SvgLineCap, SvgLineJoin, SvgPaint, TextShadow, WordBreak,
+};
 
 use crate::dom::NodeId;
 use std::sync::Arc;
@@ -316,6 +322,17 @@ pub enum AlignItems {
     Center,
 }
 
+/// `justify-self`：grid 子项在自身格子里的**行内轴**对齐。初值 `auto` 按 stretch 处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum JustifySelf {
+    #[default]
+    Auto,
+    Start,
+    End,
+    Center,
+    Stretch,
+}
+
 /// `justify-content`：子项在**主轴**上的分布。只收书里用到的四档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum JustifyContent {
@@ -614,152 +631,6 @@ impl ComputedStyle {
 
 /// `position`：只收 `static`（初值）与 `absolute` / `fixed`。
 ///
-/// **落地范围**：绝对定位的盒脱流、按 `left` / `right` / `top` / `bottom`（`%` 折自
-/// **这一章的盒**）摆，`margin` 加在偏移上（封面那套 `left:50%; margin-left:-9.5em` 的居中
-/// 写法就是靠它）。**只认章级包含块**：CSS 的「最近的定位祖先」没做，所以嵌在别的定位盒
-/// （包括 `relative` 盒）里的绝对定位元素仍然按这一章摆。
-///
-/// [`Self::Relative`] 那一档见 [`Positioning::Relative`]：流内整体位移，不脱流。
-/// `sticky` 判不认识 —— 它要的是滚动状态，不是排版这一层的事。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Positioning {
-    #[default]
-    Static,
-    Absolute,
-    Fixed,
-    /// `position: relative`：**留在常规流里**，只把自己已经排好的那一坨整体挪一下。
-    ///
-    /// 与 [`Self::Absolute`] 的分界就在游标：排完这一块的兄弟仍按它**没挪**时的位置接，
-    /// 所以挪出去的那一截会压在邻居身上（浏览器同样如此，那是作者要的效果）。
-    /// 偏移的取用规则、百分比基准与不跟着挪的那几路，全写在 `layout::collect` 的
-    /// `shift_relative`。
-    Relative,
-}
-
-/// `vertical-align` 的**表格格**那一档：格里的内容在行高里贴哪一边。
-///
-/// CSS 的 `vertical-align` 有两副面孔：对行内盒是「相对行盒抬多少」（我们落成
-/// [`ComputedStyle::baseline_shift`]），对表格格是「贴在行高的哪一边」（就是这一格）。
-/// 这一格**不继承**（CSS 规定），所以整行的 `vertical-align: middle` 不会漏到格子上 ——
-/// 浏览器同样如此（Calibre 转换的书要另写 `vertical-align: inherit` 才生效）。
-///
-/// 落地程度：`top`（初值，也就是我们一直以来的行为）、`middle`、`bottom` 三档；
-/// 行内盒上的 `top` / `middle` / `bottom`（相对行盒）**还没做**，收下这个值但在行内不产生
-/// 位移 —— 本机语料里这几种写法全落在 `display: table-row` 上，浏览器也不动。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum CellVAlign {
-    #[default]
-    Top,
-    Middle,
-    Bottom,
-}
-
-/// `vertical-align` 落在**行内盒**上的那两档「对齐父盒字体上下沿」的关键字。
-///
-/// `super` / `sub` / 长度 / 百分比在层叠期就能折成 px（[`ComputedStyle::baseline_shift`]），
-/// 所以不在这里；`top` / `bottom` / `middle` 要对齐**整条行盒**，得等一行排完才知道，
-/// 仍在 `KNOWN_UNIMPLEMENTED` 那一档。这里只收真书里出现的那两条：
-/// `text-top`（《哈利·波特》`sup img` 482 个元素）与 `text-bottom`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum InlineVAlign {
-    /// 贴基线，也就是初值。
-    #[default]
-    Baseline,
-    /// 盒顶对齐父盒的字体顶（父盒的 ascent）。
-    TextTop,
-    /// 盒底对齐父盒的字体底（父盒的 descent，基线以下）。
-    TextBottom,
-}
-
-/// `ruby-align`：注音（`<rt>`）在它的基字上方横向摆在哪一段。
-///
-/// 容器的前进量取「基字宽 / 注音宽」较宽那一条，注音就在这一段里贴起始边、居中或贴末边。
-/// 三档的落点只是同一个数的三种取法（[`RubyAlign::flow_offset`]），所以三档都真兑现。
-///
-/// `auto` 是 CSS 的初值，规范让它「按基字与注音的长短自己定」，浏览器对单字与等长一律居中，
-/// 所以这里把它折成与 `center` 同一个画面 —— 而不是另猜一套分配规则。《诡秘之主》552 处
-/// 显式写的就是 `center`。
-///
-/// **不收** `justify` / `distribute` / `space-between` / `space-around`：那几档要改的是注音
-/// 自己逐字之间的字距（把注音摊到基字宽上），判不认识比猜一种摊法诚实。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum RubyAlign {
-    #[default]
-    Auto,
-    Start,
-    Center,
-    End,
-}
-
-impl RubyAlign {
-    /// 注音起点相对**容器起点**的横向偏移占「容器宽 − 注音宽」的几成。
-    ///
-    /// `Auto` 与 `Center` 同一数（见这一格的文档）。排版层只问这一个数，档位与像素的
-    /// 换算留在唯一一处，RTL 要反向时也只动调用点的那一个符号。
-    pub fn flow_offset(self, container: f32, annotation: f32) -> f32 {
-        let slack = (container - annotation).max(0.0);
-        match self {
-            Self::Start => 0.0,
-            Self::Auto | Self::Center => slack * 0.5,
-            Self::End => slack,
-        }
-    }
-}
-
-/// `ruby-position`：注音排在基字的哪一侧。
-///
-/// `over`（初值，中文/日文书里的常态）排在字上方，`under` 排在字下方 —— 两侧的行盒都照
-/// 同一式子长高，所以 `under` 的代价只是符号相反。
-///
-/// `inter-character`（竖排里排在字侧的上一格，用于假名注音的另一种摆法）不收：它要的是
-/// 「沿字轴错开半格」的另一套几何，本机语料 0 处。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum RubyPosition {
-    #[default]
-    Over,
-    Under,
-}
-
-/// `word-break`：拉丁词内部能不能断。
-///
-/// 只两档：`normal`（初值，词只能在空格/连字符处断）与 `break-all`（任意字符之间都能断）。
-/// `keep-all`（不许在 CJK 之间断）没收 —— 中文书的正文靠逐字断行，那条是给韩文/混排用的，
-/// 本机语料 0 处，判不认识比猜错好。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum WordBreak {
-    #[default]
-    Normal,
-    BreakAll,
-}
-
-/// `text-shadow` 的一层影子：位移 + 模糊半径 + 颜色。
-///
-/// 位移与模糊半径在这一层就已经折成 px（`em` 按**元素自己的**字号折，与其余长度属性同一条
-/// 口径）。CSS 里 `text-shadow` **可继承**，并且可以写多值（逗号分隔的图层），所以
-/// `ComputedStyle` 里存的是一整条列表。
-///
-/// 落地程度要说清：绘制层逐字形再画一遍偏移副本，**模糊半径不是高斯**，是按半径摊出来的
-/// 几份偏移副本（见 `ui::reader::view::paint::shadow_copies`）。真书里这个值普遍是 1px，
-/// 两者在屏上分不出来；写大了会被副本数封顶，不会把一帧画糊。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TextShadow {
-    pub dx: f32,
-    pub dy: f32,
-    /// 模糊半径，px。0 = 硬边影子。
-    pub blur: f32,
-    /// `None` = 没写颜色，绘制时取**本 run 的文字色**（CSS 的 `currentColor`）。
-    pub color: Option<Color>,
-}
-
-impl std::hash::Hash for TextShadow {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        self.dx.to_bits().hash(h);
-        self.dy.to_bits().hash(h);
-        self.blur.to_bits().hash(h);
-        self.color.hash(h);
-    }
-}
-
 /// 排版层需要的计算后样式。除 `margin` / `padding` / `text-indent` / 替换元素的
 /// 尺寸这一族（它们可能带百分比，要等排版期拿到包含块宽才折得动，见 [`Length`]），
 /// 长度一律已折算成 px，`line_height` 是倍数。
@@ -872,6 +743,14 @@ pub struct ComputedStyle {
     /// `grid-template-columns` 的轨道定义与 `quotes`（均可继承 quotes、grid 轨道不继承）。
     pub grid_template_columns: Arc<[GridTrack]>,
     pub quotes: Option<[QuotePair; 2]>,
+    /// `grid-column` / `grid-row` 的显式定位：起点（1-based，`None` = 自动）与跨格数。
+    /// 不继承 —— 子项各自定位。
+    pub grid_column_start: Option<u16>,
+    pub grid_column_span: u16,
+    pub grid_row_start: Option<u16>,
+    pub grid_row_span: u16,
+    /// `justify-self`：grid 子项在格子里的行内轴对齐。不继承。
+    pub justify_self: JustifySelf,
     /// `list-style-type`。只有 `display: list-item`（UA 给 `<li>`）的块会读它。
     ///
     /// CSS 2.1 里它**是可继承**的，而这正是 `<ol>` 的十进制落到每一个 `<li>` 的唯一
@@ -1066,7 +945,10 @@ pub enum GeneratedContent {
 
 /// 把 open-quote / close-quote 按 `quotes` 折成字面字符。没有 quotes 表时
 /// 生成盒不产生字符（与浏览器「quotes: none 时 open-quote 为空」一致）。
-pub(crate) fn resolve_generated(content: GeneratedContent, quotes: Option<[QuotePair; 2]>) -> GeneratedContent {
+pub(crate) fn resolve_generated(
+    content: GeneratedContent,
+    quotes: Option<[QuotePair; 2]>,
+) -> GeneratedContent {
     match content {
         GeneratedContent::OpenQuote => quotes
             .and_then(|q| q.last().copied())
@@ -1137,6 +1019,11 @@ impl Default for ComputedStyle {
             svg_stroke_linejoin: SvgLineJoin::default(),
             text_size_adjust: None,
             grid_template_columns: Arc::from(Vec::new()),
+            grid_column_start: None,
+            grid_column_span: 1,
+            grid_row_start: None,
+            grid_row_span: 1,
+            justify_self: JustifySelf::Auto,
             quotes: None,
             list_style_type: ListStyle::default(),
             float: Float::default(),
@@ -1333,6 +1220,11 @@ impl std::hash::Hash for ComputedStyle {
         (self.svg_stroke_linejoin as u8).hash(h);
         self.text_size_adjust.map(f32::to_bits).hash(h);
         self.grid_template_columns.len().hash(h);
+        self.grid_column_start.hash(h);
+        self.grid_column_span.hash(h);
+        self.grid_row_start.hash(h);
+        self.grid_row_span.hash(h);
+        (self.justify_self as u8).hash(h);
         for track in self.grid_template_columns.iter() {
             match track {
                 GridTrack::Length(l) => {

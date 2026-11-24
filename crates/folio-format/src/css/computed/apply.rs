@@ -5,22 +5,23 @@ mod border;
 mod inherit;
 mod values;
 use border::apply_border;
-use values::*;
 pub(crate) use inherit::inherit_from;
+use values::*;
 
 use super::{
     AlignItems, BorderStyle, BoxSizing, CellVAlign, ComputedStyle, DecorationStyle, Direction,
     Display, EmphasisPosition, FlexDirection, FlexWrap, GeneratedContent, Hyphens, InlineVAlign,
-    JustifyContent, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning, RubyAlign,
-    RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify, Visibility, WordBreak,
+    JustifyContent, JustifySelf, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning,
+    RubyAlign, RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify, Visibility,
+    WordBreak,
 };
 use crate::css::Declaration;
 use crate::css::value::{
     box_side_px, box_sides, edge_length, parse_baseline_shift, parse_bleed, parse_border_radius,
     parse_break_when, parse_clear, parse_color, parse_count, parse_decoration, parse_float,
-    parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height, parse_list_style,
-    parse_text_shadow, parse_writing_mode, relative_weight, set_edge, set_length, set_margin,
-    set_min_length, set_px,
+    parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height,
+    parse_list_style, parse_text_shadow, parse_writing_mode, relative_weight, set_edge, set_length,
+    set_margin, set_min_length, set_px,
 };
 
 /// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
@@ -595,23 +596,12 @@ pub(super) fn apply(
             }
             None => false,
         },
-        // `background-clip` / `background-origin` 不走这里：它们按边框盒画就够用了，
-        // 判据写在 `KNOWN_UNIMPLEMENTED` 那一格。为什么简写里仍然**吃掉**那些词：
-        // `background: url(x) no-repeat fixed center` 里的 `fixed` 是真语法，不认下来
-        // 整条简写就作废，底色与图一起消失 —— 那是比「fixed 没生效」大得多的错。
-        // 而长手单写那两条时屏上确实没有任何变化，所以缺口量具必须说真话。
-        //
-        // `background` 简写：颜色、图、铺法、位置、尺寸一条全写。
-        //
-        // 接住里面的**颜色**那一项是 2026-10-14 那一刀，理由仍然成立：出版书里「深色底块 +
-        // 白字标题」用的是 `background: #b71c1c; color: #ffffff`，只认 `background-color`
-        // 的话底色不画、白字照画 —— 标题变成白纸上的白字，整条消失（《罗生门》每一章的
-        // 标题正是这么没的）。2026-10-23 这一轮把图那一截也接上了：哈利波特的七张册扉页
-        // 整页背景是一张 792×1400 的照片，上面压的两张 PNG 全带透明通道，
-        // 底图一丢就成「白底上一片看不见的淡金字」。
-        //
-        // **简写没写到的子属性要拉回初值**，这是 CSS 明文；为什么必须整表重置，
-        // 判据写在 `apply_background_shorthand` 里面那条注释上。
+        // `background-clip` / `background-origin` 按边框盒画就够（判据在
+        // `KNOWN_UNIMPLEMENTED`）。简写里仍**吃掉**那些词：`background: url(x) … fixed`
+        // 的 `fixed` 是真语法，不认整条简写就作废、底色与图一起消失；长手单写时屏上无变化，
+        // 量具因此必须说真话。
+        // `background` 简写接住**颜色**与**图**两截：出版书的深色底块标题与整页底图都靠它，
+        // 丢掉就整块消失。**没写到的子属性拉回初值**，判据在 `apply_background_shorthand`。
         // CSS 的 `initial`：把这一个属性的每一格拉回初值。整条走通用那条路太大
         // （每个属性都要知道自己的初值），这里只收**简写**这一档 —— 它出现的形态就是
         // 重置块里的一句（The Riddle 那本书 5 个元素）。
@@ -712,16 +702,8 @@ pub(super) fn apply(
                 style.display = Display::Inline;
                 true
             }
-            // `inline-block` 落到下面的 `_ => false`（计入 ignored），是刻意的：排版层
-            // 只分「`None` 跳过 / `Inline` 走行内 / `ListItem` 画标记 / 其余按块」这四档
-            // （`layout::collect` 的 `is_inline_flow` 与它给 `is_item` 那一个判据），所以
-            // 从前存进去的 `InlineBlock` 没有人读 —— 屏上与 `display: block` 一模一样，而
-            // `examples/css-gap` 报 `Applied`。行内块要的是 shrink-to-fit 的宽与「占一行内
-            // 位置」两件事，那一档还没做
-            // 所以这里宁可将它报成没接住。本机四本真书 `display: inline-block` 0 处。
-            //
-            // 表格四档 2026-10-29 接上：`layout::table` 抽网格、分列宽、摆格子。
-            // `inline-table` 仍不接（要的是行内块那一套 shrink-to-fit，同上）。
+            // 表格四档由 `layout::table` 抽网格、分列宽、摆格子；`inline-table` 与
+            // `inline-block` 一样按行内流摊平（行内原子盒的 shrink-to-fit 未做）。
             "table" => {
                 style.display = Display::Table;
                 true
@@ -1125,17 +1107,33 @@ pub(super) fn apply(
                 None => false,
             }
         }
-        // ---- grid-template-columns（轨道定义）----
+        // ---- grid 定位（轨道定义 + 子项显式线号）----
         "grid-template-columns" => apply_grid_tracks(style, value, own, root_px),
-        "grid-column" | "grid-row" => {
-            // 显式定位在排版层消费；这里先认住「数字 / span N / auto」。
-            let low = value.trim().to_ascii_lowercase();
-            low == "auto" || low.parse::<i32>().is_ok() || low.starts_with("span ")
-        }
-        "justify-self" => matches!(
-            value.to_ascii_lowercase().as_str(),
-            "auto" | "start" | "end" | "center" | "stretch"
-        ),
+        "grid-column" => apply_grid_line(style, true, value),
+        "grid-row" => apply_grid_line(style, false, value),
+        "justify-self" => match value.to_ascii_lowercase().as_str() {
+            "auto" => {
+                style.justify_self = JustifySelf::Auto;
+                true
+            }
+            "start" => {
+                style.justify_self = JustifySelf::Start;
+                true
+            }
+            "end" => {
+                style.justify_self = JustifySelf::End;
+                true
+            }
+            "center" => {
+                style.justify_self = JustifySelf::Center;
+                true
+            }
+            "stretch" => {
+                style.justify_self = JustifySelf::Stretch;
+                true
+            }
+            _ => false,
+        },
         // `color: currentColor` 就是 `inherit`（自引用按继承折，CSS 明文）。
         "color" if value.eq_ignore_ascii_case("currentcolor") => {
             style.color = parent.color;
@@ -1341,5 +1339,3 @@ pub(super) fn apply(
         _ => false,
     }
 }
-
-

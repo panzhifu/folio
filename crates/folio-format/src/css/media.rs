@@ -182,4 +182,3 @@ fn media_length_px(value: &str) -> Option<f32> {
     }
     None
 }
-

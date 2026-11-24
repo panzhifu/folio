@@ -119,23 +119,42 @@ pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle, base_dir: 
         // `::before` / `::after`：生成盒的样式挂在元素自己上（父盒就是它），
         // 继承的 quotes 已在 `style` 里折好。open/close-quote 在这里折成字面字符，
         // 这样排版层只需读 `content` 的一种形状。
+        // 作者规则盖到伪元素上：没写 `content` 时保留 UA（如 `q`）给的占位，
+        // `content: none` 则清空槽位。
         let before_decls = rules.matching_before(dom, id);
         if !before_decls.is_empty() {
             let mut generated = style.clone();
-            ignored += apply_in_cascade_order(&mut generated, &style, root_base.font_size, &before_decls);
+            generated.before = None;
+            generated.after = None;
+            generated.content = style
+                .before
+                .as_ref()
+                .map_or(GeneratedContent::None, |s| s.content.clone());
+            ignored +=
+                apply_in_cascade_order(&mut generated, &style, root_base.font_size, &before_decls);
             generated.content = resolve_generated(generated.content.clone(), generated.quotes);
-            if !matches!(generated.content, GeneratedContent::None) {
-                style.before = Some(Box::new(generated));
-            }
+            style.before =
+                (!matches!(generated.content, GeneratedContent::None)).then(|| Box::new(generated));
         }
         let after_decls = rules.matching_after(dom, id);
         if !after_decls.is_empty() {
             let mut generated = style.clone();
-            ignored += apply_in_cascade_order(&mut generated, &style, root_base.font_size, &after_decls);
+            generated.before = None;
+            generated.after = None;
+            generated.content = style
+                .after
+                .as_ref()
+                .map_or(GeneratedContent::None, |s| s.content.clone());
+            ignored +=
+                apply_in_cascade_order(&mut generated, &style, root_base.font_size, &after_decls);
             generated.content = resolve_generated(generated.content.clone(), generated.quotes);
-            if !matches!(generated.content, GeneratedContent::None) {
-                style.after = Some(Box::new(generated));
-            }
+            style.after =
+                (!matches!(generated.content, GeneratedContent::None)).then(|| Box::new(generated));
+        }
+        // UA 表给 `q` 的占位（content 仍是 Open/CloseQuote）按最终 quotes 折成字面。
+        let quotes = style.quotes;
+        for generated in [&mut style.before, &mut style.after].into_iter().flatten() {
+            generated.content = resolve_generated(generated.content.clone(), quotes);
         }
         styles[id as usize] = style;
     }
@@ -178,4 +197,3 @@ fn parse_dimension_attribute(value: &str) -> Option<Length> {
         Some(Length::Px(n))
     }
 }
-

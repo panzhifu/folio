@@ -1,11 +1,10 @@
 //! 表格（`display: table` 一族）的集成用例。
 //! 从 `tests.rs` 切出来只因为那个文件贴着行数上限；共享 helper 经 `super` 取用。
 
-use super::{Mono, find, texts, typeset, typeset_in};
-use crate::{BlockBox, Dom, Layout, LayoutOptions, NoImages, layout};
-use folio_format::css::computed::{ComputedStyle, Display, Length, cascade};
+use super::{Mono, find, typeset};
+use crate::{Dom, Layout, LayoutOptions, NoImages, layout};
+use folio_format::css::computed::{ComputedStyle, cascade};
 use folio_format::css::{Origin, RuleSet};
-use folio_format::dom::NodeId;
 
 // ---- 表格（`display: table` 一族）----
 //

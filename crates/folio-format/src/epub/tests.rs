@@ -198,7 +198,7 @@ fn the_books_own_css_reaches_the_elements() {
         panic!("该读成可重排");
     };
     let rules = RuleSet::parse(&flow.css, Origin::Author);
-    assert_eq!(rules.ignored, 1, "只有 @charset 是清单外的语句型 at-rule");
+    assert_eq!(rules.ignored, 0, "@charset 静默吞掉，不再计进 ignored");
     let dom = Dom::parse(flow.chapters[0].source().as_bytes());
     let body = dom
         .elements()
