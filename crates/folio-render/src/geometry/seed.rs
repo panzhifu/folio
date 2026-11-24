@@ -26,6 +26,10 @@ pub struct DecorSeed {
     /// 底色与背景图的**裁剪盒**（章内坐标，`background-clip` 的结果）：默认就是上面的边框盒，
     /// `padding-box` / `content-box` 时向内缩掉边框与内边距。绘制侧按它铺色与裁图。
     pub background_rect: (f32, f32, f32, f32),
+    /// 背景图的**定位盒**（章内坐标，`background-origin` 的结果）：`cover` / `contain`
+    /// 与百分比定位的相位、尺寸都按它算，初值 `padding-box`（CSS 同）。与上面那个
+    /// 裁剪盒各管各的 —— 裁剪盒说「画到哪儿为止」，定位盒说「从哪儿量起」。
+    pub origin_rect: (f32, f32, f32, f32),
     /// `[上, 右, 下, 左]` 的（要画的宽, 色, 画法）。宽 0 不画。
     ///
     /// 色在这里**已经把 `currentColor` 折完了**：没写 border-color 就取本块自己的

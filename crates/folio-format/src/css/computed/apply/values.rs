@@ -633,7 +633,8 @@ pub(super) struct BackgroundLayerSpec {
     layer: BackgroundLayer,
     color: Option<Color>,
     /// 简写里出现的视觉盒关键字：一个值时 origin 与 clip 都取它，两个值时
-    /// 前者是 origin、后者是 clip。origin 尚未实现，所以只带走 clip。
+    /// 前者是 origin、后者是 clip（CSS 简写规则）。
+    origin: Option<BackgroundClip>,
     clip: Option<BackgroundClip>,
 }
 
@@ -681,9 +682,8 @@ pub(super) fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerS
             layer.repeat.y = y;
             continue;
         }
-        // attachment 与 clip / origin：都收下来（clip / origin 只按边框盒摆，见
-        // `apply` 那一臂的注释）。这里负责**吃掉那个 token**，不让它掉进
-        // 「剩下的都是位置」那一桶里被解成一条非法坐标。
+        // attachment 与盒值（clip / origin）：都收下来，长手各自落地。这里负责
+        // **吃掉那个 token**，不让它掉进「剩下的都是位置」那一桶里被解成一条非法坐标。
         if matches!(low.as_str(), "scroll" | "fixed" | "local") {
             layer.attachment = match low.as_str() {
                 "fixed" => BackgroundAttachment::Fixed,
@@ -692,12 +692,8 @@ pub(super) fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerS
             };
             continue;
         }
-        if matches!(low.as_str(), "border-box" | "padding-box" | "content-box") {
-            boxes.push(match low.as_str() {
-                "padding-box" => BackgroundClip::PaddingBox,
-                "content-box" => BackgroundClip::ContentBox,
-                _ => BackgroundClip::BorderBox,
-            });
+        if let Some(box_value) = BackgroundClip::from_keyword(&low) {
+            boxes.push(box_value);
             continue;
         }
         if let Some(rgba) = parse_color(&low) {
@@ -713,13 +709,18 @@ pub(super) fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerS
         Some(part) => parse_background_size(part)?,
         None => BackgroundSize::default(),
     };
-    // 一个盒值同时管 origin 与 clip；两个值时后一个是 clip。
-    let clip = match boxes.as_slice() {
-        [] => None,
-        [only] => Some(*only),
-        [_, clip, ..] => Some(*clip),
+    // 一个盒值同时管 origin 与 clip；两个值时前 origin 后 clip（CSS 简写规则）。
+    let (origin, clip) = match boxes.as_slice() {
+        [] => (None, None),
+        [only] => (Some(*only), Some(*only)),
+        [origin, clip, ..] => (Some(*origin), Some(*clip)),
     };
-    Some(BackgroundLayerSpec { layer, color, clip })
+    Some(BackgroundLayerSpec {
+        layer,
+        color,
+        origin,
+        clip,
+    })
 }
 
 /// 在第一个**顶层**分隔符处把值切成两半（尺寸那一截可能是空串，但存在）。
@@ -773,16 +774,21 @@ pub(super) fn apply_background_shorthand(style: &mut ComputedStyle, value: &str)
     style.background_color = None;
     style.background_layers.clear();
     style.background_clip = BackgroundClip::BorderBox;
+    style.background_origin = BackgroundClip::PaddingBox;
     // 颜色归最底那一层（= 书写顺序的最后一条）。写在中间层上的色在浏览器里就是这个下场。
     let mut color = None;
     for BackgroundLayerSpec {
         layer,
         color: c,
+        origin,
         clip,
     } in parsed
     {
         if c.is_some() {
             color = c;
+        }
+        if origin.is_some() {
+            style.background_origin = origin.unwrap_or_default();
         }
         if clip.is_some() {
             style.background_clip = clip.unwrap_or_default();

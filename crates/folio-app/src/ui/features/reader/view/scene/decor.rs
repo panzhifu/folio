@@ -24,6 +24,9 @@ pub struct BlockDecor {
     /// 底色与背景图的**裁剪盒**（章内坐标已折成屏幕量）：`background-clip` 的结果，
     /// 默认与边框盒重合，`padding-box` / `content-box` 时向内缩。铺色与裁图都按它。
     pub background_rect: (f32, f32, f32, f32),
+    /// 背景图的**定位盒**（屏幕量，`background-origin` 的结果）：格子的相位与尺寸
+    /// 都按它算，初值 `padding-box`。与裁剪盒各管各的 —— 裁剪盒裁、定位盒量。
+    pub origin_rect: (f32, f32, f32, f32),
     /// 四个角的圆角半径（px），顺序 `[左上, 右上, 右下, 左下]`，由排版层按盒尺寸折好。
     ///
     /// 只作用于**底色**那一块四边形；边框仍是四条轴对齐的直条，所以圆角盒配粗边框时
@@ -36,7 +39,7 @@ pub struct BlockDecor {
     /// `background-image` 的那些层，按 CSS 书写顺序（**先画的在屏幕上更靠上**，
     /// 所以绘制侧要倒着摆）。空 = 这一块没有背景图。
     ///
-    /// 位置是**相对这一块自己的边框盒左上角**，与 `x`/`top` 同一套平移已经在外层加过，
+    /// 位置是**相对这一块自己的定位盒左上角**，与 `x`/`top` 同一套平移已经在外层加过，
     /// 所以竖排那条路上的 `slide` 不用在这里再算一次。
     pub pictures: Vec<BlockPicture>,
     /// `box-shadow` 的层列表（含 `inset`）。已经过主题与水墨换算。
@@ -71,7 +74,9 @@ pub struct BlockOutline {
 pub struct BlockPicture {
     /// 这一张图的活儿（按容器路径向图片索引现取）。
     pub image: crate::ui::foundation::images::DecodeRequest,
-    /// 一格 `(左, 上, 宽, 高)`，相对这一块边框盒左上角。`repeat` 一族才会多于一个数。
+    /// 一格 `(左, 上, 宽, 高)`，相对这一块的**定位盒**左上角（`background-origin` 的
+    /// 结果；画的时候按定位盒与裁剪盒的原点差平移，见 `body::decor::background_child`）。
+    /// `repeat` 一族才会多于一个数。
     pub tiles: Vec<(f32, f32, f32, f32)>,
 }
 

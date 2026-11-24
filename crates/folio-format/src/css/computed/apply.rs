@@ -1,6 +1,7 @@
 //! 一条声明如何变成一个计算值：属性分发、简写展开、继承、边框。只对整个 `css` 内部开放。
 
 mod border;
+mod boxes;
 mod inherit;
 mod values;
 use border::apply_border;
@@ -106,9 +107,8 @@ pub(super) fn apply(
                 style.direction = Direction::Rtl;
                 true
             }
-            // 只认这两个值。CSS 里 `direction` 没有别的关键词（`auto` 不是 CSS 值，
-            // 它是 HTML 的 `dir` 属性那一侧的东西，见 `css::computed` 的层叠入口），
-            // 所以写 `auto` 进样式表算「这条没接住」，进 ignored 计数。
+            // 只认这两个值。`auto` 不是 CSS 值（它是 HTML `dir` 属性那一侧的），
+            // 写进样式表算「这条没接住」，进 ignored 计数。
             _ => false,
         },
         // 三个前缀都写同一格：EPUB / WebKit 的书常写 `-epub-` 或 `-webkit-`，
@@ -181,11 +181,10 @@ pub(super) fn apply(
             }
             _ => false,
         },
-        // `duokan-text-indent` 是多看转换器写在我们标准属性**旁边**的那一份副本：
-        // 《哈利·波特》全书 21 个规则块里它都与同一条规则的标准 `text-indent` 成对出现
-        // （20 块同值，1 块 `2em` vs `1em`）。收它不是为了新行为，是为了让
-        // `examples/css-gap` 不再把这 5,149 个元素报成落差 —— 那 91% 的「10.9%」本来
-        // 就是同一个数的两遍。与已经收下的 `-webkit-hyphens` / `-epub-*` 同类。
+        // `duokan-text-indent` 是多看转换器写在我们标准属性**旁边**的副本：《哈利·波特》
+        // 全书 21 个规则块里它都与同一条规则的标准 `text-indent` 成对出现。收它不是为了
+        // 新行为，是让缺口量具不再把这 5,149 个元素报成落差 —— 那 91% 本来就是同一个数。
+        // 与已经收下的 `-webkit-hyphens` / `-epub-*` 同类。
         "text-indent" | "duokan-text-indent" => {
             set_edge(value, own, root_px, &mut style.text_indent)
         }
@@ -473,21 +472,21 @@ pub(super) fn apply(
         },
         // 背景一族。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
         // 是两件事（后者可能被更高 specificity 的一条颜色盖住），所以两条都要认。
-        // `background-clip`：只收一档盒值；每层各写一个的列表判不认识（见枚举文档）。
-        "background-clip" => match value.to_ascii_lowercase().as_str() {
-            "border-box" => {
-                style.background_clip = BackgroundClip::BorderBox;
+        // `background-clip` / `background-origin`：一档盒值一条，解析共用
+        // [`BackgroundClip::from_keyword`]；每层各写一个的列表判不认识（见枚举文档）。
+        "background-clip" => match BackgroundClip::from_keyword(&value.to_ascii_lowercase()) {
+            Some(box_value) => {
+                style.background_clip = box_value;
                 true
             }
-            "padding-box" => {
-                style.background_clip = BackgroundClip::PaddingBox;
+            None => false,
+        },
+        "background-origin" => match BackgroundClip::from_keyword(&value.to_ascii_lowercase()) {
+            Some(box_value) => {
+                style.background_origin = box_value;
                 true
             }
-            "content-box" => {
-                style.background_clip = BackgroundClip::ContentBox;
-                true
-            }
-            _ => false,
+            None => false,
         },
         "background-color" => {
             // `currentColor` = 本元素自己的 `color`（没写就取继承来的那份）。`color` 那一批
@@ -553,12 +552,13 @@ pub(super) fn apply(
             }
             None => false,
         },
-        // `background-origin` 仍按边框盒定位底图（名单里的降级）；简写里的盒值已由
-        // `apply_background_shorthand` 捕获。简写接住**颜色**与**图**两截、未写到的子属性
-        // 拉回初值；`initial` 只收简写这一档。
+        // 简写接住**颜色**与**图**两截、未写到的子属性拉回初值（含两条盒值，见
+        // `apply_background_shorthand`）；`initial` 只收简写这一档，同样把盒值拉回初值。
         "background" if value.eq_ignore_ascii_case("initial") => {
             style.background_color = None;
             style.background_layers.clear();
+            style.background_clip = BackgroundClip::BorderBox;
+            style.background_origin = BackgroundClip::PaddingBox;
             true
         }
         "background" => apply_background_shorthand(style, value),
@@ -649,8 +649,8 @@ pub(super) fn apply(
                 style.display = Display::Inline;
                 true
             }
-            // 表格四档由 `layout::table` 抽网格、分列宽、摆格子；`inline-table` 与
-            // `inline-block` 一样按行内流摊平（行内原子盒的 shrink-to-fit 未做）。
+            // 表格四档由 `layout::table` 抽网格、分列宽、摆格子；`inline-table` 按
+            // 行内流摊平（行内原子盒的 shrink-to-fit 未做）。
             "table" => {
                 style.display = Display::Table;
                 true
@@ -675,9 +675,8 @@ pub(super) fn apply(
                 style.display = Display::None;
                 true
             }
-            // `display: flex` / `inline-flex` 2026-11-23 接上：走 `layout::flex` 那套
-            // 主轴 + 交叉轴布局。inline-flex 一期没有行内块，落点仍按块排，但子项的
-            // 排列交给 Flex 引擎。
+            // `display: flex` / `inline-flex` 2026-11-23 接上（`layout::flex`）。inline-flex
+            // 一期没有行内块，落点仍按块排，但子项的排列交给 Flex 引擎。
             "flex" => {
                 style.display = Display::Flex;
                 true
@@ -837,6 +836,10 @@ pub(super) fn apply(
             }
             None => false,
         },
+        // ---- 多栏容器属性（块级容器在排版期消费，解析共用 [`boxes`]）----
+        "columns" => boxes::apply_columns(style, value, own, root_px),
+        "column-count" => boxes::apply_column_count(style, value),
+        "column-width" => boxes::apply_column_width(style, value, own, root_px),
         // ---- Flex 子项属性 ----
         "flex-grow" => match value.trim().parse::<f32>() {
             Ok(v) if v >= 0.0 => {
@@ -1211,15 +1214,12 @@ pub(super) fn apply(
         "max-width" => set_length(value, own, root_px, &mut style.max_width),
         "max-height" => set_length(value, own, root_px, &mut style.max_height),
         // 两个 `min-*`：值只收长度（`auto` / `none` 整条作废，判据写在 `set_min_length`）。
-        // 生效点在排版层，而且**夹序**是它们最难写错的一格：`max-*` 先夹、`min-*` 后夹，
-        // 所以「`max-width: 40px` 与 `min-width: 60px` 同时写」这种自相矛盾的声明里
-        // 赢的是 `min-width`（CSS 2.1 §10.4 / §10.7），反过来就与浏览器不一致。
-        // 见 `layout::collect::solve_block_width` 与 `used_content_height`。
+        // 夹序是最难写错的一格：`max-*` 先夹、`min-*` 后夹，自相矛盾的声明里赢的是
+        // `min-width`（CSS 2.1 §10.4 / §10.7），见 `solve_block_width` 与 `used_content_height`。
         "min-width" => set_min_length(value, own, root_px, &mut style.min_width),
         "min-height" => set_min_length(value, own, root_px, &mut style.min_height),
-        // 这一格决定上面六格的数**含不含**边框与内边距。生效点只有
-        // `ComputedStyle::content_size` 一个式子（四个落点共用），所以这里只管存哪一档。
-        // `padding-box` 不认（见 [`BoxSizing`]）：认成 `border-box` 会把边框也扣掉。
+        // 这一格决定上面六格的数**含不含**边框与内边距；生效点只有 `content_size`
+        // 一个式子（四个落点共用）。`padding-box` 不认（见 [`BoxSizing`]）。
         "box-sizing" | "-webkit-box-sizing" => match value.to_ascii_lowercase().as_str() {
             "content-box" => {
                 style.box_sizing = BoxSizing::ContentBox;
@@ -1232,10 +1232,9 @@ pub(super) fn apply(
             _ => false,
         },
         // 这两个属性**本来就按初值在做**（`list-style-image: none` 无图源、
-        // `list-style-position: outside` 标记挂在流动外），所以初值判接住、其余判不认识 ——
-        // 判据是「效果等于默认行为才算接住」。
-        // `font-variant` 只收 `normal`（初值）与 `small-caps`（排版层大写 + 0.8 字号），
-        // 其余（`petite-caps` 等）判不认识，同一条规矩。
+        // `list-style-position: outside` 标记挂在流动外），所以初值判接住、其余判不认识
+        // ——判据是「效果等于默认行为才算接住」。`font-variant` 只收 `normal`（初值）与
+        // `small-caps`（排版层大写 + 0.8 字号），其余判不认识，同一条规矩。
         "font-variant" | "font-variant-caps" => match value.to_ascii_lowercase().as_str() {
             "normal" => {
                 style.small_caps = false;

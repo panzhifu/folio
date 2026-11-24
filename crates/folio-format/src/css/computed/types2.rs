@@ -65,15 +65,31 @@ impl BreakWhen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
 
-/// `background-clip`：底色与背景图裁到哪一个盒。初值 `border-box`（CSS 同）。
+/// `background-clip` / `background-origin` 共用的那一个 `<box>` 值。
 ///
-/// 只收一档值（CSS 允许每层各写一个，这里统一处理）；`text` 等非盒值判不认识。
+/// 两条属性取值面相同、初值不同：clip（裁剪盒）初值 `border-box`，就是派生的
+/// `Default`；origin（定位盒）初值 `padding-box`，由 `ComputedStyle::default`
+/// 显式给，不靠派生。只收一档值（CSS 允许每层各写一个，这里统一处理）；
+/// `text` 等非盒值判不认识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BackgroundClip {
     #[default]
     BorderBox,
     PaddingBox,
     ContentBox,
+}
+
+impl BackgroundClip {
+    /// 盒值关键字 → 枚举。`background-clip` / `background-origin` 两条长手
+    /// 与简写里那截盒值走同一个解析，不许各写各的表。
+    pub(crate) fn from_keyword(low: &str) -> Option<Self> {
+        match low {
+            "border-box" => Some(Self::BorderBox),
+            "padding-box" => Some(Self::PaddingBox),
+            "content-box" => Some(Self::ContentBox),
+            _ => None,
+        }
+    }
 }
 
 /// `text-transform`：只收不改**字节长度**的三档。`ß → SS` 那类会改长度，保留原文。

@@ -6,10 +6,7 @@
 
 use std::ops::Range;
 
-use folio_core::content::format::css::computed::{
-    BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundTile, BorderStyle, Color, Length,
-};
+use folio_core::content::format::css::computed::{BorderStyle, Color};
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{DecorPicture, DecorSeed};
 use gpui_kit::{Hsla, SharedString, hsla};
@@ -20,193 +17,19 @@ use crate::ui::features::reader::model::session::StackMotionView;
 use crate::ui::features::reader::view::paint::GlyphRun;
 
 mod decor;
+mod tiles;
 use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::{desaturate, desaturate_author, run_color, run_color_link};
 pub(in crate::ui::features::reader) use decor::full_page_picture;
 pub use decor::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
 use decor::{overscan_backdrop, page_color_is_drawn_by_reader};
+use tiles::background_tiles;
+pub(in crate::ui::features::reader) use tiles::picture_fills_width;
 
 /// 这一行是不是当前那张的左右邻居。两头之外的不预解：一叠可能有八张，
 /// 全排全清会把图集 24 MB 的封顶挤爆，反而把眼前这一张挤走。
 fn stack_neighbor(index: u16, current: u16) -> bool {
     index == current.saturating_add(1) || index + 1 == current
-}
-
-/// 一块背景图最多摆多少格。铺法那一族数学上无界（4×4 纹理盖 600×4000 长条是一万五千格），
-/// 封顶后**退化成只摆定位那一格**（`no-repeat`）：画少几格是看得出的糙，卡成个位数帧全书都读不下去。
-/// 真实语料从没碰到（哈利波特 23 处最多 450 格）—— 它是护栏，不是路径。
-const MAX_BACKGROUND_TILES: usize = 1024;
-
-/// 一块背景图在这个盒里要摆的格子（相对盒左上角）。入参全是这一帧拿得到的数。
-/// **拿不到固有尺寸就一条都不摆**：`cover` / `contain` 与百分比尺寸都要按比例反算另一轴，
-/// 猜一个的后果是底图被拉成怪形状，比空着更难查。`background-size` 至少一条写死的走另一条路。
-fn background_tiles(
-    box_w: f32,
-    box_h: f32,
-    natural: (f32, f32),
-    size: &BackgroundSize,
-    position: &BackgroundPosition,
-    repeat: &BackgroundRepeat,
-) -> Vec<(f32, f32, f32, f32)> {
-    if box_w <= 0.0 || box_h <= 0.0 {
-        return Vec::new();
-    }
-    let Some((tile_w, tile_h)) = background_tile_size(box_w, box_h, natural, size) else {
-        return Vec::new();
-    };
-    if tile_w <= 0.0 || tile_h <= 0.0 {
-        return Vec::new();
-    }
-    // 定位：先按「不铺」算出那一格落在哪儿，铺的时候以它为相位。
-    let origin = (
-        axis_offset(box_w, tile_w, &position.x),
-        axis_offset(box_h, tile_h, &position.y),
-    );
-    let rows = axis_span(box_h, tile_h, repeat.y, origin.1);
-    let cols = axis_span(box_w, tile_w, repeat.x, origin.0);
-    if rows.len() * cols.len() > MAX_BACKGROUND_TILES {
-        // 只摆定位那一格：丢的是「铺出去的那一整片」，保的是「这一块有底」——
-        // 与整块画空相比，那是更接近作者意图的那一半。
-        tracing::warn!(
-            "背景图铺满要 {}×{} = {} 格，超过 {MAX_BACKGROUND_TILES} 的护栏（盒 \
-             {box_w:.0}×{box_h:.0}、图 {tile_w:.0}×{tile_h:.0}），只摆定位那一格",
-            cols.len(),
-            rows.len(),
-            cols.len() * rows.len(),
-        );
-        return vec![(origin.0, origin.1, tile_w, tile_h)];
-    }
-    let mut out = Vec::with_capacity(rows.len() * cols.len());
-    for (top, height) in &rows {
-        for (left, width) in &cols {
-            out.push((*left, *top, *width, *height));
-        }
-    }
-    out
-}
-
-/// 一轴上要摆的格子：**这一轴上的绝对位置** `(起点, 长)`，只列与 `[0, side)` 相交的。
-/// 从前按 ±`ceil(side/tile)+1` 对称铺开会在正当写法上撞护栏（40×40 盖 600 版心算 1089 格），
-/// 按相交范围收同一张图是 15 列。
-/// `space`：装几张摆几张、余量**均摊成隙**（图不缩、边不裁），装不下就画一张溢出裁掉；
-/// `round`：按能装的张数取整再**把图缩放到整除**，无缝也无裁切。
-fn axis_span(side: f32, tile: f32, mode: BackgroundTile, origin: f32) -> Vec<(f32, f32)> {
-    match mode {
-        BackgroundTile::NoRepeat => vec![(origin, tile)],
-        BackgroundTile::Repeat => {
-            // 要摆的那些格：起点 < side 且 终点 > 0。图比这一轴还宽时 `first` 就是 0，
-            // 也就是只画定位那一格（它自己已经溢出，溢出的一截由外壳裁掉）。
-            let first = (-origin / tile).floor() as i32;
-            let last = ((side - origin) / tile).ceil() as i32 - 1;
-            (first..=last.max(first))
-                .map(|k| (origin + k as f32 * tile, tile))
-                .collect()
-        }
-        BackgroundTile::Space => {
-            let count = ((side / tile).floor() as i32).max(1);
-            let gap = if count > 1 {
-                (side - count as f32 * tile) / (count - 1) as f32
-            } else {
-                0.0
-            };
-            (0..count)
-                .map(|k| (origin + k as f32 * (tile + gap), tile))
-                .collect()
-        }
-        BackgroundTile::Round => {
-            let count = ((side / tile).round() as i32).max(1);
-            let each = side / count as f32;
-            (0..count)
-                .map(|k| (origin + k as f32 * each, each))
-                .collect()
-        }
-    }
-}
-
-/// 一张图在这个盒里画多大。`None` = 算不出来（见 [`background_tiles`] 里那条理由）。
-fn background_tile_size(
-    box_w: f32,
-    box_h: f32,
-    natural: (f32, f32),
-    size: &BackgroundSize,
-) -> Option<(f32, f32)> {
-    let (nw, nh) = natural;
-    let has_ratio = nw > 0.0 && nh > 0.0;
-    match size {
-        BackgroundSize::Auto => has_ratio.then_some((nw, nh)),
-        BackgroundSize::Cover => has_ratio.then(|| {
-            (
-                nw * (box_w / nw).max(box_h / nh),
-                nh * (box_w / nw).max(box_h / nh),
-            )
-        }),
-        BackgroundSize::Contain => has_ratio.then(|| {
-            (
-                nw * (box_w / nw).min(box_h / nh),
-                nh * (box_w / nw).min(box_h / nh),
-            )
-        }),
-        BackgroundSize::Explicit { width, height } => {
-            let w = width.and_then(|l| fold_length(l, box_w));
-            let h = height.and_then(|l| fold_length(l, box_h));
-            match (w, h) {
-                (Some(w), Some(h)) => Some((w, h)),
-                // 只写了有一条轴：另一轴按固有纵横比反算 —— 与 `layout::ports::image_size`
-                // 给 `<img>` 折的那一条**同一个式子**，两处不许各有各的定义。
-                (Some(w), None) => (has_ratio && w > 0.0).then(|| (w, w * (nh / nw))),
-                (None, Some(h)) => (has_ratio && h > 0.0).then(|| (h * (nw / nh), h)),
-                // 两轴都是 `auto`：那其实就是 `BackgroundSize::Auto` 那一档。
-                (None, None) => has_ratio.then_some((nw, nh)),
-            }
-        }
-    }
-}
-
-/// 这一张整页画**宽度铺满了框、而且比框矮**吗。
-///
-/// 滚动档用它决定「贴顶还是居中」：封面那种竖图在手机屏上是宽度先到边（`contain`
-/// 由宽那一轴定），把它贴着屏幕顶边画才有沉浸感；宽度不足（左右留白）或比框还高
-/// （`cover` 纵向溢出）的仍按作者的定位居中 —— 后者贴顶会把溢出的那一截压进下一章。
-pub(in crate::ui::features::reader) fn picture_fills_width(
-    picture: &DecorPicture,
-    width: f32,
-    height: f32,
-    images: &ChapterImages,
-) -> bool {
-    let (natural_w, natural_h) = images.natural_size(&picture.href);
-    background_tile_size(width, height, (natural_w, natural_h), &picture.size)
-        .is_some_and(|(tile_w, tile_h)| tile_w >= width - 0.5 && tile_h <= height + 0.5)
-}
-
-/// 把一条 `Length` 折成 px。`Percent` 按**这一块对应轴**的长折。
-/// `em` / `rem` / `vw` / `vh` 在解析期就没接（见 `css::value::size_axis`），到不了这里。
-fn fold_length(length: Length, basis: f32) -> Option<f32> {
-    match length {
-        Length::Px(v) => Some(v),
-        Length::Percent(p) => Some(p * basis),
-        Length::Auto => None,
-    }
-}
-
-/// 一轴上的落点：从盒的起始边数过去多少 px。
-///
-/// 百分比那一档的基准是**余量（盒 − 图）**，不是盒长 —— CSS 就这么定的：
-/// `background-position: 100%` 要的是「图的右边贴盒的右边」，按盒长折就会把整张图
-/// 推出可视区（图比盒大时更是直接看不见）。
-fn axis_offset(side: f32, tile: f32, axis: &BackgroundAxis) -> f32 {
-    let free = side - tile;
-    match axis {
-        BackgroundAxis::Length(length) => fold_length(*length, free).unwrap_or(0.0),
-        BackgroundAxis::Fraction(p) => free * p,
-        BackgroundAxis::Edge(edge, offset) => {
-            let push = offset.and_then(|l| fold_length(l, free)).unwrap_or(0.0);
-            match edge {
-                BackgroundEdge::Start => push,
-                BackgroundEdge::Center => free / 2.0 + push,
-                BackgroundEdge::End => free - push,
-            }
-        }
-    }
 }
 
 /// 可见范围内的一张图：位置与尺寸已由排版算好，这里只负责把「画在哪儿」记下来。
@@ -635,32 +458,32 @@ fn place_decorations(
         // 背景图：一张都取不到字节就整条跳过 —— 「这一块没有底」与「底还在解」在
         // 屏幕上与从前一样，都是空着，但别拿着一个假的 `DecodeRequest` 去登记图集，
         // 那会让回收那一账记在一张根本不存在的图上。
-        let background_rect = if vertical {
-            (
-                x + seed.background_rect.0 + slide,
-                top + seed.background_rect.1,
-                seed.background_rect.2,
-                seed.background_rect.3,
-            )
-        } else {
-            (
-                x + seed.background_rect.0,
-                seed.background_rect.1 - origin_y + top,
-                seed.background_rect.2,
-                seed.background_rect.3,
-            )
+        // 裁剪盒与定位盒同一套平移：裁剪盒管裁、定位盒管量。
+        let fold = |rect: (f32, f32, f32, f32)| {
+            if vertical {
+                (x + rect.0 + slide, top + rect.1, rect.2, rect.3)
+            } else {
+                (x + rect.0, rect.1 - origin_y + top, rect.2, rect.3)
+            }
         };
+        let background_rect = fold(seed.background_rect);
+        let origin_rect = fold(seed.origin_rect);
         let mut pictures = Vec::new();
         for picture in &seed.pictures {
             let Some(request) = images.decode_request(&picture.href) else {
                 continue;
             };
-            // 格子按**裁剪盒**的尺寸算：`background-clip: padding-box` 等收进来之后，
-            // 图的 cover / 百分比定位都以裁剪盒为基准（CSS 的 origin 默认是 padding-box，
-            // 与这一档正好同形；origin 的另外两档未实现，记在 `background-clip` 的文档上）。
+            // 格子按**定位盒**算相位与尺寸，铺到**裁剪盒**的边为止：裁剪盒折进
+            // 定位盒坐标系传下去（两盒各管各的，见 `background_tiles`）。
             let tiles = background_tiles(
-                background_rect.2,
-                background_rect.3,
+                origin_rect.2,
+                origin_rect.3,
+                (
+                    background_rect.0 - origin_rect.0,
+                    background_rect.1 - origin_rect.1,
+                    background_rect.2,
+                    background_rect.3,
+                ),
                 images.natural_size(&picture.href),
                 &picture.size,
                 &picture.position,
@@ -688,6 +511,7 @@ fn place_decorations(
             width: seed.width,
             height: seed.height,
             background_rect,
+            origin_rect,
             background: if page_color_is_drawn_by_reader(index, seed, picture_only_chapter) {
                 // 整页底色只由 `reading_theme::resolve` 画一次（`column.bg(reading.bg)`），
                 // 这里再画一遍就是同一件事的第二个真相 —— 见判据那一条的文档。
@@ -752,6 +576,8 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
         let tiles = background_tiles(
             width,
             height,
+            // 背板没有边框与内边距，定位盒与裁剪盒重合。
+            (0.0, 0.0, width, height),
             images.natural_size(&picture.href),
             &picture.size,
             &picture.position,
@@ -771,6 +597,7 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
         width,
         height,
         background_rect: (x, top, width, height),
+        origin_rect: (x, top, width, height),
         background: None,
         radius: [0.0; 4],
         border: [(0.0, hsla(0.0, 0.0, 0.0, 0.0), BorderStyle::None); 4],
@@ -855,6 +682,7 @@ mod tests {
             width: 300.0,
             height,
             background_rect: (12.0, y, 300.0, height),
+            origin_rect: (12.0, y, 300.0, height),
             background: Some(Color(193, 204, 192, 255)),
             full_bleed: false,
             radius: [0.0; 4],
@@ -1029,7 +857,15 @@ mod tests {
         let (bw, bh) = (600.0, 900.0);
         let natural = (792.0, 1400.0);
 
-        let cover = background_tiles(bw, bh, natural, &BackgroundSize::Cover, &center, &none);
+        let cover = background_tiles(
+            bw,
+            bh,
+            (0.0, 0.0, bw, bh),
+            natural,
+            &BackgroundSize::Cover,
+            &center,
+            &none,
+        );
         assert_eq!(cover.len(), 1, "不铺就该只有一格");
         let (left, top, w, h) = cover[0];
         assert!(w >= bw && h >= bh, "cover 要盖满两轴：{w}×{h}");
@@ -1042,7 +878,15 @@ mod tests {
         assert!(left <= 0.0 && left + w >= bw, "居中的那一格要盖住整轴");
         assert!(top < 0.0 && top + h > bh, "纵轴两头各溢出一截：{top}+{h}");
 
-        let contain = background_tiles(bw, bh, natural, &BackgroundSize::Contain, &center, &none);
+        let contain = background_tiles(
+            bw,
+            bh,
+            (0.0, 0.0, bw, bh),
+            natural,
+            &BackgroundSize::Contain,
+            &center,
+            &none,
+        );
         let (left, top, w, h) = contain[0];
         assert!(w <= bw && h <= bh, "contain 不许溢出：{w}×{h}");
         assert!(
@@ -1079,7 +923,16 @@ mod tests {
             BackgroundSize::Contain,
         ] {
             assert!(
-                background_tiles(600.0, 900.0, (0.0, 0.0), &size, &center, &none).is_empty(),
+                background_tiles(
+                    600.0,
+                    900.0,
+                    (0.0, 0.0, 600.0, 900.0),
+                    (0.0, 0.0),
+                    &size,
+                    &center,
+                    &none
+                )
+                .is_empty(),
                 "{size:?} 都要读源比例，不知道就不摆"
             );
         }
@@ -1091,7 +944,18 @@ mod tests {
             )),
             height: None,
         };
-        assert!(background_tiles(600.0, 900.0, (0.0, 0.0), &only_width, &center, &none).is_empty());
+        assert!(
+            background_tiles(
+                600.0,
+                900.0,
+                (0.0, 0.0, 600.0, 900.0),
+                (0.0, 0.0),
+                &only_width,
+                &center,
+                &none
+            )
+            .is_empty()
+        );
         let both = BackgroundSize::Explicit {
             width: Some(folio_core::content::format::css::computed::Length::Px(
                 200.0,
@@ -1101,7 +965,15 @@ mod tests {
             )),
         };
         assert_eq!(
-            background_tiles(600.0, 900.0, (0.0, 0.0), &both, &center, &none),
+            background_tiles(
+                600.0,
+                900.0,
+                (0.0, 0.0, 600.0, 900.0),
+                (0.0, 0.0),
+                &both,
+                &center,
+                &none
+            ),
             vec![(0.0, 0.0, 200.0, 100.0)],
             "两轴都写死时不需要比例"
         );
@@ -1120,6 +992,7 @@ mod tests {
         let tiles = background_tiles(
             600.0,
             400.0,
+            (0.0, 0.0, 600.0, 400.0),
             (40.0, 40.0),
             &BackgroundSize::Auto,
             &BackgroundPosition::default(),
@@ -1144,6 +1017,7 @@ mod tests {
         let one = background_tiles(
             600.0,
             900.0,
+            (0.0, 0.0, 600.0, 900.0),
             (792.0, 1400.0),
             &BackgroundSize::Cover,
             &BackgroundPosition::default(),
@@ -1153,6 +1027,37 @@ mod tests {
             },
         );
         assert_eq!(one.len(), 1, "cover 折出来的格两轴都溢出，一格就够");
+    }
+
+    /// `repeat` 铺到**裁剪盒**的边为止：定位盒缩进去之后，定位盒外面的边框带还要
+    /// 接着铺（相位从定位盒量起，绘制区是整个裁剪盒）。这里钉的是覆盖范围随裁剪盒
+    /// 扩、不随定位盒缩 —— 铺少了，边框带里露出一条底色。
+    #[test]
+    fn repeat_covers_the_clip_box_beyond_the_origin_box() {
+        use super::background_tiles;
+        use folio_core::content::format::css::computed::{
+            BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
+        };
+        let rep = BackgroundRepeat {
+            x: BackgroundTile::Repeat,
+            y: BackgroundTile::NoRepeat,
+        };
+        // 定位盒 500 宽、裁剪盒左边多出 60 的边框带：40px 纹理从 −60 铺到 500 是 15 格，
+        // 只按定位盒算是 13 格。
+        let tiles = background_tiles(
+            500.0,
+            400.0,
+            (-60.0, 0.0, 560.0, 400.0),
+            (40.0, 40.0),
+            &BackgroundSize::Auto,
+            &BackgroundPosition::default(),
+            &rep,
+        );
+        assert_eq!(tiles.len(), 15, "覆盖要伸到裁剪盒的左缘外：{tiles:?}");
+        assert!(
+            tiles.iter().all(|(l, ..)| *l < 500.0 && *l + 40.0 > -60.0),
+            "每格都要与裁剪盒相交"
+        );
     }
 
     /// 百分比那一档的基准是**余量（盒 − 图）**，不是盒长。写错成盒长时，图比盒大会被
@@ -1177,6 +1082,7 @@ mod tests {
             let got = background_tiles(
                 box_w,
                 900.0,
+                (0.0, 0.0, box_w, 900.0),
                 (tile, 100.0),
                 &BackgroundSize::Auto,
                 &at(p),
@@ -1207,6 +1113,7 @@ mod tests {
             let got = background_tiles(
                 box_w,
                 900.0,
+                (0.0, 0.0, box_w, 900.0),
                 (tile, 100.0),
                 &BackgroundSize::Auto,
                 &BackgroundPosition {
@@ -1245,12 +1152,12 @@ mod tests {
     /// 后者贴顶会把多出来的那一截压进下一章。
     #[test]
     fn a_page_art_picture_hugs_the_top_only_when_it_fills_the_width() {
-        use super::{
-            BackgroundAxis, BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
-            DecorPicture, picture_fills_width,
-        };
+        use super::{DecorPicture, picture_fills_width};
         use crate::ui::foundation::images::{BookImages, ChapterImages, no_images};
         use folio_core::content::format::ImageRes;
+        use folio_core::content::format::css::computed::{
+            BackgroundAxis, BackgroundPosition, BackgroundRepeat, BackgroundSize, BackgroundTile,
+        };
         use std::sync::Arc;
 
         let res = |href: &str, width: u32, height: u32| ImageRes {
@@ -1337,6 +1244,7 @@ mod tests {
                 width: 300.0,
                 height: 40.0,
                 background_rect: (0.0, 0.0, 300.0, 40.0),
+                origin_rect: (0.0, 0.0, 300.0, 40.0),
                 background: Some(colored),
                 radius: [0.0; 4],
                 border: [(2.0, colored, BorderStyle::Solid); 4],

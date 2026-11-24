@@ -359,29 +359,32 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
             pad(style.padding_bottom),
             pad(style.padding_left),
         );
-        let background_rect = match style.background_clip {
-            folio_format::css::computed::BackgroundClip::BorderBox => {
-                (block.x, block.y, block.width, block.height)
-            }
-            folio_format::css::computed::BackgroundClip::PaddingBox => (
+        // 盒值内缩式：与 `geometry::decor_seeds` 同一份，clip 与 origin 各折一份。
+        use folio_format::css::computed::BackgroundClip;
+        let inset_box = |which| match which {
+            BackgroundClip::BorderBox => (block.x, block.y, block.width, block.height),
+            BackgroundClip::PaddingBox => (
                 block.x + bl,
                 block.y + bt,
                 (block.width - bl - br).max(0.0),
                 (block.height - bt - bb).max(0.0),
             ),
-            folio_format::css::computed::BackgroundClip::ContentBox => (
+            BackgroundClip::ContentBox => (
                 block.x + bl + pad_l,
                 block.y + bt + pad_t,
                 (block.width - bl - br - pad_l - pad_r).max(0.0),
                 (block.height - bt - bb - pad_t - pad_b).max(0.0),
             ),
         };
+        let background_rect = inset_box(style.background_clip);
+        let origin_rect = inset_box(style.background_origin);
         out.push(DecorSeed {
             x: block.x,
             y: block.y,
             width: block.width,
             height: block.height,
             background_rect,
+            origin_rect,
             full_bleed: false,
             background: style.background_color,
             radius: style.corner_radii(block.width, block.height),

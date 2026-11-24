@@ -11,17 +11,14 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // `background` 简写 2026-10-14 起**接住了它里面的颜色**（见 `apply` 的 `background`
     // 那一臂）：出版书里「深色底块 + 白字标题」满地都是，只认 `background-color`
     // 会让这种标题变成白纸上的白字、整条标题消失。2026-10-23 这一轮把 `url(...)`
-    // 那一截也接上了，落在 [`ComputedStyle::background_layers`]。
-    //
-    // 这一族里只剩 `background-origin` 留在「认得、不生效」这一档：一律按**边框盒**
-    // 定位底图；`padding-box` / `content-box` 要给的是内缩的基准矩形。`background-clip`
-    // 2026-11-24 接上了（底色与底图裁到指定盒），简写里的盒值也一并捕获。
+    // 那一截也接上了，落在 [`ComputedStyle::background_layers`]。这一族的两个盒值
+    // `background-clip` 与 `background-origin` 2026-11-24 也都接上了：裁剪盒管
+    // 底色与底图裁到哪个盒、定位盒管底图相位与尺寸，简写里的盒值一并捕获。
     //
     // `background-attachment` 2026-10-31 移了出去：`fixed` 挂在章节根上时，排版层
     // 把这一章抬到至少一屏高（浏览器里那是铺满视口画布的整页底图，卷首/扉页正是这么
     // 写的）。绘制仍跟着纸走、不钉在视口上 —— 那一半的降级写在
     // [`BackgroundAttachment`] 上。它现在真会改屏上的东西，所以不能再记成「不生效」。
-    "background-origin",
     // `min-height` 在这份名单里空转过（认得、不生效）：2026-10-21 与 `min-width` 一起
     // 接进 `used_content_height` / `solve_block_width` 那两夹，所以移了出去。
     //
@@ -38,10 +35,15 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // （「接受、不生效」），M4 的分片器把它们变成真生效的属性，所以移出去了。
     // `float` / `clear` 同一条路，2026-10-16 那一轮移出去的 —— 现在真会摆浮动盒、
     // 真会把后面的行带折窄，见 `layout::collect` 的 `PlacedFloat`。
-    // `columns` 留下：分片器认的是**视口**栏数（`FragmentOptions::columns`，
-    // 由界面或读者给），作者写的块级 `column-count` 要改排版期的折行宽度，还没接。
-    // `column-gap` 2026-11-23 移了出去：它作为 `gap` 的横轴分量随 Flex 一起接住。
-    "columns",
+    // `columns` 2026-11-24 移了出去：块级多栏容器在排版期真接了（`collect::columns_layout`，
+    // 纯数在 `layout::columns`），`column-count` / `column-width` / 简写与 `column-gap`
+    // （Flex 那一档同格）都进层叠。这一族剩下的三条没有对应物或不在这一层，留在这里：
+    // `column-rule` 是栏间分隔线（绘制侧多一族线段）、`column-fill` 要在「配平」与
+    // 「填满」两档里做真实的分栏分片、`column-span` 要把跨栏元素从流里抽出来再拼回去 ——
+    // 三条都照实记「认得、不生效」，落差表不再把它们报成「听都没听过」。
+    "column-rule",
+    "column-fill",
+    "column-span",
     // 列表标记 2026-10-15 起真的画了，所以 `list-style` 与 `list-style-type` 从这份
     // 名单里移了出去 —— 它们现在会改屏上的东西（`layout::marker`）。
     // `list-style-image` 与 `list-style-position` 2026-10-29 也移了出去：它们不是

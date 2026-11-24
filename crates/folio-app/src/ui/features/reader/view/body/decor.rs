@@ -48,22 +48,23 @@ pub(super) fn paint_fold(
     }
 }
 
-/// 一块背景图：外壳是那一块的边框盒、带矩形裁剪，里面按 `scene` 算好的格子摆图。
+/// 一块背景图：外壳是**裁剪盒**、带矩形裁剪，里面按 `scene` 算好的格子摆图。
 ///
 /// 为什么要外壳那一层 `overflow_hidden`：`cover` 折出来的格子**本来就比盒大**
 /// （缩到盖满，多出来的一截要裁掉），而 `repeat` 那一格会从定位那一点向两头溢出。
 /// gpui 的 `ContentMask` 只有矩形 —— 这里要的正好是矩形，够用。
 ///
-/// 坐标：外壳落在 `decor.x/top`（章内量，平移已由 `place_decorations` 加过），
-/// 里面的格子相对外壳左上角，与 [`BlockPicture::tiles`] 的定义一致。
+/// 坐标：外壳落在 `decor.background_rect`（章内量，平移已由 `place_decorations` 加过），
+/// 里面的格子相对**定位盒**左上角（[`BlockPicture::tiles`] 的定义），按两个盒的原点差
+/// 平移进来 —— 裁剪盒裁、定位盒量，两盒各管各的。
 pub(super) fn background_child(
     decor: &BlockDecor,
     picture: &BlockPicture,
     rendered: Arc<RenderImage>,
 ) -> AnyElement {
-    // 外壳就是裁剪盒（`background-clip` 的结果）；里面的格子坐标已由 scene 侧
-    // 按「裁剪盒原点 − 裁剪盒原点」折好，相对外壳左上角。
     let (bg_x, bg_top, bg_w, bg_h) = decor.background_rect;
+    let (ox, oy, _, _) = decor.origin_rect;
+    let (dx, dy) = (ox - bg_x, oy - bg_top);
     div()
         .absolute()
         .left(px(bg_x))
@@ -74,8 +75,8 @@ pub(super) fn background_child(
         .children(picture.tiles.iter().map(|(left, top, width, height)| {
             div()
                 .absolute()
-                .left(px(*left))
-                .top(px(*top))
+                .left(px(*left + dx))
+                .top(px(*top + dy))
                 .w(px(*width))
                 .h(px(*height))
                 // 格子已经是「按比例算好的那一个矩形」，所以这里要的是铺满而不是再保比例：

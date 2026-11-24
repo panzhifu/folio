@@ -571,10 +571,8 @@ impl Layout {
     }
 
     /// 真正拥有第 `i` 行的盒子：先序入表 ⇒ 最后一个区间包含它的就是最深的叶子块。
-    ///
-    /// 答案是排完时折好的那张表（[`fold_line_owner`]），所以这一句是 O(1)。
-    /// 折表那一步与原来那句 `blocks.iter().rev().find(|b| b.lines.contains(&i))`
-    /// 是同一条规则：按表序逐个写入，最后留在格里的就是最深的块。
+    /// 答案是排完时折好的那张表（[`fold_line_owner`]），O(1)，与折叠前那句
+    /// `blocks.iter().rev().find(…)` 同一条规则：按表序逐个写入，最后留在格里的就是最深的块。
     pub fn block_of_line(&self, i: usize) -> Option<&BlockBox> {
         let at = *self.owner.get(i)?;
         if at == u32::MAX {
@@ -583,13 +581,11 @@ impl Layout {
         self.blocks.get(at as usize)
     }
 
-    /// 与可见带 `[from_y, to_y)` 有关的那些行 —— **绘制那一帧只该问这个数**。
+    /// 与可见带 `[from_y, to_y)` 有关的那些行 —— **绘制那一帧只该问这个数**：
+    /// 从前每行一次 y 比较是每帧 O(章行数)，这里两次二分；带的起点包含**顶边在
+    /// 带上方、但盒子伸进来**的那一行，否则窗口最上面会缺一截。行盒不叠放或带空
+    /// 时给全区间，调用方自己的裁剔照旧兜住正确性。
     ///
-    /// 原来的写法是把 `0..行数` 整个交给场景层，每行一次 y 比较裁剔，于是每帧 O(章行数)；这里两次二分。带的起点包含**顶边在带上方、
-    /// 但盒子伸进来**的那一行，否则窗口最上面会缺一截。
-    ///
-    /// 行盒不叠放（`stacked` 为假）或带是空的时给全区间：调用方自己的 y 裁剔照旧兜住
-    /// 正确性，这里只是没省下来。
     /// 把整章块表走一遍折出「哪些块要画装饰」短表（见 [`DecorSeed`]）。
     /// **每次重排一次、不是每帧一次**（O(全部块)，答案只跟层叠结果有关；门是
     /// `Metric::DecorRebuilds`，滚动时不涨）。三条筛除与绘制侧逐条一致：
@@ -691,7 +687,9 @@ impl Layout {
                 pad(style.padding_bottom),
                 pad(style.padding_left),
             );
-            let background_rect = match style.background_clip {
+            // 盒值把边框盒内缩成对应的那一盒：border-box 原样、padding-box 缩掉边框、
+            // content-box 再缩掉内边距。clip（裁剪盒）与 origin（定位盒）是同一式子的两份。
+            let inset_box = |which| match which {
                 BackgroundClip::BorderBox => (block.x, block.y, block.width, block.height),
                 BackgroundClip::PaddingBox => (
                     block.x + bl,
@@ -706,12 +704,15 @@ impl Layout {
                     (block.height - bt - bb - pad_t - pad_b).max(0.0),
                 ),
             };
+            let background_rect = inset_box(style.background_clip);
+            let origin_rect = inset_box(style.background_origin);
             out.push(DecorSeed {
                 x: block.x,
                 y: block.y,
                 width: block.width,
                 height: block.height,
                 background_rect,
+                origin_rect,
                 full_bleed,
                 background: style.background_color,
                 radius: style.corner_radii(block.width, block.height),
@@ -746,13 +747,10 @@ impl Layout {
     }
 
     /// 与可见带 `[from, to)` 有关的那些行 —— **绘制那一帧只该问这个数**。
-    /// 带是推进轴上的一段（横排就是 `[上缘, 下缘)`）。
-    ///
-    /// 原来的写法是把 `0..行数` 整个交给场景层，每行一次 y 比较裁剔，于是每帧 O(章行数)；这里两次二分。带的起点包含**顶边在带上方、
-    /// 但盒子伸进来**的那一行，否则窗口最上面会缺一截。
-    ///
-    /// 行盒不叠放（`stacked` 为假）或带是空的时给全区间：调用方自己的 y 裁剔照旧兜住
-    /// 正确性，这里只是没省下来。
+    /// 带是推进轴上的一段（横排就是 `[上缘, 下缘)`）。从前每行一次 y 比较是每帧
+    /// O(章行数)，这里两次二分；带的起点包含**顶边在带上方、但盒子伸进来**的那一行，
+    /// 否则窗口最上面会缺一截。行盒不叠放或带空时给全区间：调用方自己的 y 裁剔
+    /// 照旧兜住正确性，这里只是没省下来。
     pub fn lines_in_band(&self, from: f32, to: f32) -> Range<usize> {
         let all = 0..self.lines.len();
         if !self.stacked || to <= from {

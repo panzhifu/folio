@@ -34,6 +34,7 @@ pub mod page;
 
 mod cache;
 mod collect;
+mod columns;
 mod flex;
 mod font;
 mod geometry;

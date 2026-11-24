@@ -1,7 +1,6 @@
 //! `ComputedStyle` 计算：单位换算、继承、ignored 计数、层叠端到端。
-//!
-//! 只依赖公开 API。选择器命中和 specificity / `!important` 的排序在 `css::tests` 已覆盖，
-//! 这里验的是「拿到有序声明之后算得对不对」。
+//! 只依赖公开 API。选择器命中和 specificity / `!important` 的排序在 `css::tests`
+//! 已覆盖，这里验的是「拿到有序声明之后算得对不对」。
 
 use crate::css::computed::{
     BackgroundAttachment, BackgroundAxis, BackgroundClip, BackgroundEdge, BackgroundPosition,
@@ -29,9 +28,7 @@ pub(super) fn page(html: &str, sheets: &[(&str, Origin)]) -> Page {
 }
 
 /// 与 [`page`] 同一件事，只是这一份文档在容器里的**目录**给得出来。
-///
-/// 只有内联 `style="…"` 与章内 `<style>` 会读它：那两处的 `url(...)` 基准是**这一份文档
-/// 自己的目录**，而外链样式表按它自己的目录折（在拼接前由 `absolutize_css_urls` 做过）。
+/// 只有内联 `style="…"` 与章内 `<style>` 会读它（外链样式表按它自己的目录折）。
 /// 绝大多数用例不涉及路径，走 [`page`] 那个空目录就够。
 pub(super) fn page_in_dir(html: &str, css: &str, base_dir: &str) -> Page {
     let dom = Dom::parse(html.as_bytes());
@@ -50,9 +47,8 @@ pub(super) fn style(page: &Page, id: NodeId) -> &ComputedStyle {
 }
 
 /// 断言按 px 读那一条边距 / 缩进。折出 `Percent` 会被这条直接判失败 —— 层叠期
-/// 不该折算百分比（那是排版期拿到包含块宽之后的事），所以这些用例里出现
-/// `Percent` 意味着取值层走错了路。要验百分比本身就用 `Length::Percent(..)` 直接对。
-/// `Auto` 同理：那是「等排版期均分」的记号，要断言它就写 `Length::Auto`。
+/// 不该折算百分比（那是排版期拿到包含块宽之后的事），出现 `Percent` 意味着取值层
+/// 走错了路。要验百分比就用 `Length::Percent(..)` 直接对；`Auto` 同理。
 pub(super) fn px(l: Length) -> f32 {
     match l {
         Length::Px(v) => v,
@@ -322,9 +318,9 @@ fn unknown_values_count_as_ignored_but_known_lazily_supported_do_not() {
 }
 
 /// 百分比边距**存下来，不在层叠期折**（折算点在 `layout::collect` 的 `basis`）。
-/// 以前是「宁可判不支持」：《哈利·波特》86441 个元素挂着 `margin: 0% 1% 0% 1%`，
-/// 判不支持等于把作者的边距静默抹掉，而基准只是**当时**不知道、排版期拿得到。
-/// 用 div 而不是 p：div 的 UA 外边距是 0，能看清被拒的声明什么都没留下。
+/// 《哈利·波特》86441 个元素挂着 `margin: 0% 1% 0% 1%`，判不支持等于把作者的边距
+/// 静默抹掉，而基准只是层叠期不知道、排版期拿得到。用 div 而不是 p：div 的 UA
+/// 外边距是 0，能看清被拒的声明什么都没留下。
 #[test]
 fn percentage_boxes_are_kept_for_the_layout_phase() {
     let page = author("<div>文</div>", "div { margin-top: 10%; text-indent: 5% }");
@@ -337,10 +333,9 @@ fn percentage_boxes_are_kept_for_the_layout_phase() {
     );
 }
 
-/// `auto` 边距**原样留在计算样式里**，不折 0 也不计 ignored。改过两次：第一版整条判
-/// 不认识（连 5px 上下边距一起丢），第二版折 `Px(0)`；现在排版层真按 `width` 收窄盒子，
-/// 均分多少是排版期才知道的数 —— 这一格只负责「认得、留下」，具体像素归排版层，
-/// 断言在 `layout::tests`。
+/// `auto` 边距**原样留在计算样式里**，不折 0 也不计 ignored。排版层真按 `width`
+/// 收窄盒子，均分多少是排版期才知道的数 —— 这一格只负责「认得、留下」，
+/// 具体像素归排版层，断言在 `layout::tests`。
 #[test]
 fn auto_margin_survives_the_cascade() {
     let page = author("<p>文</p>", "p { margin-left: auto }");
@@ -355,12 +350,9 @@ fn auto_margin_survives_the_cascade() {
 }
 
 /// `auto` 只许出现在 `margin` 这一族：CSS 里 `padding: auto` 与 `text-indent: auto`
-/// 都是非法值。认下来就等于把一条写坏的声明显示成「已处理」。
-///
-/// `padding` 简写里的 `auto` 是个例外（2026-10-30）：诡秘那本书在 36 个元素上写了
-/// `padding: 10px auto 10px auto`，整条作废会把**上下内边距一起丢掉**。横向 `auto`
-/// 在 CSS 里本来就等于 0，所以按 0 收下比丢掉更接近作者的意思；`text-indent` 与
-/// `max-width` 仍然整条作废（它们认 `auto` 没有任何等价的落点）。
+/// 都是非法值，认下来等于把一条写坏的声明显示成「已处理」。唯一例外是 `padding`
+/// 简写里的横向 `auto`（诡秘 36 个元素写了它，整条作废会把上下内边距一起丢掉，
+/// 而横向 `auto` 本来就等于 0）；`text-indent` 与 `max-width` 仍整条作废。
 #[test]
 fn auto_is_not_a_padding_or_indent_value() {
     let page = author(
@@ -473,9 +465,8 @@ fn float_and_clear_count_only_unrecognized_values_as_gap() {
 }
 
 /// `list-style-type` 收 EPUB 3 CSS Profile 点名的记数；表外的关键字整条判不认识。
-///
-/// `hebrew` 是 profile 收录而我们**故意**没接的那一个：它那套数值记数本机没有一本
-/// 希伯来书可验，画出一个看着像的号比承认没做更难发现。所以它进 `ignored`。
+/// `hebrew` 是 profile 收录而我们**故意**没接的那一个：没有一本希伯来书可验，
+/// 画出一个看着像的号比承认没做更难发现，所以它进 `ignored`。
 #[test]
 fn list_style_types_parse_and_unknown_ones_are_counted() {
     let page = author(
@@ -540,9 +531,7 @@ fn a_shorthand_with_too_many_or_bad_values_is_dropped_whole() {
 }
 
 /// `orphans` / `widows` 的 `0` 夹到 1，不再计进 ignored；负数仍判不认识。
-///
-/// 这一条的账在《斗战狂潮》：`body` 与 `p` 上各写一次，全书 138336 条声明就是它。
-/// 判不认识等于把那本书推回引擎默认的 2 / 2，症状是页底比作者要的少留一行。
+/// 判不认识等于把《斗战狂潮》（全书 138336 条声明就这一条）推回引擎默认的 2 / 2。
 #[test]
 fn a_zero_orphan_or_widow_count_clamps_to_one() {
     let page = author(
@@ -842,9 +831,8 @@ fn relative_weight_buckets_a_non_round_parent() {
     );
 }
 
-/// 字距 2026-10-16 起真的生效了：`letter-spacing` 落到 `ComputedStyle.letter_spacing`，
-/// 不再是「解析进去没人读」的空转字段。这一条钉的是「认得出」；四处同源（宽度表/绘制/
-/// 命中的兑现）由 `layout` 与 `content::hit` 的测试守。
+/// 字距 2026-10-16 起真的生效了：`letter-spacing` 落到 `ComputedStyle.letter_spacing`。
+/// 这一条钉「认得出」；四处同源（宽度表/绘制/命中的兑现）由 `layout` 与 `content::hit` 守。
 #[test]
 fn letter_spacing_is_applied_and_inherited() {
     use crate::css::Declaration;
@@ -1445,9 +1433,8 @@ fn the_background_shorthand_yields_its_color() {
     );
 }
 
-/// 背景图那条路：`url()` 要留在图层表里，而不是像从前那样只把颜色挑出来、图整条丢掉。
-/// 症状写在 `the_background_shorthand_clears_a_picture_it_does_not_mention` 那一条的注释上，
-/// 是哈利·波特七张册扉页「白底上一片看不见的淡金字」。
+/// 背景图那条路：`url()` 要留在图层表里，而不是只把颜色挑出来、图整条丢掉
+/// （哈利·波特七张册扉页「白底上一片看不见的淡金字」）。
 #[test]
 fn a_background_url_reaches_the_layer_table() {
     let page = author(
@@ -1466,9 +1453,8 @@ fn a_background_url_reaches_the_layer_table() {
     assert_eq!(style.background_layers[0].repeat.x, BackgroundTile::Repeat);
 }
 
-/// 简写要把一条声明里的**四件事**一起接住。这一条抄的是哈利波特 `.speci` 的原文
-/// （`background: #f4f7f1 url(../Images/p0.png) no-repeat bottom right`
-/// 加 `background-size: 55% auto`），次序随意是这一族的常态。
+/// 简写要把一条声明里的**四件事**一起接住（哈利波特 `.speci` 的原文，色在前、
+/// `bottom right` 在后），次序随意是这一族的常态。
 #[test]
 fn the_background_shorthand_yields_every_item_it_carries() {
     let page = author(
@@ -1502,10 +1488,9 @@ fn the_background_shorthand_yields_every_item_it_carries() {
     );
 }
 
-/// **简写没写到的长手要拉回初值**（CSS 明文）。这一条是这一轮最要紧的门：
-/// 不重置的症状是转换器写的 `.a{background:url(x) center/cover}` 后面再跟一条
-/// `.a{background:#fff}` 时，白底**叠在图上**，扉页那张底图变成灰蒙蒙一片。
-/// 把 `apply_background_shorthand` 里那两行 `clear()` / `= None` 去掉，这一条立刻红。
+/// **简写没写到的长手要拉回初值**（CSS 明文）。不重置的症状：`.a{background:url(x)…}`
+/// 后面再跟 `.a{background:#fff}` 时，白底**叠在图上**，扉页那张底图蒙上一层灰。
+/// 把 `apply_background_shorthand` 里那几行重置去掉，这一条立刻红。
 #[test]
 fn the_background_shorthand_clears_a_picture_it_does_not_mention() {
     let page = author(
@@ -1521,9 +1506,8 @@ fn the_background_shorthand_clears_a_picture_it_does_not_mention() {
     assert_eq!(style.background_color, Some(Color(255, 255, 255, 255)));
 }
 
-/// 百分比**不许在层叠期折算**。`background-position` 的百分比基准是「盒减图」那段余量，
-/// `background-size` 的是这一块自己的盒 —— 两个都要等排版期才拿得到。
-/// 当场折成 px 等于拿窗口宽猜，正是 `margin` 那一族从前踩过的那一处。
+/// 百分比**不许在层叠期折算**：`background-position` 的基准是「盒减图」那段余量、
+/// `background-size` 的是这一块自己的盒，都要等排版期才拿得到，当场折成 px 是猜。
 #[test]
 fn background_percentages_stay_unfolded() {
     let page = author(
@@ -1571,8 +1555,8 @@ fn background_size_keywords_survive_the_shorthand() {
     }
 }
 
-/// `repeat-x` 一句话就把**两根轴**都说了（纵轴是 `no-repeat`）。
-/// 拆成「只说横轴、纵轴落回初值 `repeat`」，一条横向分隔纹理会变成整片马赛克。
+/// `repeat-x` 一句话就把**两根轴**都说了（纵轴是 `no-repeat`）；只说横轴会让
+/// 一条横向分隔纹理变成整片马赛克。
 #[test]
 fn repeat_x_sets_both_axes_at_once() {
     let page = author(
@@ -1584,8 +1568,8 @@ fn repeat_x_sets_both_axes_at_once() {
     assert_eq!(repeat.y, BackgroundTile::NoRepeat);
 }
 
-/// 图层数取各条列表的较大者，短的那一条**从头循环**（规范定的）。
-/// 只把值给第一层的症状：第二张图在扉页上铺成一片马赛克。
+/// 图层数取各条列表的较大者，短的那一条**从头循环**（规范定的）；只给第一层，
+/// 第二张图会在扉页上铺成一片马赛克。
 #[test]
 fn a_short_background_list_cycles_over_the_layers() {
     let page = author(
@@ -1602,8 +1586,8 @@ fn a_short_background_list_cycles_over_the_layers() {
     );
 }
 
-/// 渐变这一版不画。**整条判不认识**而不是折成「这一层没有图」：
-/// 后者会把作者的渐变底块悄悄画空，屏幕上与「书里本来没写」长得一模一样。
+/// 渐变这一版不画。**整条判不认识**：折成「这一层没有图」会把作者的渐变底块
+/// 悄悄画空，屏幕上与「书里本来没写」长得一模一样。
 #[test]
 fn a_gradient_background_is_counted_as_unrecognized() {
     let page = author(
@@ -1613,9 +1597,8 @@ fn a_gradient_background_is_counted_as_unrecognized() {
     assert_eq!(page.styled.ignored, 1, "整条作废并计进 ignored");
     assert!(style(&page, class(&page, "t")).background_layers.is_empty());
 
-    // 四值边缘语法同样判不认识（见 `parse_background_position` 那条注释）。
-    // 注意这里**图那一层还在**：作废的只有 `background-position` 那一条声明，
-    // 图是另一条已经接住的声明 —— 一条声明失败不许牵连另一条。
+    // 四值边缘语法同样判不认识（见 `parse_background_position` 那条注释）。图那一层
+    // 还在：作废的只有 `background-position` 那条声明，一条失败不许牵连另一条。
     let page = author(
         "<p class=t>正文</p>",
         ".t { background-image: url(a.png); background-position: left 10px top 20px }",
@@ -1674,14 +1657,10 @@ fn the_background_layers_change_the_style_hash() {
 }
 
 /// 「接住了」与「认得、不生效」的分界：`background-attachment` 现在真被排版层读
-/// （根上的 `fixed` 把章节撑到一屏，见 `layout_inner`），`background-clip` /
-/// `-origin` 仍按边框盒画、没有去处。
-///
-/// 反过来，同一句话**写在简写里**时必须被吃掉而不作废整条声明：
-/// `background: url(x) no-repeat fixed center` 里那个 `fixed` 要是不认，
-/// 底色与图会一起消失，症状比「fixed 没生效」大一个量级。
+/// （根上的 `fixed` 把章节撑到一屏，见 `layout_inner`）。同一句话**写在简写里**时
+/// 必须被吃掉而不作废整条声明 —— 不然底色与图一起消失，比「fixed 没生效」大一个量级。
 #[test]
-fn attachment_is_applied_and_clip_too_while_origin_stays_inert() {
+fn attachment_clip_and_origin_are_all_applied() {
     let page = author(
         "<p class=t>正文</p>",
         ".t { background-image: url(a.png); background-attachment: fixed; background-clip: padding-box }",
@@ -1709,14 +1688,16 @@ fn attachment_is_applied_and_clip_too_while_origin_stays_inert() {
         DeclStatus::Applied,
         "clip 已接住，报 Applied"
     );
+    // `background-origin` 2026-11-24 也接上了：与 clip 各是各的格，初值不同源。
+    assert_eq!(own.background_origin, BackgroundClip::PaddingBox);
     assert_eq!(
         declaration_status(
             &decl("background-origin", "padding-box"),
             own,
             own.font_size
         ),
-        DeclStatus::Inert,
-        "origin 仍在名单里，报「认得，不生效」"
+        DeclStatus::Applied,
+        "origin 已接住，报 Applied"
     );
     assert_eq!(
         own.background_layers[0].attachment,
@@ -1739,6 +1720,30 @@ fn attachment_is_applied_and_clip_too_while_origin_stays_inert() {
     assert_eq!(picture.attachment, BackgroundAttachment::Fixed);
 }
 
+/// 简写里的盒值：一个 `content-box` 同时落 origin 与 clip；两个值时前 origin 后 clip。
+/// 长手后写的那条照常覆盖简写；origin 初值是 `padding-box`，与 clip 的 `border-box`
+/// 不同源，别拿同一个 `Default` 给两条初值。
+#[test]
+fn background_shorthand_box_values_split_into_origin_and_clip() {
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background: url(a.png) content-box }",
+    );
+    let own = style(&page, class(&page, "t"));
+    assert_eq!(page.styled.ignored, 0);
+    assert_eq!(own.background_origin, BackgroundClip::ContentBox);
+    assert_eq!(own.background_clip, BackgroundClip::ContentBox);
+
+    let page = author(
+        "<p class=t>正文</p>",
+        ".t { background: url(a.png) border-box content-box; background-origin: padding-box }",
+    );
+    let own = style(&page, class(&page, "t"));
+    assert_eq!(page.styled.ignored, 0);
+    assert_eq!(own.background_origin, BackgroundClip::PaddingBox);
+    assert_eq!(own.background_clip, BackgroundClip::ContentBox);
+}
+
 /// 背景色与背景图层**都不继承**（CSS 规定）。扉页那张底图只属于 `<body>` 自己，
 /// 跟着继承走会让整章每一段都垫一层图。
 #[test]
@@ -1753,13 +1758,10 @@ fn background_does_not_inherit() {
 }
 
 /// 内联 `style="…"` 里的 `url(...)` **必须折成容器内路径**，与样式表那一侧同一个形状。
-///
-/// 这一条是 CI 上跑得到的那一半：真书门（`the_harry_potter_title_pages_carry_their_backdrop`）
-/// 是 `#[ignore]`，而这处断口本来就写在**合成夹具**里就能复现的形状上 ——
-/// 七张册扉页的原文就是 `<body style="background: url(../Images/v2.jpg) no-repeat center">`。
-/// 不折的表现是图层表里躺着一条 `../Images/v2.jpg`：图片索引按容器路径精确查，查不到，
-/// 屏上仍是「白底上一片看不见的淡金字」，而 `css-gap` 那台秤报「这条声明接住了」。
-/// 把 `parse_inline_style` 里那一行 `absolutize_css_urls` 去掉，这一条立刻红。
+/// 这一条是 CI 上跑得到的那一半（真书门是 `#[ignore]`）：七张册扉页的原文就是
+/// `<body style="background: url(../Images/v2.jpg) no-repeat center">`。不折的表现是
+/// 图层表里躺着一条 `../Images/v2.jpg`、图片索引查不到、屏上仍是白底，而 `css-gap`
+/// 那台秤还报「接住了」；去掉 `parse_inline_style` 里那行折算立刻红。
 #[test]
 fn a_relative_url_in_an_inline_style_folds_like_a_stylesheet() {
     let page = page_in_dir(
@@ -1962,13 +1964,10 @@ fn style_hash_covers_fields() {
     assert_ne!(h(&base), h(&bordered), "边框变了哈希该变");
 }
 
-/// 手写那份 `Hash` 要逐格盖住 `ComputedStyle` 的 `pub` 字段 —— `computed.rs` 里
-/// 「新增字段时必须在这里补一行」那条规矩的机器版。
-///
-/// 上面 [`style_hash_covers_fields`] 抽几个代表字段验「改了就变」，抓不到「新加一格忘了挂」，
-/// 而漏那一格的症状是**画旧**（块级缓存把上一代的行盒当命中），屏幕上没有任何报错可查。
-/// 所以这条不比行为，直接**比清单**：从自己那份源文件里读出字段表与 `impl Hash` 里出现过的
-/// `self.<字段>`，两份取差集 —— 谁漏了就把名字报出来。
+/// 手写那份 `Hash` 要逐格盖住 `ComputedStyle` 的 `pub` 字段 —— 「新增字段时必须
+/// 在这里补一行」那条规矩的机器版。漏那一格的症状是**画旧**（块级缓存把上一代的行盒
+/// 当命中），屏上没有任何报错可查，所以这条直接**比清单**：从源文件读出字段表与
+/// `impl Hash` 里的 `self.<字段>`，两份取差集 —— 谁漏了就把名字报出来。
 #[test]
 fn the_style_hash_lists_every_computed_style_field() {
     let src = include_str!("../computed.rs");
@@ -2047,8 +2046,7 @@ fn self_field_names(block: &str) -> Vec<String> {
 
 // ---- 方向：`direction` 与 `start` / `end` ----
 
-/// `direction` 以前在「认得、接受、不生效」那份名单里，现在它是真生效的**继承**属性。
-///
+/// `direction` 现在是真生效的**继承**属性（以前记「认得、接受、不生效」）。
 /// 继承这一格是全部意义的来源：RTL 的书在 `<html>` 或 `<body>` 上写一次就管全书，
 /// 断了继承等于每个段落都要重贴一遍。
 #[test]
@@ -2113,9 +2111,8 @@ fn writing_mode_applies_and_inherits() {
 }
 
 /// EPUB 里 RTL 的书几乎只在根元素写一个 `dir="rtl"`，不另外写样式表。
-/// 只认样式表等于整本不认 —— 认这个属性才是接到真书的那条路。
-///
-/// 它是 presentational hint，所以排在作者样式**之下**：作者真写了 `direction` 就压回来。
+/// 只认样式表等于整本不认 —— 认这个属性才是接到真书的那条路。它是 presentational
+/// hint，所以排在作者样式**之下**：作者真写了 `direction` 就压回来。
 #[test]
 fn the_dir_attribute_sets_direction_and_author_css_beats_it() {
     let hinted = author("<p dir=\"rtl\">مرحبا</p>", "");
@@ -2132,11 +2129,9 @@ fn the_dir_attribute_sets_direction_and_author_css_beats_it() {
 }
 
 /// `dir="auto"` 按**内容**定方向：第一个强方向字符算哪一边就往哪边排。
-///
-/// 三条用例各钉一个真会踩的点：阿拉伯文的 Bidi_Class 是 `AL` 而**不是** `R`（只认 `R`
-/// 会把一整类书判成 LTR）；数字是 `EN`、不属于强方向，所以「1234 后面跟阿拉伯文」仍然
-/// 是 RTL（按「第一个非空白字符」判就会翻错）；汉字的 Bidi_Class 是 `L`。
-/// 第四个 case 钉的是「一个强方向字符都没有」—— 那必须留继承值而不是猜成 ltr。
+/// 三条用例各钉一个真会踩的点：阿拉伯文是 `AL` 不是 `R`（只认 `R` 会把一整类书判成
+/// LTR）；数字是 `EN`、不属于强方向，所以「1234 后面跟阿拉伯文」仍是 RTL；汉字是 `L`。
+/// 第四个 case 钉「一个强方向字符都没有」—— 必须留继承值而不是猜成 ltr。
 #[test]
 fn dir_auto_resolves_from_the_first_strong_character() {
     for (body, want, why) in [
@@ -2244,14 +2239,10 @@ fn direction_is_applied_now_not_inert() {
     );
 }
 
-/// `writing-mode` 2026-10-19 起也离开了那份「认得、接受、不生效」名单，但**只走完半程**：
-/// 值算出来了、进样式哈希、按 CSS 继承下来，而排版层还没读它，所以屏上仍是横排
-/// （生效是 M8 后面那几刀的事）。
-///
-/// 因此这一条门断的是「`examples/css-gap` 那张表别再把它报成没接的属性」，不是「竖起来了」。
-/// 报 `Applied` 是有意的：`DeclStatus` 讲的是**层叠有没有接住这条声明**，与它改过哪个像素
-/// 无关 —— 把这半程写成 `Inert` 会让报表说「这本书的竖排声明丢了」，而事实是它已经进了
-/// 计算样式，只差排版层去读。
+/// `writing-mode` 2026-10-19 离开「认得、接受、不生效」名单，**只走完半程**：
+/// 值进样式、按 CSS 继承，屏上的竖排是排版层那一轮的事。这一条门断的是
+/// 「`examples/css-gap` 那张表别再把它报成没接的属性」。报 `Applied` 是有意的：
+/// `DeclStatus` 讲的是**层叠有没有接住这条声明**，与它改过哪个像素无关。
 #[test]
 fn writing_mode_is_applied_now_not_inert() {
     use crate::css::Declaration;
@@ -2337,12 +2328,10 @@ fn the_style_hash_covers_writing_mode() {
 }
 
 /// 「这一段在不在一条链接里」是 DOM 的事实，不是 CSS 属性。
-///
-/// 为什么引擎要带这一格：出版工具的目录页几乎不给链接上色 —— 本机那本基督山伯爵的目录章
-/// 是 38 条 `<a class="calibre1">`，`stylesheet.css` 全文一个 `color` 都没有（`.calibre1`
-/// 写的还是 `text-decoration: none`）。于是那一栏与正文逐字同色，读者看不出它是能点的。
-/// 颜色由绘制层从**当前主题**取（`ui::widgets::run_color_link`），所以样式层只负责把
-/// 「在链接里」这一件事传到 run 上，`color` 照旧留 `None`。
+/// 为什么引擎要带这一格：出版工具的目录页几乎不给链接上色 —— 本机那本基督山伯爵的
+/// 目录章是 38 条 `<a class="calibre1">`，样式表全文一个 `color` 都没有，那一栏与正文
+/// 逐字同色，读者看不出它是能点的。颜色由绘制层从**当前主题**取（`run_color_link`），
+/// 样式层只把「在链接里」传到 run 上，`color` 照旧留 `None`。
 #[test]
 fn an_anchor_with_a_target_marks_its_subtree_as_a_link() {
     let page = author(
@@ -2418,12 +2407,9 @@ fn an_author_color_on_a_link_beats_the_theme_slot() {
 }
 
 /// 两个 `min-*` 只收**长度**，`auto` 与 `none` 整条作废。
-///
-/// 前四条走 `declaration_status` —— 它是 `examples/css-gap.rs` 的唯一判定口，所以这一格
-/// 同时钉住「`min-height` 不再报 Inert」「`min-width` 不再报不认识」，两边少一条那张
-/// 落差表就指错地方；后两条钉住**不假装接住**：CSS 2.1 的 `<min-width>` / `<min-height>`
-/// 不收这两个词（`min-*: auto` 是 CSS Sizing 3 给弹性盒的），浏览器整条丢掉，我们若在
-/// 层叠期收成「清掉显式值并返回成功」，屏上没错而报表说好，那是更难查的一侧。
+/// 前四条走 `declaration_status`（`css-gap` 的唯一判定口），同时钉住「不再报 Inert /
+/// 不再报不认识」；后两条钉住**不假装接住**：CSS 2.1 不收这两个词，浏览器整条丢掉，
+/// 层叠期若收成「清值并返回成功」，屏上没错而报表说好，是更难查的一侧。
 #[test]
 fn min_width_and_min_height_take_lengths_only() {
     use crate::css::Declaration;
@@ -2463,10 +2449,9 @@ fn min_width_and_min_height_take_lengths_only() {
     assert_eq!(page.styled.ignored, 2, "两条非法值都该计「不认识」");
 }
 
-/// 块级排版缓存按「这一块子树的样式」判命中，而 `ComputedStyle` 的 `Hash` 是逐字段手写的。
-///
-/// 新增字段忘了补那一行时，缓存会拿着旧的块高服务 —— 屏上高了对，滚动位置与目录进度
-/// 还是旧的。这一格把两个 `min-*` 钉进哈希，让「忘了补」至少在这里变红一次。
+/// 块级排版缓存按「这一块子树的样式」判命中，而 `ComputedStyle` 的 `Hash` 是逐字段
+/// 手写的。新增字段忘了补那一行时，缓存会拿着旧的块高服务 —— 屏上高了对，滚动位置
+/// 与目录进度还是旧的。这一格把两个 `min-*` 钉进哈希，让「忘了补」至少在这里变红。
 #[test]
 fn the_min_sizing_fields_reach_the_style_hash() {
     use std::hash::{Hash, Hasher};
@@ -2489,11 +2474,9 @@ fn the_min_sizing_fields_reach_the_style_hash() {
     assert_ne!(hash_of(&tall), hash_of(&base), "min-height 没进哈希");
 }
 
-/// `box-sizing` 只认两档，而**百分比不许在层叠期折**。
-///
-/// 后半句是这一条存在的主要理由：`width` 那一族的百分比折算自**包含块宽**，那是排版期
-/// 才拿到手的数（`Length::Percent` 就是为它存在的）。谁在 `apply` 里把 `width: 50%` 折成
-/// px，能用的基准只有字号 —— 折出来的其实是「父字号的一半」，600px 版心里变成 8px，
+/// `box-sizing` 只认两档，而**百分比不许在层叠期折**（这一条存在的主要理由）：
+/// `width` 一族的百分比折算自**包含块宽**，那是排版期才拿到的数（`Length::Percent`
+/// 就是为它存在的）。层叠期硬折，能用的基准只有字号，600px 版心里变成 8px，
 /// 而屏上只是那一块窄得离谱，报表上说这条已接住。
 #[test]
 fn box_sizing_takes_two_keywords_and_leaves_percent_for_the_layout_phase() {
@@ -2551,10 +2534,9 @@ fn box_sizing_takes_two_keywords_and_leaves_percent_for_the_layout_phase() {
 }
 
 /// **真书门**（`#[ignore]`，几秒）：哈利·波特那七张册扉页的整页底图必须落到图层表，
-/// 且路径能在本书图片清单里查到。它钉住两处屏幕上看不出区别的断口：
-/// 解析断了（`url()` 被当垃圾丢掉，扉页成白底淡金字）、图源断了（图片清单按
-/// manifest 的 `image/*` 建，而样式表路径是折算后的形状；拼写对不上同样白底，
-/// 只被 CSS 引用的 `v2.jpg` 正踩这条）。
+/// 且路径能在本书图片清单里查到。它钉住两处屏上看不出区别的断口：解析断了（`url()`
+/// 被当垃圾丢掉，扉页成白底淡金字）、图源断了（清单按 manifest 的 `image/*` 建而样式表
+/// 路径是折算后的形状；只被 CSS 引用的 `v2.jpg` 正踩这条）。
 #[test]
 #[ignore = "开真书并把 301 章的样式表走一遍"]
 fn the_harry_potter_title_pages_carry_their_backdrop() {
@@ -2618,17 +2600,13 @@ fn the_harry_potter_title_pages_carry_their_backdrop() {
 }
 
 // ---- 层叠期认得、但从没被写进任何一条测试的那些值 ----
-//
-// 这一段的来源是一次全量核对：把 `computed::apply` 每一条 match 臂接受的
-// (属性, 值) 组合列出来，再拿全部 152 个带测试的文件对（既对声明原文、也对关键字
-// 字面量，因为有几张表是 `for (keyword, want) in […]` 循环喂 `format!` 的，只搜声明
-// 原文会把它们误报成没测）。剩下 28 条两种都对不上的，逐条补在下面。
+// 这一段的来源是一次全量核对：把 `computed::apply` 每条 match 臂接受的 (属性, 值)
+// 组合列出来，再拿全部 152 个带测试的文件对（既对声明原文、也对关键字字面量，
+// `format!` 喂表的只搜原文会误报成没测）。剩下 28 条两种都对不上的，逐条补在下面。
 
-/// `font-size` 那七个绝对关键字是 CSS 定死的一张比例表。从前只钉过 `large` 与
-/// `smaller` 两格，其余五格漂了没人发现。
-///
-/// 注意 `medium` 恰好等于根字号 16.0：**光断言数值是空过的**（表整个删掉它也过），
-/// 所以每一格同时钉 `ignored` 计数 —— 那条被判不认识时它会涨，这才是闸门。
+/// `font-size` 那七个绝对关键字是 CSS 定死的一张比例表。注意 `medium` 恰好等于
+/// 根字号 16.0：**光断言数值是空过的**（表整个删掉它也过），所以每一格同时钉
+/// `ignored` 计数 —— 那条被判不认识时它会涨，这才是闸门。
 #[test]
 fn the_seven_absolute_font_size_keywords_are_the_css_table() {
     for (keyword, want) in [
@@ -2650,8 +2628,7 @@ fn the_seven_absolute_font_size_keywords_are_the_css_table() {
     }
 }
 
-/// `larger` 按父字号放大一档。从前这张表只钉过 `smaller` 那一侧，
-/// 两侧共用一个 1.2 因子，只测一侧等于另一侧没闸门。
+/// `larger` 按父字号放大一档；两侧共用一个 1.2 因子，只测一侧等于另一侧没闸门。
 #[test]
 fn larger_scales_the_parent_font_size_by_the_same_step_as_smaller() {
     let page = author(
@@ -2701,11 +2678,38 @@ fn the_plain_weight_and_style_keywords_override_what_they_inherit() {
     assert_eq!(page.styled.ignored, 0);
 }
 
-/// `text-justify` 六种写法折成三档。从前只钉过 `inter-ideograph` 一格。
-///
-/// 折法是刻意的：`inter-character` / `inter-ideograph` / `distribute` 都是「在字间摊」，
-/// 而 `auto` 与它们**不同档** —— `auto` 由实现决定，我们让排版层按「有空格拉空格、
-/// 没有才拉字间」走，与 `inter-character` 那一臂同路但仍是独立的一格。
+/// `columns` 简写与两条长手进层叠：简写两段次序随意、长手后写覆盖简写、
+/// 同一段写两次整条作废。
+#[test]
+fn the_columns_family_folds_into_the_style() {
+    let page = author(
+        "<p class=a>栏</p><p class=b>宽</p><p class=c>序</p>",
+        ".a { columns: 2 } .b { column-width: 200px; column-count: 3 } .c { columns: 12em 2 }",
+    );
+    let a = style(&page, class(&page, "a"));
+    assert_eq!(a.column_count, Some(2));
+    assert!(a.column_width.is_none());
+    let b = style(&page, class(&page, "b"));
+    assert_eq!(b.column_count, Some(3), "长手后写覆盖简写");
+    assert_eq!(b.column_width, Some(Length::Px(200.0)));
+    let c = style(&page, class(&page, "c"));
+    assert_eq!(c.column_count, Some(2), "简写里栏数与栏宽次序随意");
+    // `em` 在解析期就按元素字号折成 px（初值 16 → 192）。
+    assert_eq!(c.column_width, Some(Length::Px(192.0)));
+    assert_eq!(page.styled.ignored, 0);
+    let bad = author("<p>栏</p>", "p { columns: 2 2 }");
+    assert_eq!(bad.styled.ignored, 1, "栏数段出现两次，整条作废");
+    let none = author("<p>栏</p>", "p { column-width: auto }");
+    assert_eq!(
+        style(&none, tag(&none, "p")).column_width,
+        None,
+        "`auto` 拉回「没写」"
+    );
+}
+
+/// `text-justify` 六种写法折成三档。折法是刻意的：`inter-character` / `inter-ideograph` /
+/// `distribute` 都是「在字间摊」，而 `auto` 与它们**不同档** —— `auto` 由实现决定，
+/// 排版层按「有空格拉空格、没有才拉字间」走，与那一臂同路但仍是独立的一格。
 #[test]
 fn text_justify_folds_six_spellings_into_three_arms() {
     for (keyword, want) in [
@@ -3035,10 +3039,9 @@ fn background_position_keywords_fill_the_other_axis_with_center() {
     );
 }
 
-/// `text-decoration-line` 是简写的**长手别名**，从前一次没写过；
-/// 线型与厚度那几个 token（`solid` / `double` / `dashed`）认得但画法不变
-/// （一律 1px 实线、按当前文字色），`overline` 仍然整条不接。
-/// 这里钉的是「不作废」与「不假装接住了线型」两件事。
+/// `text-decoration-line` 是简写的**长手别名**，从前一次没写过；线型与厚度那几个
+/// token（`solid` / `double` / `dashed`）认得但画法不变（一律 1px 实线、按当前文字色），
+/// `overline` 仍然整条不接。这里钉「不作废」与「不假装接住了线型」两件事。
 #[test]
 fn the_decoration_line_alias_and_the_line_style_tokens() {
     let page = author(
@@ -3282,8 +3285,7 @@ fn the_duokan_text_indent_prefix_is_the_same_declaration() {
 }
 
 /// `list-style-image` 与 `list-style-position` **按初值做就等于做对了**：标记只有文字、
-/// 挂在流动之外，正是 `none` 与 `outside` 的意思。所以收初值、拒其余值 ——
-/// 从前这两条整条记「认得不生效」，《蛇结》51 个 `li` 因此白挂 102 条 Inert。
+/// 挂在流动之外，正是 `none` 与 `outside` 的意思，所以收初值、拒其余值。
 #[test]
 fn the_list_style_initials_are_applied_and_other_values_are_not() {
     let base = ComputedStyle::default();
@@ -3464,10 +3466,8 @@ fn all_initial_resets_every_property() {
 }
 
 /// `rgba()` 与 `rgb()` 走同一支：第四个透明度要落到 `Color` 的 alpha 上。
-///
-/// 这一条是 2026-10-30 拿移动端两本书量出来的 —— 只认 `rgb(` 时《基督山伯爵》8 个、
-/// 诡秘 91 个元素上的 `background-color` / `border` 被判「不认识」，书里的半透明底块
-/// 与描边整条消失。四种常见写法都要接住；alpha 再丢掉，半透明框就会把底图盖死。
+/// 这一条拿移动端两本书量出来的 —— 只认 `rgb(` 时《基督山伯爵》8 个、诡秘 91 个
+/// 元素上的半透明底块与描边整条消失；alpha 再丢掉，半透明框就会把底图盖死。
 #[test]
 fn rgba_colors_keep_their_alpha() {
     let page = author(
@@ -3500,9 +3500,8 @@ fn rgba_colors_keep_their_alpha() {
 }
 
 /// 前缀别名与「值合法但等于不做」的那几档：它们不该再算进「不认识」。
-///
-/// 落差表上这几条各占几百到上千个元素（读客的书 660 处 `-webkit-text-decoration: none`、
-/// 664 处 `box-shadow: none`），淹掉真正要关注的写法。
+/// 落差表上这几条各占几百到上千个元素（读客的书 660 处 `-webkit-text-decoration:
+/// none`、664 处 `box-shadow: none`），淹掉真正要关注的写法。
 #[test]
 fn prefixed_and_no_op_values_are_not_counted_as_unparsed() {
     let page = author(

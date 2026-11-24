@@ -406,10 +406,8 @@ fn nested_padding_offsets_and_narrows_the_child() {
     assert_eq!(texts(&layout)[0].chars().count(), 11, "180px 只容 11 字");
 }
 
-/// 百分比边距折自**包含块宽**。
-///
-/// 这一条是《哈利·波特全集》那 86441 条 `margin: 0% 1% 0% 1%` 的落点：以前取值层
-/// 判它「不认识」，整条边距静默消失（`css::value::length_px` 拒 `%` 的那一版口径）。
+/// 百分比边距折自**包含块宽**。《哈利·波特全集》那 86441 条 `margin: 0% 1% 0% 1%`
+/// 的落点：以前取值层判它「不认识」，整条边距静默消失。
 #[test]
 fn a_percent_margin_folds_against_the_containing_block() {
     let html = format!("<p>{}</p>", "字".repeat(40));
@@ -3656,6 +3654,7 @@ fn cells(dom: &Dom, laid: &Layout) -> Vec<(f32, f32, f32, f32)> {
 }
 
 mod align;
+mod columns;
 mod decor;
 mod flex;
 mod generated;

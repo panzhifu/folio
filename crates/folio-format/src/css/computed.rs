@@ -132,25 +132,22 @@ impl Direction {
     }
 }
 
-/// 一段文字的推进轴与行的堆叠方向，即 CSS 的 `writing-mode`。
-///
-/// 它与 [`Direction`] 是**两根独立的轴**：`direction` 改的是「一行里的字符往哪边排、
-/// `start`/`end` 落在物理的哪一边」，行的推进轴不变；`writing-mode` 改的是「字沿哪根轴
-/// 推进、行沿哪根轴堆」。竖排的本子通常两样都写（`vertical-rl` 的书列序天然从右往左）。
+/// 一段文字的推进轴与行的堆叠方向，即 CSS 的 `writing-mode`。它与 [`Direction`] 是
+/// **两根独立的轴**：`direction` 改「一行里的字符往哪边排、`start`/`end` 落在物理的
+/// 哪一边」，行的推进轴不变；`writing-mode` 改「字沿哪根轴推进、行沿哪根轴堆」。
+/// 竖排的本子通常两样都写（`vertical-rl` 的书列序天然从右往左）。
 ///
 /// **落地程度：排版层真的按这一根轴排了**（2026-10-19 那一轮）。架构是「逻辑横排 +
-/// 一次转置」——引擎照旧排一条横长的带，`layout::Layout::assemble` 里的 `transposed`
-/// 在折索引之前把两张表整体投影成物理坐标，所以 shaping、命中与选区那几套一行都不用改。
-/// 界面唯一该知道轴的地方收成本文件的 [`WritingMode::project`] 与 [`project_delta`]。
+/// 一次转置」——引擎照旧排横长的带，`Layout::assemble` 的 `transposed` 在折索引前
+/// 把两张表整体投影成物理坐标，shaping、命中与选区一行都不用改；界面唯一该知道轴的
+/// 地方收成本文件的 [`WritingMode::project`] 与 [`project_delta`]。
 ///
-/// 明确降级的那三处，都在 `layout::LayoutOptions::allow_vertical` 与 `transposed` 的文档里：
-/// 盒模型那几族边是**物理**的（`margin-top` 这类落到转置后的错边，logical→physical
-/// 那张表没接）；连续滚动与双页对开回退横排；行内图片不转置。
+/// 明确降级的三处（`LayoutOptions::allow_vertical` 与 `transposed` 的文档）：盒模型
+/// 那几族边是**物理**的；连续滚动与双页对开回退横排；行内图片不转置。
 ///
-/// 触发源只有一处，就是书的 CSS：`writing-mode` 在真实竖排书里是**唯一**的竖排来源
-/// （那些本子不会另外写别的声明），所以这一格必须先接住层叠，报表才数得出库里哪几本
-/// 声明了竖排。读者那一档没有加，落点埋在 `ui::features::reader::model::chapter_layout`
-/// 的 `reader_rules` 注释里。
+/// 触发源只有一处，就是书的 CSS：`writing-mode` 在真实竖排书里是**唯一**的竖排来源，
+/// 所以这一格必须先接住层叠，报表才数得出库里哪几本声明了竖排。读者那一档没有加，
+/// 落点埋在 `ui::features::reader::model::chapter_layout` 的 `reader_rules` 注释里。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WritingMode {
     /// 横排：字沿 `+x` 推进，行沿 `+y` 堆。CSS 的初值。
@@ -475,16 +472,13 @@ pub enum ListStyle {
 /// 一条边的画法。CSS 的 `border-style` 有八种实线以外的样式；这里接
 /// `none` / `hidden`（都不画）、`solid`、`double`、`dotted`、`dashed`。
 ///
-/// 后两档 2026-10-29 接上：从前整条判不认识，而 `.line { border: dotted #A2906A;
-/// border-width: 1px 0 0 0 }` 那种「一条点线分隔条」在转换本里是常规写法
-/// （哈利·波特 `.line` 那 1 个元素）。绘制层把带子按段切开画（见
-/// `ui::reader::view::body::push_border`），**不是**画成实线。
-///
-/// `groove` / `ridge` / `inset` / `outset` 2026-10-29 接上：这四档要的是**明暗**，
-/// 由作者的边框色派生亮/暗两档（`ui::reader::view::body::three_d_tone`）——
-/// `inset` 上/左暗、下/右亮，`outset` 相反，`groove` 每条边外暗内亮，`ridge` 相反。
-/// 与浏览器那套斜角拼角差在角上（我们仍是四条轴对齐的带子互相压边）。
-/// 《西游记》101 个元素写的 `border: currentColor inset 1px` 正是这一档。
+/// 点线/虚线（哈利·波特 `.line` 那种一条点线分隔条，转换本常规写法）由绘制层
+/// 把带子按段切开画（`ui::reader::view::body::push_border`），不是画成实线。
+/// `groove` / `ridge` / `inset` / `outset` 四档要的是**明暗**，由作者的边框色派生
+/// 亮/暗两档（`ui::reader::view::body::three_d_tone`）——`inset` 上/左暗、下/右亮，
+/// `outset` 相反，`groove` 每条边外暗内亮，`ridge` 相反。与浏览器的斜角拼角差在
+/// 角上（四条轴对齐带子互相压边）。《西游记》101 个元素的 `border: currentColor inset 1px`
+/// 正是这一档。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BorderStyle {
     #[default]
@@ -560,9 +554,7 @@ impl ComputedStyle {
     ///
     /// `pad_border` 交的是这一格该扣的那一对：横向是「左 + 右的边框与内边距」，纵向是
     /// 「上 + 下的」。四个落点（流内块的宽、浮动盒的宽、块高、替换元素）共用这一份，
-    /// 是因为它们从前各自按内容盒解释作者写的数 —— 抄四遍迟早漂，而漂的表现是同一张
-    /// 插图框在「量高」与「实排」两趟里给两个宽，滚动位置跟着错位。
-    ///
+    /// 免得「量高」与「实排」两趟各解释一遍、同一张插图框给出两个宽。
     /// 扣穿了回 0 而不是负数：浏览器把内容盒夹到 0，盒子本身还在。
     pub fn content_size(&self, declared: f32, pad_border: f32) -> f32 {
         match self.box_sizing {
@@ -573,11 +565,9 @@ impl ComputedStyle {
 }
 
 /// 一个尺寸值。`none` 用 `Option::None` 表示。百分比不在此刻折算 —— 它要按**包含块
-/// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。
-///
-/// 带百分比的字段都存这个类型，不是只有替换元素的 `width`：外边距、内边距与
-/// `text-indent` 的百分比在 CSS 里同样折算自包含块宽，而那一族写法在真书上是大头
-/// （多看转换的本每段都带 `margin: 0 1%`）。层叠期把它折成 px 等于拿窗口宽猜。
+/// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。带百分比的字段都存
+/// 这个类型（外边距、内边距与 `text-indent` 在 CSS 里同样折算自包含块宽，真书上是大头），
+/// 层叠期折成 px 等于拿窗口宽猜。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Length {
     Px(f32),
@@ -586,12 +576,10 @@ pub enum Length {
     /// `auto`。**只有外边距会走到这一档**：CSS 里 `padding: auto` 与 `text-indent: auto`
     /// 是非法值（层叠期就判不认识），`width: auto` 那一族用 `Option::None` 表示。
     ///
-    /// 为什么不在层叠期折成 0：CSS 2.1 §10.3.3 里 `margin-left: auto` 与
-    /// `margin-right: auto` 是「把这一块横向剩余宽度均分」，而剩余宽度取决于**作者的
-    /// `width` 折出来是多少**，那是排版期才有的一对数。折成 0 等于宣布「本书没有块级
-    /// 居中」，症状是写着 `margin: 0 auto` 的定宽插图与分隔条一律贴左缘。
-    /// 求解那一步在 `layout::collect::solve_block_width`；[`Length::resolve`] 给 `auto`
-    /// 回 0，所以**没接进那条求解式的调用点行为与以前逐字相同**。
+    /// 层叠期不折成 0：`margin-left/right: auto` 是「横向剩余宽度均分」（CSS 2.1
+    /// §10.3.3），剩余宽取决于作者 `width` 折出来多少，那是排版期的一对数。折成 0
+    /// 等于宣布「本书没有块级居中」，写着 `margin: 0 auto` 的定宽插图一律贴左缘。
+    /// 求解在 `layout::collect::solve_block_width`；[`Length::resolve`] 给 `auto` 回 0。
     Auto,
 }
 
@@ -660,7 +648,7 @@ pub struct ComputedStyle {
     pub direction: Direction,
     /// 推进轴（CSS 的 `writing-mode`），**可继承**：竖排的本子在 `<html>` 或 `<body>` 上
     /// 写一次就管全书，靠的是 `inherit_from` 里那一行，与 `direction` 同一条通路。
-    /// 落地程度（层叠接住、排版层还没读）见 [`WritingMode`]。
+    /// 排版层真按这一根轴排（落地程度见 [`WritingMode`]）。
     pub writing_mode: WritingMode,
     pub text_align: TextAlign,
     /// `text-justify`：两端对齐时余量往哪种隙摊。见 [`TextJustify`]；CSS 里**可继承**。
@@ -701,6 +689,11 @@ pub struct ComputedStyle {
     /// 主轴为 `column` 时互换。CSS 里 `gap` / `row-gap` / `column-gap` **不继承**。
     pub row_gap: Option<Length>,
     pub column_gap: Option<Length>,
+    /// 块级多栏容器：`column-count`（显式栏数）与 `column-width`（由栏宽折栏数，
+    /// 见 `layout::columns::plan`），`None` = `auto`；两条都写按 CSS 以 count 为准。
+    /// 不继承。降级口径（贪心配平、不跨栏拆单元）记在 `collect::columns_layout`。
+    pub column_count: Option<u16>,
+    pub column_width: Option<Length>,
     // ---- Flex 子项属性（只被 Flex 容器的直接子项消费）----
     /// `flex-grow` / `flex-shrink` 因子与 `flex-basis`。不继承。
     pub flex_grow: f32,
@@ -750,8 +743,11 @@ pub struct ComputedStyle {
     /// `grid-template-columns` 的轨道定义与 `quotes`（均可继承 quotes、grid 轨道不继承）。
     pub grid_template_columns: Arc<[GridTrack]>,
     pub quotes: Option<[QuotePair; 2]>,
-    /// `background-clip`：底色与背景图裁到哪个盒。不继承。
+    /// `background-clip`：底色与背景图裁到哪个盒。不继承。初值 `border-box`。
     pub background_clip: BackgroundClip,
+    /// `background-origin`：背景图（cover / 百分比定位）的定位基准盒。不继承。
+    /// 初值 `padding-box`（CSS 同），显式给而不靠派生 —— 派生的 `Default` 是 clip 的初值。
+    pub background_origin: BackgroundClip,
     /// `grid-column` / `grid-row` 的显式定位：起点（1-based，`None` = 自动）与跨格数。
     /// 不继承 —— 子项各自定位。
     pub grid_column_start: Option<u16>,
@@ -995,6 +991,8 @@ impl Default for ComputedStyle {
             justify_content: JustifyContent::default(),
             row_gap: None,
             column_gap: None,
+            column_count: None,
+            column_width: None,
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: None,
@@ -1023,6 +1021,7 @@ impl Default for ComputedStyle {
             text_size_adjust: None,
             grid_template_columns: Arc::from(Vec::new()),
             background_clip: BackgroundClip::BorderBox,
+            background_origin: BackgroundClip::PaddingBox,
             grid_column_start: None,
             grid_column_span: 1,
             grid_row_start: None,
@@ -1170,6 +1169,8 @@ impl std::hash::Hash for ComputedStyle {
         (self.justify_content as u8).hash(h);
         opt_len(&self.row_gap, h);
         opt_len(&self.column_gap, h);
+        self.column_count.hash(h);
+        opt_len(&self.column_width, h);
         f(self.flex_grow, h);
         f(self.flex_shrink, h);
         opt_len(&self.flex_basis, h);
@@ -1227,6 +1228,7 @@ impl std::hash::Hash for ComputedStyle {
         self.text_size_adjust.map(f32::to_bits).hash(h);
         self.grid_template_columns.len().hash(h);
         (self.background_clip as u8).hash(h);
+        (self.background_origin as u8).hash(h);
         self.grid_column_start.hash(h);
         self.grid_column_span.hash(h);
         self.grid_row_start.hash(h);
@@ -1426,12 +1428,9 @@ impl StyledDom {
 }
 
 /// 一份 `style="…"` 文本 → 声明列表，用的就是层叠内部那**同一个**解析（含按本章目录
-/// 折算 `url(...)` 那一步）。
-///
-/// 抬到公开面只为一件事：缺口量具 `examples/css-gap` 从前只遍历样式表规则，元素上写的
-/// 内联声明**一条也没进那台秤** —— 于是哈利波特整本书报出来只有 1 处 `background` 没接住，
-/// 而那七张册扉页的底图恰恰全部写在内联里（`<body style="background: url(…)">`）。
-/// 量具漏计一个形状，比引擎少接一个属性更坏：它会让「已经接住了」这个读数本身失真。
+/// 折算 `url(...)` 那一步）。抬到公开面只为一件事：缺口量具从前只遍历样式表规则，
+/// 元素上写的内联声明一条也没进那台秤，而哈利波特那七张册扉页的底图恰恰全部写在
+/// 内联里 —— 量具漏计一个形状，比引擎少接一个属性更坏。
 pub fn inline_declarations(text: &str, base_dir: &str) -> Vec<Declaration> {
     parse_inline_style(text, base_dir)
 }

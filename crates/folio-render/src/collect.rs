@@ -1,6 +1,7 @@
 //! 收集与摆放：行内子树展平成段文本 + piece 表；块级顺序、兄弟外边距、缩进与对齐。
 //! 从 `layout` 切出来只为一个文件能一次读完；条目 `pub(super)` 只对 `layout` 内部开放。
 
+mod columns_layout;
 mod grid_layout;
 mod table_layout;
 
@@ -45,14 +46,10 @@ const MARKER_GAP_EM: f32 = 0.25;
 pub(super) const STACK_CAPTION_MAX: usize = 64;
 
 /// 叠图「同尺寸」那一格的容差：高差在**高的这个比例**以内就算一样大。
-///
-/// 同一个画廊里的一组封面常常差几像素 —— 《哈利·波特全集》美版那七张是
-/// 1000×441 / 1000×460 / 1000×447，铺到屏宽之后高 476 / 497 / 483。按 0.5 像素比，
-/// 这七张一张都叠不起来，而它们本来就是「同款同尺寸」的一叠。
-///
-/// 放宽是有代价的：叠起来同一时刻只显示一张，差这一档在画面上看不出来，**但注释会
-/// 跟着矮的那张往上跑**，所以只放这一档（约半行到一行字的高度），再大就不划算 ——
-/// 横图与竖图混排时仍然挡在门外。
+/// 同一个画廊里的一组封面常常差几像素（哈利·波特美版七张铺到屏宽后高
+/// 476 / 497 / 483），按半像素比一张都叠不起来。放宽的代价：叠起来同一时刻只显示
+/// 一张，注释会跟着矮的那张往上跑 —— 所以只放这一档（约半行到一行字），再大不划算，
+/// 横图与竖图混排仍挡在门外。
 pub(super) const STACK_SIZE_TOLERANCE: f32 = 0.08;
 
 /// HTML 的 `start` / `value` 属性 → 整数。属性缺失、空串、非数字都给 `None`。
@@ -98,12 +95,10 @@ pub(super) struct Ctx<'a> {
     /// 分片器把一行图整个放进一页，超出的那一截没有下一页接，页底就是裁切。
     pub(super) page_height: Option<f32>,
     /// 当前块格式上下文里已经摆出去的浮动盒。`children()` 一路把它们递给后面的兄弟块，
-    /// 直到某个块写了 `clear`。
-    ///
-    /// 为什么放在 `Ctx` 而不是当参数传：这条链上 `block` → `children` → `wrap_paragraph`
-    /// → `wrap_lines` 每一层都要问它，而 `wrap_*` 的参数已经全是数了。浮动盒进出的
-    /// 唯一地方是 `children`（摆一个进去）与浮动盒自己的内容（换一张空表），
-    /// 后者用 `std::mem::take` 走完再换回来。
+    /// 直到某个块写了 `clear`。放在 `Ctx` 而不是当参数传：这条链上 `block` →
+    /// `children` → `wrap_paragraph` → `wrap_lines` 每一层都要问它，而 `wrap_*`
+    /// 的参数已经全是数了。浮动盒进出的唯一地方是 `children`（摆一个进去）与
+    /// 浮动盒自己的内容（`std::mem::take` 走完再换回来）。
     pub(super) floats: Vec<PlacedFloat>,
     /// 脱流的绝对定位盒（`position: absolute` / `fixed`）与它**不脱流时的起点** `y`。
     /// 它们在 `children` 里被跳过、
@@ -113,8 +108,7 @@ pub(super) struct Ctx<'a> {
     /// 序号从头再来 —— 界面那份「现在看第几张」必须在换排版时清掉（见 `StackMark`）。
     pub(super) stack_seq: u32,
     /// 排这一块时要把哪个孩子**挪到队尾**（只在叠图那一趟设置，见 [`Self::children`]）。
-    ///
-    /// 图注统一摆在这一叠的**下面**：作者把注写在图前时（《哈利·波特全集》画廊那种
+    /// 图注统一摆在这一叠的**下面**：作者把注写在图前时（哈利·波特画廊那种
     /// `<p>注</p><img>`），排这一块就按「图…注」的顺序来一次。只对当前这一块生效，
     /// 排完立刻清掉；换过顺序的那一块也**不走块缓存**（缓存键里没有这一格）。
     pub(super) caption_last: Option<NodeId>,
@@ -212,9 +206,9 @@ fn has_image(dom: &Dom, node: NodeId) -> bool {
 ///   （`content/dom` 的 `add_attrs_if_missing` 用 `name.local`），所以 `xlink:href` 落表就是
 ///   `href`，不需要按前缀找。
 /// - `<svg …><image href="cover.jpeg"/></svg>` —— **Calibre 导出封面页的标准写法**
-///   （EPUB2 的 `titlepage.xhtml` 十有八九是这个形状，基督山伯爵那本就是）。以前只认 `img`，
-///   这一章就折成 0 高：0 高的章在滚动链里不存在（`reader/book.rs` 那道 `height() > 0.0`
-///   的筛子），症状是「从第二章回滑，滑不到第一节那张封面」。
+///   （EPUB2 的 `titlepage.xhtml` 十有八九是这个形状，基督山伯爵那本就是）。以前只认
+///   `img`，这一章就折成 0 高：0 高的章在滚动链里不存在（`reader/book.rs` 那道
+///   `height() > 0.0` 的筛子），症状是「从第二章回滑，滑不到第一节那张封面」。
 ///
 /// 只认**一张** `image` 的 svg：叠多张、或带 `path`/`text` 的那种是矢量画，该走
 /// `content::format::svg` 的整幅栅格化，不在排版里冒充一张位图。
@@ -455,13 +449,11 @@ fn ordered_for_display(
 }
 
 impl<'a> Ctx<'a> {
-    /// 节点的计算样式。
+    /// 节点的计算样式。返回**引用**而不是克隆：拿到它之后还能继续调 `&mut self`
+    /// 的方法（排版里每层都要这么干），而克隆一份 `ComputedStyle`（内含
+    /// `String` + `Vec<String>`）在每章是几千次分配。
     ///
-    /// 返回**引用**而不是克隆：`Ctx.styles` 是 `&'a StyledDom`，所以这个引用的生命周期
-    /// 独立于 `&self` —— 拿到它之后还能继续调 `&mut self` 的方法（排版里每层都要这么干），
-    /// 而克隆一份 `ComputedStyle`（内含 `String` + `Vec<String>`）在每章是几千次分配。
-    ///
-    /// `StyledDom` 为每个节点（含文本节点）都算了一条，所以查不到只可能是节点下标越界；
+    /// `StyledDom` 为每个节点（含文本节点）都算了一条，查不到只可能是节点下标越界；
     /// 那种时候给一份静态默认样式，而不是 panic。
     pub(super) fn style_of(&self, node: NodeId) -> &'a ComputedStyle {
         self.styles.get(node).unwrap_or(&DEFAULT_STYLE)
@@ -2036,6 +2028,10 @@ impl<'a> Ctx<'a> {
         if matches!(style.display, Display::Grid | Display::InlineGrid) {
             return self.grid(node, x, y, width, basis, cb_h);
         }
+        // 多栏容器：栏数解出 ≥2 才走独立摆放；折出 1 栏与没写一样退普通块流。
+        if let Some(plan) = super::columns::plan_for(style, content_width) {
+            return self.columns_flow(node, x, y, width, basis, cb_h, plan);
+        }
         let index = self.push_block(node, x, y, width, String::new(), true);
         let line_px = (style.font_size * style.line_height).max(1.0);
         let inner = if self.has_block_children(node) {
@@ -2220,6 +2216,10 @@ impl<'a> Ctx<'a> {
         }
         if matches!(style.display, Display::Grid | Display::InlineGrid) {
             return self.grid(node, 0.0, 0.0, width, basis, cb_h);
+        }
+        // 多栏容器：轻量档量高也走同一份配平（与完整档同一个数，章高才不跳）。
+        if let Some(plan) = super::columns::plan_for(style, content_width) {
+            return self.columns_flow(node, 0.0, 0.0, width, basis, cb_h, plan);
         }
         // 与 `block_uncached` 同一个基准：这一趟量高，那一趟实排，两边不许各拿一个数。
         let child_h = Self::child_height_basis(style, cb_h, pt + pb);
