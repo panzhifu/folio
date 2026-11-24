@@ -13,6 +13,9 @@ use folio_format::css::computed::{
 };
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
+mod text_ops;
+use text_ops::{small_caps_upper, transform_text};
+
 /// `font-variant: small-caps` 的小写字号比例。
 ///
 /// 0.8 是各家排版系统常用的那档（TeX 的 `\scshape` 与浏览器合成 small-caps 都在
@@ -20,29 +23,6 @@ use folio_format::dom::{Dom, NodeId, NodeKind};
 /// 「本来大写 / 本来小写」两段、各自一份宽度与行盒，收益是首字母回到 1em ，
 /// 代价是收集、断行、命中三处都要多一套区间 —— 书名与人物名上不值得。
 const SMALL_CAPS_SCALE: f32 = 0.8;
-
-/// 把小写换成大写，**只做等字节长度的映射**。
-///
-/// 偏移（`norm` / `orig`）是按字节走的：`ß → SS`、`ﬁ → FI` 这种长度会变，换了之后
-/// 选区与锚点全都会漂。那些字符原样留着，渲染上少一个字母的大写，比整段错位轻得多。
-fn small_caps_upper(src: &str) -> Option<String> {
-    let mut out = String::with_capacity(src.len());
-    let mut changed = false;
-    for ch in src.chars() {
-        if ch.is_lowercase() {
-            let mut upper = ch.to_uppercase();
-            if let (Some(first), None) = (upper.next(), upper.next())
-                && first.len_utf8() == ch.len_utf8()
-            {
-                out.push(first);
-                changed = true;
-                continue;
-            }
-        }
-        out.push(ch);
-    }
-    changed.then_some(out)
-}
 
 /// 注音与基字之间的缝，按容器自己的字号折算。
 ///
@@ -943,6 +923,13 @@ impl<'a> Collector<'a> {
         let dom_node = self.dom.get(node);
         if dom_node.kind == NodeKind::Text {
             let src = dom_node.text.as_str();
+            // `text-transform`：先按 CSS 换字符（只接受字节长度不变的结果），
+            // 再做 `font-variant: small-caps` 的 uppercase 近似。DOM 里原文不动。
+            let transformed = self
+                .arena
+                .get(style)
+                .and_then(|run| transform_text(src, run.text_transform));
+            let src = transformed.as_deref().unwrap_or(src);
             // `font-variant: small-caps`：原文换成 uppercase（等字节长度才换），
             // 这一段字号乘 0.8。DOM 里那份原文不动 —— 选区与复制读的是它。
             let mut upper = None;
@@ -1019,6 +1006,10 @@ impl<'a> Collector<'a> {
         };
         let text = match &generated.content {
             GeneratedContent::Literal(text) => text.clone(),
+            GeneratedContent::Attr(name) => match self.dom.attr(node, name) {
+                Some(value) => value.to_string(),
+                None => return,
+            },
             // open/close-quote 已在 cascade 折成字面量；留这一档只是兜底。
             _ => return,
         };

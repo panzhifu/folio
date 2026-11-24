@@ -65,6 +65,16 @@ impl BreakWhen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
 
+/// `text-transform`：只收不改**字节长度**的三档。`ß → SS` 那类会改长度，保留原文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextTransform {
+    #[default]
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
 /// SVG 呈现属性 `fill` / `stroke` 的取值：`none` 或一格颜色。
 ///
 /// `fill` 的 CSS 初值是黑色、`stroke` 是 `none`；这两个初值在

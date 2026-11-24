@@ -6,8 +6,8 @@
 //! 落地范围（如实记录，别当已做）：
 //! - 列轨道：固定长度、百分比、`fr`、`minmax(长度, 长度)`、`minmax(长度, fr)`、`auto`
 //!   （`auto` 取该列内容最大宽）。行轨道不读 `grid-template-rows`，一律按内容高。
-//! - 放置：显式 `grid-column`（线号 / `span N`）+ 行主序稀疏自动放置；`grid-row` 的
-//!   显式值暂不参与放置（只存下来），`rowspan` 不撑行。
+//! - 放置：显式 `grid-column` / `grid-row`（线号 / `span N`）+ 行主序稀疏自动放置；
+//!   跨行/跨列占住的格子会被后续项跳过，跨行格不够高时把缺口均摊进所占行。
 //! - 对齐：容器 `align-items` 用于行内纵向；子项 `justify-self` 用于列内横向。
 //!   `align-self` 与嵌套 grid 不在这一档。
 
@@ -60,39 +60,90 @@ pub(super) fn resolve_columns(
     widths
 }
 
-/// 自动放置：返回每个子项的 (行, 列)，以及总行数。
+/// 一个子项的定位意图：行/列起点（1-based，None = 自动）与跨格数。
+pub(super) struct Item {
+    pub row: Option<u16>,
+    pub row_span: u16,
+    pub column: Option<u16>,
+    pub column_span: u16,
+}
+
+/// 放置：返回每个子项的 (行, 列)，以及总行数。
 ///
-/// 显式列优先：列号比当前游标靠前时换行；自动项在当前行放不下时换行。这是 CSS
-/// 「稀疏」放置的简化版（不回溯填空），对出版书里的两列骨架与编号方程足够。
-pub(super) fn place(columns: usize, items: &[(Option<u16>, u16)]) -> (Vec<(usize, usize)>, usize) {
+/// 行/列都写的按线号直接落；只写一边的扫另一边的空位；都没写的按行主序稀疏填充
+/// （游标只前进、不回溯）。跨行/跨列占住的格子会被后续项跳过。
+pub(super) fn place(columns: usize, items: &[Item]) -> (Vec<(usize, usize)>, usize) {
     let columns = columns.max(1);
-    let mut row = 0usize;
-    let mut cursor = 0usize;
+    let mut occupied = std::collections::BTreeSet::new();
+    let mut cursor_row = 0usize;
+    let mut cursor_column = 0usize;
     let mut placed = Vec::with_capacity(items.len());
     let mut max_row = 0usize;
-    for &(start, span) in items {
-        let span = (span.max(1) as usize).min(columns);
-        let column = match start {
-            Some(line) => {
-                let column = (line as usize).saturating_sub(1).min(columns - 1);
-                if column < cursor {
-                    row += 1;
-                }
-                cursor = (column + span).min(columns);
-                column
+    for item in items {
+        let column_span = (item.column_span.max(1) as usize).min(columns);
+        let row_span = item.row_span.max(1) as usize;
+        let (row, column) = match (item.row, item.column) {
+            (Some(line), Some(column)) => (
+                (line as usize).saturating_sub(1),
+                (column as usize).saturating_sub(1).min(columns - 1),
+            ),
+            (Some(line), None) => {
+                let row = (line as usize).saturating_sub(1);
+                let column = (0..=columns.saturating_sub(column_span))
+                    .find(|&c| free(&occupied, columns, row, c, row_span, column_span))
+                    .unwrap_or(0);
+                (row, column)
             }
-            None => {
-                if cursor + span > columns {
-                    row += 1;
-                    cursor = 0;
+            (None, Some(line)) => {
+                let column = (line as usize).saturating_sub(1).min(columns - 1);
+                let row = (0..)
+                    .find(|&r| free(&occupied, columns, r, column, row_span, column_span))
+                    .unwrap_or(0);
+                (row, column)
+            }
+            (None, None) => {
+                loop {
+                    if cursor_column + column_span > columns {
+                        cursor_row += 1;
+                        cursor_column = 0;
+                    }
+                    if free(
+                        &occupied,
+                        columns,
+                        cursor_row,
+                        cursor_column,
+                        row_span,
+                        column_span,
+                    ) {
+                        break;
+                    }
+                    cursor_column += 1;
                 }
-                let column = cursor;
-                cursor = (column + span).min(columns);
-                column
+                let cell = (cursor_row, cursor_column);
+                cursor_column += column_span;
+                cell
             }
         };
-        max_row = max_row.max(row);
+        for dr in 0..row_span {
+            for dc in 0..column_span {
+                occupied.insert((row + dr, column + dc));
+            }
+        }
+        max_row = max_row.max(row + row_span - 1);
         placed.push((row, column));
     }
     (placed, max_row + 1)
+}
+
+/// 这些格子在 `columns` 内是否都空着。
+fn free(
+    occupied: &std::collections::BTreeSet<(usize, usize)>,
+    columns: usize,
+    row: usize,
+    column: usize,
+    row_span: usize,
+    column_span: usize,
+) -> bool {
+    let end = (column + column_span).min(columns);
+    (0..row_span).all(|dr| (column..end).all(|c| !occupied.contains(&(row + dr, c))))
 }

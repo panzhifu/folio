@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use super::super::{
     BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundTile, BorderStyle, Color, ComputedStyle, EmphasisPosition, EmphasisStyle, GridTrack,
-    Length, QuotePair, ShadowLayer, Transform,
+    BackgroundTile, BorderStyle, Color, ComputedStyle, EmphasisPosition, EmphasisStyle,
+    GeneratedContent, GridTrack, Length, QuotePair, ShadowLayer, Transform,
 };
 use crate::css::value::{
     edge_length, parse_background_image_layer, parse_background_position, parse_background_repeat,
@@ -779,4 +779,39 @@ pub(super) fn repeat_keyword_pair(low: &str) -> Option<(BackgroundTile, Backgrou
         "round" => Some((BackgroundTile::Round, BackgroundTile::Round)),
         _ => None,
     }
+}
+
+/// \`content\`：生成盒的文字。open-quote/close-quote 由 cascade 按继承的 quotes 折成字面；
+/// \`attr(名字)\` 取所属元素的属性；其余带引号的按字面量收。
+pub(super) fn apply_content(style: &mut ComputedStyle, value: &str) -> bool {
+    let low = value.trim().to_ascii_lowercase();
+    let content = match low.as_str() {
+        "none" | "normal" | "no-open-quote" | "no-close-quote" => GeneratedContent::None,
+        "open-quote" => GeneratedContent::OpenQuote,
+        "close-quote" => GeneratedContent::CloseQuote,
+        _ if low.starts_with("attr(") && low.ends_with(')') => {
+            let name = low[5..low.len() - 1].trim();
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return false;
+            }
+            GeneratedContent::Attr(name.to_string())
+        }
+        _ => {
+            let t = value.trim();
+            if t.len() >= 2
+                && ((t.starts_with('"') && t.ends_with('"'))
+                    || (t.starts_with('\'') && t.ends_with('\'')))
+            {
+                GeneratedContent::Literal(t[1..t.len() - 1].to_string())
+            } else {
+                return false;
+            }
+        }
+    };
+    style.content = content;
+    true
 }

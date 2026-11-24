@@ -1338,7 +1338,7 @@ fn declaration_status_agrees_with_the_cascade() {
         DeclStatus::Applied
     );
     assert_eq!(
-        declaration_status(&decl("text-transform", "uppercase"), &base, 16.0),
+        declaration_status(&decl("cursor", "pointer"), &base, 16.0),
         DeclStatus::Inert,
         "名单里的属性该报 Inert，而不是不认识"
     );

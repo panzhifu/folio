@@ -1,5 +1,4 @@
-//! 一条声明如何变成一个计算值：属性分发、简写展开、继承、边框。
-//! 从 `css::computed` 切出来只因为那台属性分发的 switch 本身就六百行；只对整个 `css` 内部开放。
+//! 一条声明如何变成一个计算值：属性分发、简写展开、继承、边框。只对整个 `css` 内部开放。
 
 mod border;
 mod inherit;
@@ -10,10 +9,10 @@ use values::*;
 
 use super::{
     AlignItems, BorderStyle, BoxSizing, CellVAlign, ComputedStyle, DecorationStyle, Direction,
-    Display, EmphasisPosition, FlexDirection, FlexWrap, GeneratedContent, Hyphens, InlineVAlign,
-    JustifyContent, JustifySelf, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning,
-    RubyAlign, RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify, Visibility,
-    WordBreak,
+    Display, EmphasisPosition, FlexDirection, FlexWrap, Hyphens, InlineVAlign, JustifyContent,
+    JustifySelf, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning, RubyAlign,
+    RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify, TextTransform,
+    Visibility, WordBreak,
 };
 use crate::css::Declaration;
 use crate::css::value::{
@@ -409,14 +408,10 @@ pub(super) fn apply(
             None => false,
         },
         "font" => apply_font_shorthand(style, parent, root_px, value),
-        // `object-fit`：只影响绘制那一层怎么把图采样进盒里（见 [`ObjectFit`]）。
-        // 排版期不用它 —— 盒子大小是 `image_size` 定的，与这张图怎么被摆进盒无关。
-        // `duokan-bleed`：多看与掌阅的**出血**扩展（`leftright` / `lefttopright` 这类）。
-        // 它说的不是 CSS 里任何一种盒模型，而是「这张图要铺到屏幕边上去、不要页边距」。
-        // 落成 [`ComputedStyle::bleed`]，由排版期把那张图放到**屏幕宽**（与「大图铺满」
-        // 同一套尺，见 `layout::ports::image_size`）。词表可以连写、也可以有空格。
-        //
-        // 诡秘那本 1,518 个元素、基督山 121 个 —— 不认它那些满版图就全缩在栏里。
+        // `object-fit` 只影响绘制层怎么把图采样进盒里；排版期用它不到（盒由 `image_size` 定）。
+        // `duokan-bleed`：多看/掌阅的**出血**扩展，意思是「这张图铺到屏幕边、不要页边距」。
+        // 落成 [`ComputedStyle::bleed`]，由排版期按屏幕宽摆（与「大图铺满」同一套尺）；
+        // 词表可连写也可带空格。
         "duokan-bleed" => match parse_bleed(value) {
             Some(edge) => {
                 style.bleed = edge;
@@ -600,11 +595,8 @@ pub(super) fn apply(
         // `KNOWN_UNIMPLEMENTED`）。简写里仍**吃掉**那些词：`background: url(x) … fixed`
         // 的 `fixed` 是真语法，不认整条简写就作废、底色与图一起消失；长手单写时屏上无变化，
         // 量具因此必须说真话。
-        // `background` 简写接住**颜色**与**图**两截：出版书的深色底块标题与整页底图都靠它，
-        // 丢掉就整块消失。**没写到的子属性拉回初值**，判据在 `apply_background_shorthand`。
-        // CSS 的 `initial`：把这一个属性的每一格拉回初值。整条走通用那条路太大
-        // （每个属性都要知道自己的初值），这里只收**简写**这一档 —— 它出现的形态就是
-        // 重置块里的一句（The Riddle 那本书 5 个元素）。
+        // `background` 简写接住**颜色**与**图**两截，丢掉就整块消失；没写到的子属性拉回初值
+        // （判据在 `apply_background_shorthand`）。`initial` 只收简写这一档：整条通用路太大。
         "background" if value.eq_ignore_ascii_case("initial") => {
             style.background_color = None;
             style.background_layers.clear();
@@ -621,12 +613,8 @@ pub(super) fn apply(
             None => false,
         },
         // `all: initial`：把**每一个**属性拉回初值（含继承来的那些）。
-        //
-        // 近似一处：`ComputedStyle::default()` 的 `display` 是 `Block`，而 CSS 的初值
-        // 是 `inline` —— 对 `li` 这类靠 UA 表拿到 `list-item` 的元素，`all: initial`
-        // 在浏览器里会把标记也一起收掉，我们退回「块」。真书里这条只出现在
-        // Project Gutenberg 的页眉页脚重置里（`#pg-footer li { all: initial; display: block; … }`），
-        // 而那条规则自己就跟了 `display: block`，差不到屏上。
+        // 近似一处：我们的 `display` 初值是 `Block`（CSS 是 `inline`），`li` 会退回块、
+        // 浏览器会收掉标记。真书里这条只出现在页眉页脚重置里且紧跟 `display: block`，差不到屏上。
         // `link` 不是 CSS 属性（是「这段在不在 `<a>` 里」），重置时留着。
         "all" if value.eq_ignore_ascii_case("initial") => {
             let link = style.link;
@@ -781,6 +769,29 @@ pub(super) fn apply(
             }
             "wrap" => {
                 style.flex_wrap = FlexWrap::Wrap;
+                true
+            }
+            _ => false,
+        },
+        "align-self" => match value.to_ascii_lowercase().as_str() {
+            "auto" => {
+                style.align_self = None;
+                true
+            }
+            "stretch" => {
+                style.align_self = Some(AlignItems::Stretch);
+                true
+            }
+            "start" => {
+                style.align_self = Some(AlignItems::Start);
+                true
+            }
+            "end" => {
+                style.align_self = Some(AlignItems::End);
+                true
+            }
+            "center" => {
+                style.align_self = Some(AlignItems::Center);
                 true
             }
             _ => false,
@@ -1060,6 +1071,26 @@ pub(super) fn apply(
             }
             _ => false,
         },
+        // `text-transform`：只收三档不改字节长度的。其余值判不认识。
+        "text-transform" => match value.to_ascii_lowercase().as_str() {
+            "none" => {
+                style.text_transform = TextTransform::None;
+                true
+            }
+            "uppercase" => {
+                style.text_transform = TextTransform::Uppercase;
+                true
+            }
+            "lowercase" => {
+                style.text_transform = TextTransform::Lowercase;
+                true
+            }
+            "capitalize" => {
+                style.text_transform = TextTransform::Capitalize;
+                true
+            }
+            _ => false,
+        },
         "text-size-adjust" | "-webkit-text-size-adjust" => {
             match value.trim() {
                 "auto" | "none" => {
@@ -1080,33 +1111,7 @@ pub(super) fn apply(
         "quotes" => apply_quotes(style, value),
         // `content`：生成盒的文字。open-quote/close-quote 在 cascade 里按继承的
         // quotes 折成字面字符（见 `computed::cascade`），这里先记下意图。
-        "content" => {
-            let low = value.trim().to_ascii_lowercase();
-            let content = match low.as_str() {
-                "none" | "normal" => Some(GeneratedContent::None),
-                "open-quote" => Some(GeneratedContent::OpenQuote),
-                "close-quote" => Some(GeneratedContent::CloseQuote),
-                _ => {
-                    // 一段带引号的字面量：`"●"` / `'x'`。去首尾引号后取全部字符。
-                    let t = value.trim();
-                    if t.len() >= 2
-                        && ((t.starts_with('"') && t.ends_with('"'))
-                            || (t.starts_with('\'') && t.ends_with('\'')))
-                    {
-                        Some(GeneratedContent::Literal(t[1..t.len() - 1].to_string()))
-                    } else {
-                        None
-                    }
-                }
-            };
-            match content {
-                Some(content) => {
-                    style.content = content;
-                    true
-                }
-                None => false,
-            }
-        }
+        "content" => apply_content(style, value),
         // ---- grid 定位（轨道定义 + 子项显式线号）----
         "grid-template-columns" => apply_grid_tracks(style, value, own, root_px),
         "grid-column" => apply_grid_line(style, true, value),
@@ -1267,16 +1272,11 @@ pub(super) fn apply(
             }
             _ => false,
         },
-        // 这两个属性我们**本来就按初值在做**：`list-style-image: none`（标记只有文字、
-        // 没有图源）与 `list-style-position: outside`（标记挂在流动之外）正是现在画的样子。
-        // 所以这两个值判「接住了」，其余值（`url(…)`、`inside`）判不认识 —— 与
-        // `background-clip: border-box` 那一档同一条规矩：值的效果等于默认行为才算接住。
-        // 《蛇结》51 个 `li` 写的正是这两个初值，从前被记成 102 条「认得不生效」。
-        // 字体特性那一档只收两条：`normal`（初值，什么都不启用）与 `small-caps`
-        // （排版层把小写换成大写、字号乘 0.8）。其余 `petite-caps` / `all-small-caps`
-        // 那一族判不认识 —— 与 `list-style` 的先例同一条规矩。
-        // 《乌合之众》157 个元素写的正是 `font-variant: normal`；
-        // 《傲慢与偏见》9 个 `.smcap` 写的是 `small-caps`。
+        // 这两个属性**本来就按初值在做**（`list-style-image: none` 无图源、
+        // `list-style-position: outside` 标记挂在流动外），所以初值判接住、其余判不认识 ——
+        // 判据是「效果等于默认行为才算接住」。
+        // `font-variant` 只收 `normal`（初值）与 `small-caps`（排版层大写 + 0.8 字号），
+        // 其余（`petite-caps` 等）判不认识，同一条规矩。
         "font-variant" | "font-variant-caps" => match value.to_ascii_lowercase().as_str() {
             "normal" => {
                 style.small_caps = false;

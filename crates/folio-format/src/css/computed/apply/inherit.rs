@@ -67,6 +67,8 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         text_emphasis_color: parent.text_emphasis_color,
         text_emphasis_position: parent.text_emphasis_position,
         visibility: parent.visibility,
+        // `text-transform` 在 CSS 里可继承：写在 `<body>` 上一次就管全书。
+        text_transform: parent.text_transform,
         quotes: parent.quotes,
         // SVG 呈现属性按 CSS/SVG 规定可继承：写在 `<svg>` 根上的 stroke 要落到每个 `<path>`。
         svg_fill: parent.svg_fill,

@@ -1,7 +1,5 @@
 //! 收集与摆放：行内子树展平成段文本 + piece 表；块级顺序、兄弟外边距、缩进与对齐。
-//!
-//! 从 `layout` 主模块切出来只为了一个文件能一次读完；跨文件的条目用
-//! `pub(super)`，即**只对 `layout` 内部开放**，不属于对外公开面。
+//! 从 `layout` 切出来只为一个文件能一次读完；条目 `pub(super)` 只对 `layout` 内部开放。
 
 mod grid_layout;
 mod table_layout;
@@ -1526,12 +1524,14 @@ impl<'a> Ctx<'a> {
                     line_start: usize,
                     line_end: usize,
                     cross: f32,
+                    align: AlignItems,
                 }
                 let mut placed: Vec<Placed> = Vec::with_capacity(line.len());
                 let mut item_x = x + pl + lead;
                 for (k, &idx) in line.iter().enumerate() {
                     let child = items[idx];
                     let item_w = sizes[k].max(1.0);
+                    let align = self.style_of(child).align_self.unwrap_or(style.align_items);
                     let line_start = self.lines.len();
                     let block_start = self.blocks.len();
                     let cross = self.block(child, item_x, 0.0, item_w, item_w, None);
@@ -1541,13 +1541,14 @@ impl<'a> Ctx<'a> {
                         line_start,
                         line_end: self.lines.len(),
                         cross,
+                        align,
                     });
                     item_x += item_w + main_gap + extra;
                 }
                 let line_cross = placed.iter().map(|p| p.cross).fold(0.0f32, f32::max);
-                // align-items：stretch 把盒子拉到整行交叉尺寸；其余按 start/end/center 平移。
+                // align-self 逐项盖 align-items：stretch 拉满整行交叉尺寸，其余平移。
                 for p in placed {
-                    let align_dy = match style.align_items {
+                    let align_dy = match p.align {
                         AlignItems::Start | AlignItems::Stretch => 0.0,
                         AlignItems::End => line_cross - p.cross,
                         AlignItems::Center => (line_cross - p.cross) / 2.0,
@@ -1559,7 +1560,7 @@ impl<'a> Ctx<'a> {
                     for block in &mut self.blocks[p.block_start..p.block_end] {
                         block.y += dy;
                     }
-                    if style.align_items == AlignItems::Stretch
+                    if p.align == AlignItems::Stretch
                         && let Some(block) = self.blocks.get_mut(p.block_start)
                     {
                         block.height = line_cross;
@@ -1576,13 +1577,14 @@ impl<'a> Ctx<'a> {
             // ---- 主轴 = y（高度 auto，按固有高依次堆；交叉轴 = x 走 align-items）----
             let mut cursor = 0.0f32;
             for &child in &items {
+                let align = self.style_of(child).align_self.unwrap_or(style.align_items);
                 // 交叉尺寸：stretch 铺满内容宽；否则量固有宽。
-                let item_w = match style.align_items {
+                let item_w = match align {
                     AlignItems::Stretch => content_w,
                     _ => self.flex_intrinsic_width(child, content_w).min(content_w),
                 };
                 let cross_free = content_w - item_w;
-                let dx = match style.align_items {
+                let dx = match align {
                     AlignItems::Start | AlignItems::Stretch => 0.0,
                     AlignItems::End => cross_free,
                     AlignItems::Center => cross_free / 2.0,
@@ -1690,10 +1692,7 @@ impl<'a> Ctx<'a> {
     pub(super) fn is_inline_flow(&self, node: NodeId, style: &ComputedStyle) -> bool {
         self.dom.get(node).kind != NodeKind::Element
             || self.dom.is_element(node, "br")
-            // `inline-block` / `inline-table` / `inline-flex` / `inline-grid` 走**行内流**：
-            // 行内原子盒的 shrink-to-fit 与嵌套几何没做，所以内容按普通行内摊平（不换行、
-            // 不收缩）。对脚注图标（inline-block 裹图）与语调 fallback（inline-table 两层）
-            // 这比按块断行更接近作者意图；真正的原子盒留待专门一档。
+            // inline-block/table/flex/grid 走行内流：原子盒的 shrink-to-fit 未做，内容摊平。
             || matches!(
                 style.display,
                 Display::Inline

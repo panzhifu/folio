@@ -58,11 +58,16 @@ impl<'a> Ctx<'a> {
             tracks.push(GridTrack::Auto);
         }
         let columns = tracks.len();
-        let spec: Vec<(Option<u16>, u16)> = items
+        let spec: Vec<crate::grid::Item> = items
             .iter()
             .map(|&child| {
                 let s = self.style_of(child);
-                (s.grid_column_start, s.grid_column_span)
+                crate::grid::Item {
+                    row: s.grid_row_start,
+                    row_span: s.grid_row_span,
+                    column: s.grid_column_start,
+                    column_span: s.grid_column_span,
+                }
             })
             .collect();
         let (cells, rows) = crate::grid::place(columns, &spec);
@@ -88,11 +93,33 @@ impl<'a> Ctx<'a> {
         };
         if self.light {
             let mut row_h = vec![0.0f32; rows];
+            let mut spans: Vec<(usize, usize, f32)> = Vec::with_capacity(items.len());
             for (i, &child) in items.iter().enumerate() {
                 let (row, column) = cells[i];
-                let cell_w = span_width(column, self.style_of(child).grid_column_span).max(1.0);
+                let child_style = self.style_of(child);
+                let span = child_style.grid_row_span.max(1) as usize;
+                let cell_w = span_width(column, child_style.grid_column_span).max(1.0);
                 let height = self.block_light(child, cell_w, cell_w, None);
-                row_h[row] = row_h[row].max(height);
+                if span == 1 {
+                    row_h[row] = row_h[row].max(height);
+                }
+                spans.push((row, span, height));
+            }
+            // 跨行格：占住的几行不够高时把缺口均摊进去（与表格同一条近似）。
+            for (row, span, height) in spans {
+                if span <= 1 {
+                    continue;
+                }
+                let end = (row + span).min(rows);
+                let covered: f32 = row_h[row..end].iter().sum::<f32>()
+                    + row_gap * (end.saturating_sub(row + 1)) as f32;
+                let deficit = height - covered;
+                if deficit > 0.0 && end > row {
+                    let share = deficit / (end - row) as f32;
+                    for h in &mut row_h[row..end] {
+                        *h += share;
+                    }
+                }
             }
             let content_h = row_h.iter().sum::<f32>() + row_gap * (rows.saturating_sub(1)) as f32;
             return self.close_block(
@@ -108,6 +135,8 @@ impl<'a> Ctx<'a> {
             line_end: usize,
             height: f32,
             row: usize,
+            row_span: usize,
+            align: AlignItems,
         }
         let mut placed: Vec<Placed> = Vec::with_capacity(items.len());
         for (i, &child) in items.iter().enumerate() {
@@ -132,6 +161,7 @@ impl<'a> Ctx<'a> {
                 }
                 JustifySelf::Auto | JustifySelf::Stretch => (cell_w, 0.0),
             };
+            let align = child_style.align_self.unwrap_or(style.align_items);
             let item_x = x + pl + col_x[column] + dx;
             let line_start = self.lines.len();
             let block_start = self.blocks.len();
@@ -143,11 +173,30 @@ impl<'a> Ctx<'a> {
                 line_end: self.lines.len(),
                 height,
                 row,
+                row_span: child_style.grid_row_span.max(1) as usize,
+                align,
             });
         }
         let mut row_h = vec![0.0f32; rows];
         for slot in &placed {
-            row_h[slot.row] = row_h[slot.row].max(slot.height);
+            if slot.row_span == 1 {
+                row_h[slot.row] = row_h[slot.row].max(slot.height);
+            }
+        }
+        for slot in &placed {
+            if slot.row_span <= 1 {
+                continue;
+            }
+            let end = (slot.row + slot.row_span).min(rows);
+            let covered: f32 = row_h[slot.row..end].iter().sum::<f32>()
+                + row_gap * (end.saturating_sub(slot.row + 1)) as f32;
+            let deficit = slot.height - covered;
+            if deficit > 0.0 && end > slot.row {
+                let share = deficit / (end - slot.row) as f32;
+                for h in &mut row_h[slot.row..end] {
+                    *h += share;
+                }
+            }
         }
         let mut row_y = vec![0.0f32; rows];
         let mut cursor = 0.0f32;
@@ -156,10 +205,14 @@ impl<'a> Ctx<'a> {
             cursor += row_h[row] + row_gap;
         }
         for slot in placed {
-            let align_dy = match style.align_items {
+            let align = slot.align;
+            let end = (slot.row + slot.row_span).min(rows);
+            let span_h: f32 = row_h[slot.row..end].iter().sum::<f32>()
+                + row_gap * (end.saturating_sub(slot.row + 1)) as f32;
+            let align_dy = match align {
                 AlignItems::Start | AlignItems::Stretch => 0.0,
-                AlignItems::End => row_h[slot.row] - slot.height,
-                AlignItems::Center => (row_h[slot.row] - slot.height) / 2.0,
+                AlignItems::End => span_h - slot.height,
+                AlignItems::Center => (span_h - slot.height) / 2.0,
             };
             let dy = y + pt + row_y[slot.row] + align_dy;
             for line_box in &mut self.lines[slot.line_start..slot.line_end] {
@@ -168,10 +221,10 @@ impl<'a> Ctx<'a> {
             for block in &mut self.blocks[slot.block_start..slot.block_end] {
                 block.y += dy;
             }
-            if style.align_items == AlignItems::Stretch
+            if align == AlignItems::Stretch
                 && let Some(block) = self.blocks.get_mut(slot.block_start)
             {
-                block.height = row_h[slot.row];
+                block.height = span_h;
             }
         }
         let content_h = row_h.iter().sum::<f32>() + row_gap * (rows.saturating_sub(1)) as f32;

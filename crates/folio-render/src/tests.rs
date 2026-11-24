@@ -68,10 +68,8 @@ fn typeset_with(measure: &dyn Measure, html: &str, css: &str, width: f32) -> (Do
 }
 
 /// 两端对齐那一族用例的样式表，中间可以再加一条声明。
-///
-/// 为什么要一个函数而不是拼字符串：`"…margin: 0 } ; text-justify: none"` 那种拼法
-/// 把后一条掉在规则块**外面**，层叠根本收不到它，于是 `text-justify` 的三档测试
-/// 全在比默认值 —— 红得毫无信息量。
+/// 用函数而不是拼字符串：`"…} ; text-justify: none"` 会把后一条掉在规则块**外面**，
+/// 层叠收不到，三档测试就全在比默认值 —— 红得毫无信息量。
 fn justify_css(extra: &str) -> String {
     let mut css = String::from("p { text-align: justify; text-indent: 0; margin: 0");
     if !extra.is_empty() {
@@ -3657,12 +3655,14 @@ fn cells(dom: &Dom, laid: &Layout) -> Vec<(f32, f32, f32, f32)> {
         .collect()
 }
 
+mod align;
 mod flex;
 mod generated;
 mod grid;
 mod index;
 mod inline;
 mod table;
+mod text;
 // 竖排：同一份几何在两根轴上的逐条对照（转置漏一面、接反轴、基线符号错都在这片露）。
 mod vertical;
 

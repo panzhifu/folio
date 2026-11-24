@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use super::ports::Measure;
 use folio_format::css::computed::{
-    Color, ComputedStyle, DecorationStyle, EmphasisPosition, EmphasisStyle, TextShadow, Visibility,
+    Color, ComputedStyle, DecorationStyle, EmphasisPosition, EmphasisStyle, TextShadow,
+    TextTransform, Visibility,
 };
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
@@ -100,6 +101,8 @@ pub struct RunStyle {
     /// `visibility: hidden|collapse`：继续占位（进不了排版那一刀），但绘制时整片跳过。
     /// 继承下来的值已在 `ComputedStyle` 里折好，所以子级显式 `visible` 能盖掉祖先的 hidden。
     pub hidden: bool,
+    /// `text-transform`：收集文本时按它换字符（只换字节长度不变的）。
+    pub text_transform: TextTransform,
 }
 
 impl std::hash::Hash for RunStyle {
@@ -128,6 +131,7 @@ impl std::hash::Hash for RunStyle {
         self.emphasis_color.hash(state);
         (self.emphasis_position as u8).hash(state);
         self.hidden.hash(state);
+        (self.text_transform as u8).hash(state);
     }
 }
 
@@ -213,6 +217,7 @@ impl RunStyle {
             emphasis_color: style.text_emphasis_color,
             emphasis_position: style.text_emphasis_position,
             hidden: matches!(style.visibility, Visibility::Hidden | Visibility::Collapse),
+            text_transform: style.text_transform,
         }
     }
 
