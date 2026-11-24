@@ -30,15 +30,10 @@ pub struct LineRun {
     pub width: f32,
     pub ascent: f32,
     pub descent: f32,
-    /// 沿字轴（横排是 x）额外挪的 px，口径与 [`MarkerRun::offset`] 同一份：**物理**左偏移，
-    /// 所以 RTL 那一路的符号在排版期就已折好。正文恒为 0。
-    ///
-    /// 唯一的用户是 ruby 注音：注音不吃前进量（它的字符在宽度表里是 0），流动把它放在
-    /// 容器末尾，而 `ruby-align` 要的那一段在容器里头 —— 差的就是这一格。竖直那一半不在
-    /// 这里：注音抬到基字上方走的是 [`RunStyle::baseline_shift`]，与 `vertical-align` 同一条
-    /// 既有通路，行盒因此跟着自己长高。
-    /// 绘制（`chapter_layout.rs` 的 `build_row`）与命中（`content::hit` 的两条片段循环）
-    /// **各加一次同一个数**，漏一侧就是「画在那儿、点上去选中别处」。
+    /// 沿字轴额外挪的 px（物理左偏移，RTL 符号已折好，正文恒 0），口径同 [`MarkerRun::offset`]。
+    /// 唯一用户是 ruby 注音：它不吃前进量，流动排在容器末尾，而 `ruby-align` 要的在那一段里头 ——
+    /// 差的就是这一格。竖直那半走 [`RunStyle::baseline_shift`]。绘制与命中**各加一次同一个数**，
+    /// 漏一侧就是「画在那儿、点上去选中别处」。
     ///
     /// [`MarkerRun::offset`]: MarkerRun::offset
     /// [`RunStyle::baseline_shift`]: crate::RunStyle::baseline_shift
@@ -64,6 +59,9 @@ pub struct ImageRun {
     /// 排版期只定盒，绘制期按这一格决定「图按哪一块区域采样进盒」：`cover` 要裁、
     /// `contain` 要留底、`fill` 拉伸。初值 `Fill` 与「以前直接画满盒」等价。
     pub fit: ObjectFit,
+    /// `visibility: hidden|collapse`：图片仍占位（宽高照算），绘制时整张跳过。
+    /// 与文本 run 的 `RunStyle::hidden` 同一份 Visibility，继承已在样式层折好。
+    pub hidden: bool,
 }
 
 /// 行盒里的一个列表标记（CSS 的 `::marker`）。
@@ -333,17 +331,12 @@ pub struct Layout {
     /// `width` / `height` 说的也是物理那两条边，而竖排下他们对调过：`width` 是长条沿块轴的
     /// 总长（一整串列占多宽，切片就是按它切的），`height` 是一列能排多长。
     flow: WritingMode,
-    /// 第 `i` 行属于 `blocks` 里哪一条；与 `lines` 等长，`u32::MAX` 表示没有归属
-    /// （正常排版不会出现，只有手工拼的表才有）。用 `u32` 而不是 `usize`：
-    /// 一万多行一章省下的是几十 KB 的整数倍。
+    /// 第 `i` 行属于 `blocks` 哪条；与 `lines` 等长，`u32::MAX` = 无归属（手工拼表才有）。
+    /// 用 `u32` 而非 `usize`：一万多行一章省下几十 KB。
     owner: Vec<u32>,
-    /// 行盒是否**严格叠放**：沿推进轴上一条的底不超过下一条的顶（横排就是
-    /// `lines[i].y + lines[i].height <= lines[i+1].y`，见 [`Self::flow_start`]）。
-    ///
-    /// 真排版一定满足（每个块按游标一行行往下推），但「一定」是靠假设，而二分错了是
-    /// **静默答错**：屏幕上就是「点这一行选中的是别处」。所以这一格为假时，按推进轴的查询
-    /// 全部退回线性扫 —— 慢一点但不会答错，也不报错（将来接负外边距 / 绝对定位那天，
-    /// 症状会先在速度上出现，而不是先在读代码的人的脑子里）。
+    /// 行盒是否**严格叠放**：沿推进轴上一条的底不超过下一条的顶（见 [`Self::flow_start`]）。
+    /// 真排版满足，但那是假设；二分错了是**静默答错**（点这行选中别处）。所以为假时按推进轴
+    /// 的查询退回线性扫 —— 慢一点但不会答错（接负外边距那天症状先出现在速度上）。
     stacked: bool,
     /// 每一行的**绘制层叠序**（z 值），与 `lines` 等长；由 [`super::stacking`] 在 layout
     /// 入口算好。绘制侧按它重排行盒的先后，正文/命中仍按 `lines` 的原序（源序），两件事分开。
@@ -351,12 +344,10 @@ pub struct Layout {
     pub line_z: Vec<i32>,
 }
 
-/// 把引擎排好的那份**逻辑横排**长条整体投影成竖排的物理坐标。
-///
-/// **为什么是整体投影，而不是让 `collect` 直接按竖轴摆**：断行、行盒基线、shaping、
-/// 命中用的 `Measure::byte_at_x` 与 `char_edges`，全都只认「沿内联轴的一个纯量」，
-/// 它们在逻辑空间里本来就对。真要转轴就得把 `x` / `y` 这两个名字在引擎里改一遍，
-/// 还要在 `folio-app` 那三处读 `glyph.position` 的地方各分一个叉。投影只在这里发生一次。
+/// 把**逻辑横排**长条整体投影成竖排物理坐标。断行、基线、shaping、命中
+/// (`Measure::byte_at_x` / `char_edges`) 都只认「沿内联轴的纯量」，在逻辑空间里本来就对；
+/// 让 `collect` 直接按竖轴摆就得改引擎里的 x/y、app 三处读 `glyph.position` 的地方。
+/// 投影只在这里发生一次。
 ///
 /// **代价要说清，这一条不是免费的**：盒模型那几族边是**物理**的
 /// （`margin-top` / `padding-left` / `border[上右下左]`），转置会把它们摆到另一条边上。
@@ -478,18 +469,11 @@ impl Layout {
     }
 
     // ---- 推进轴上的问句 ----
-    //
-    // `stacked`、`line_at`、`line_covering_or_above`、`lines_in_band` 和分片器的 `fits`
-    // 问的其实是同一件事：「沿**推进轴**走到哪儿了」。横排里那根轴就是 `y`；
-    // `writing-mode: vertical-rl` 把字改成沿 `+y` 推进、一列一列沿 `−x` 堆，于是那根轴换成
-    // `x`，而且是**反着**走的 —— 阅读顺序上的第一列摆在最右边，它的物理 `x` 最大。
-    // 下面那两个 match 就是那一根轴的全部；调用点一个都不用改，因为它们早就只在问
-    // 「沿推进轴的起点 / 底边」了。
-    //
-    // 长条沿块轴的总长就是 `Layout::width`（[`transposed`] 已经把 `width` / `height` 对调过），
-    // 所以 `vertical-rl` 那一条不用额外的格子。**但它必须先过 `assemble`**：一张没投影过的
-    // 表配上这两条竖排分支，症状是「横排的字按错的坐标被裁掉」—— 那正是把轴拆成两刀接的
-    // 坏样子，所以这两半是同一刀。
+    // `stacked`/`line_at`/`lines_in_band` 和分片器的 `fits` 问的是同一件事：沿**推进轴**走到哪。
+    // 横排是 `y`；vertical-rl 字沿 +y 推进、列沿 −x 堆，轴换成 `x` 且反着走（首列在最右）。
+    // 下面两个 match 就是那根轴的全部；调用点不用改。
+    // 长条沿块轴总长就是 `Layout::width`（[`transposed`] 已对调 width/height），故 vertical-rl
+    // 不用额外格子 —— 但必须先过 `assemble`，否则「横排的字按错的坐标被裁掉」。两半是同一刀。
 
     /// 这一行在推进轴上的起点。横排 = `line.y`；竖排 = 从阅读顺序那一侧数进来的距离。
     pub fn flow_start(&self, line: &LineBox) -> f32 {
@@ -672,21 +656,12 @@ impl Layout {
     ///
     /// 行盒不叠放（`stacked` 为假）或带是空的时给全区间：调用方自己的 y 裁剔照旧兜住
     /// 正确性，这里只是没省下来。
-    /// 把整章块表走一遍，折出「哪些块要画装饰」那张短表（见 [`DecorSeed`]）。
-    ///
-    /// **每次重排一次，不是每帧一次** —— 折一次是 O(全部块)，而它的答案只跟层叠结果
-    /// 有关。调用点是 `reader::document::Document::apply_typeset`，门是
-    /// `Metric::DecorRebuilds`（滚动过程中那一格必须不涨）。
-    ///
-    /// 三条筛掉的理由与绘制侧原本逐条一致，一条都没松：
-    /// - **内容盒副本不画**：`wrap_paragraph` 为正文映射补注册的那条几何内缩了边框与
-    ///   padding，它的边框条会不偏不倚落在文字起点上（真书《斗战狂潮》目录页踩过）；
-    /// - 没有底色、四条边又都不可见、背景里又没有图的块，进表只是让每帧多扫一条空记录；
-    /// - 零宽零高的块画不出任何东西，进表同样只是白扫。
-    ///
-    /// 第三条对新加的图那一格**同样是筛**：`width`/`height` 是边框盒的数，一块零高的盒
-    /// 摆不出任何图，让扉页那种「整块是一个 `<body>`，图按盒铺」走同一道筛就够，
-    /// 不需要为图另开一条例外。
+    /// 把整章块表走一遍折出「哪些块要画装饰」短表（见 [`DecorSeed`]）。
+    /// **每次重排一次、不是每帧一次**（O(全部块)，答案只跟层叠结果有关；门是
+    /// `Metric::DecorRebuilds`，滚动时不涨）。三条筛除与绘制侧逐条一致：
+    /// - 内容盒副本不画（内缩边框的条会落在文字起点上，《斗战狂潮》目录页踩过）；
+    /// - 无底色、边不可见、无背景图的块：进表只让每帧多扫一条空记录；
+    /// - 零宽零高的块画不出东西。新加的图那一格同样走这条筛（`width`/`height` 是边框盒数）。
     pub fn decor_seeds(&self, styles: &StyledDom) -> Vec<DecorSeed> {
         Metric::DecorRebuilds.count();
         let mut out = Vec::new();
@@ -697,6 +672,16 @@ impl Layout {
             let Some(style) = styles.get(block.node) else {
                 continue;
             };
+            // `visibility: hidden|collapse`：这块仍占位（不进 collect 的跳过），
+            // 但边框、底色、底图都不画。子块自带 `visible` 时不在这里被埋掉 ——
+            // 它自己有 decor seed。
+            if matches!(
+                style.visibility,
+                folio_format::css::computed::Visibility::Hidden
+                    | folio_format::css::computed::Visibility::Collapse
+            ) {
+                continue;
+            }
             // `drawn()` 已经把「有 width 但 style 是 none」那种不存在的边折成 0。
             let mut drawn = [
                 style.border[0].drawn(),
@@ -909,27 +894,15 @@ pub struct LayoutOptions {
     /// 用于目录跳转、进度条等只需要「这一章多高」的场合，不需要行盒级别的细节。
     /// 跳过断行、跳过 `run_metrics`、跳过 `LineFragment` 构建，速度提升一个量级。
     pub light: bool,
-    /// 允许按书自己声明的那根轴排吗。`false` = 不管 CSS 写了什么竖排都按横排排。
-    ///
-    /// 这一格由**界面**给，不是引擎的取舍：竖排现在只在分页那一档落地。连续滚动整条
-    /// 滚动链（跨章拼接、全局进度、屏幕↔章内坐标那一句反算）全按「沿 y 走」建着，
-    /// 转轴等于把那条 spine 重做一遍 —— 那一档接上之前，宁可让一本竖排书横着排，
-    /// 也不要在滚动里把列往 y 上叠。判据与症状都记在
-    /// `ui::features::reader::model::chapter_layout` 的 `vertical` 那一格上。
+    /// 允许按书声明的轴排吗。`false` = 不管 CSS 写什么都按横排。由**界面**给：竖排目前
+    /// 只在分页档落地（连续滚动那条 spine 全按「沿 y 走」建着，转轴等于重做它）。
+    /// 判据与症状记在 `ui::features::reader::model::chapter_layout` 的 `vertical` 那格。
     pub allow_vertical: bool,
-    /// 竖轴上「包含块的高」这一格 —— `height: NN%` 那一族的折算基准。
-    ///
-    /// `None` = 没有既定高，百分比高整族按 `auto`。这一档就是它出现之前的一切行为，
-    /// 也是竖排那一档现在唯一的取值（转轴后该拿屏幕的**宽**，而那个数还没走到这一层）。
-    ///
-    /// 为什么要它：`html,body { height:100% }` + `.wedge { float:left; height:50%;
-    /// margin-bottom:-360px }` + `.container { clear:both; height:0 }` 是把封面图**垂直
-    /// 居中**的老写法（EasyPub 那族工具给封面页就写这套，《斗战狂潮》是现成样本）。
-    /// 它的居中不靠表格盒，靠的是那个浮动块拿到「页高的一半」这个数；没有基准就折不出
-    /// 那一半，整条链退化成 auto，图贴在顶上、下面空一整页。
-    ///
-    /// 谁递这个数：分页档递**一片的高**，滚动档递**视口高** —— 两个都对应浏览器里
-    /// `body` 的包含块（打印时是页盒，屏幕上是视口），不是新造的一档取舍。
+    /// 竖轴上「包含块的高」—— `height: NN%` 的折算基准；`None` 时百分比高按 `auto`。
+    /// 为的是老写法 `html,body{height:100%}` + `float 块 height:50%; margin-bottom:-360px`
+    /// 把封面图**垂直居中**：居中靠那个浮动块拿到「页高一半」，没有基准就退化成 auto、
+    /// 图贴顶、下面空一页。分页档递**一片的高**，滚动档递**视口高**（都是浏览器里
+    /// `body` 包含块 —— 打印是页盒、屏幕是视口）。
     pub page_height: Option<f32>,
     /// 屏幕（或窗口）的**宽**，逻辑像素。`None` = 界面没给，图片按栏宽算。
     ///

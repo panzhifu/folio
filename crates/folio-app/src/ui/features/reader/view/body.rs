@@ -1663,10 +1663,8 @@ mod truth_tables {
     }
 
     /// 选区的上下边取**字墨**：行距与行内高图撑出来的那一截都不算。
-    ///
-    /// 行盒高 = 半行距 + 字墨；默认行距 1.75em 时前者能占四分之一条行。行内一张
-    /// 240 高的图还会把整条行盒撑到 240，按行盒画底色时选区跟着变成图那么高 ——
-    /// 读者看到的是「选中区域比文字高出一大截」。这一条钉的是两个来源都不参与。
+    /// 默认 1.75em 行距的半行距能占四分之一条行，行内 240 高的图更是把行盒撑到 240 ——
+    /// 按行盒画底色时选区会跟着变成图那么高。这一条钉的是这两个来源都不参与。
     #[test]
     fn a_selection_band_hugs_the_text_not_the_line_box() {
         let style = RunStyle::new(&ComputedStyle {
@@ -1687,6 +1685,7 @@ mod truth_tables {
                     x_offset: 0.0,
                     baseline_shift: 0.0,
                     fit: ObjectFit::Fill,
+                    hidden: false,
                 }),
                 LineFragment::Text(LineRun {
                     node: 0,

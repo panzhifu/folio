@@ -33,6 +33,209 @@
 /// sprite atlas 的经验值，这里保持同一个数，免得同一张 SVG 在两条路上得到两种尺寸。
 const MAX_EDGE: u32 = 2048;
 
+use crate::css::computed::{ComputedStyle, SvgLineCap, SvgLineJoin, SvgPaint, StyledDom};
+use crate::dom::{Dom, NodeId};
+
+/// 把一段内联 `<svg>` 子树序列化成 `data:image/svg+xml;base64,…` URI。
+///
+/// 出版书里的矢量花边（如 epub-style-demo 的 `19-border-shadow-notes`）把
+/// `fill` / `stroke` 写在 class 的 CSS 里，而 CSS 已经层叠进 `ComputedStyle` ——
+/// 所以呈现属性**从样式取**，不读 DOM 上可能并不存在的 presentation attribute。
+/// 这样 `fill: none` / `stroke-width: 1.8` 这些刚刚接住的声明才真的画得出来，
+/// 而不只是「层叠认得」。
+///
+/// 只认形状节点（`path` / `line` / `circle` / `rect` / `ellipse` / `polyline` /
+/// `polygon`）；含 `<image>` 的 Calibre 封面仍走位图那条路，不在这一层冒充。
+pub fn inline_svg_data_uri(dom: &Dom, node: NodeId, styles: &StyledDom) -> Option<String> {
+    if !dom.is_element(node, "svg") {
+        return None;
+    }
+    // `<image>` 是位图封面：留给 picture_src 那条路。
+    if dom.element_children(node).any(|c| dom.is_element(c, "image")) {
+        return None;
+    }
+    let mut body = String::new();
+    let mut any = false;
+    walk_svg(dom, node, styles, &mut body, &mut any, 0);
+    if !any {
+        return None;
+    }
+    let mut out = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\"");
+    if let Some(view) = dom.attr(node, "viewbox") {
+        out.push_str(" viewBox=\"");
+        out.push_str(&xml_escape(view));
+        out.push('"');
+    }
+    if let Some(par) = dom.attr(node, "preserveaspectratio") {
+        out.push_str(" preserveAspectRatio=\"");
+        out.push_str(&xml_escape(par));
+        out.push('"');
+    }
+    out.push_str(" width=\"100%\" height=\"100%\">");
+    out.push_str(&body);
+    out.push_str("</svg>");
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(out.as_bytes());
+    Some(format!("data:image/svg+xml;base64,{encoded}"))
+}
+
+/// 递归收集一个 `<svg>` 子树里的形状节点。属性的**几何**部分照抄 DOM（作者写在
+/// 标签上的 `d` / `cx` 等），**呈现**部分由 `ComputedStyle` 决定（见
+/// [`inline_svg_data_uri`]）。深度上限比照 DOM 的一般上限收一点，防病态输入。
+fn walk_svg(
+    dom: &Dom,
+    node: NodeId,
+    styles: &StyledDom,
+    out: &mut String,
+    any: &mut bool,
+    depth: usize,
+) {
+    if depth > 64 {
+        return;
+    }
+    let Some(tag) = dom.tag_name(node) else {
+        return;
+    };
+    const SHAPES: &[&str] = &[
+        "path", "line", "circle", "rect", "ellipse", "polyline", "polygon",
+    ];
+    if SHAPES.contains(&tag) {
+        // 取一份克隆而不是借：`styles.get` 没有的节点（很少见）要用默认值，
+        // 而 `&ComputedStyle::default()` 的临时活不到本函数末尾。
+        let style = styles
+            .get(node)
+            .cloned()
+            .unwrap_or_else(ComputedStyle::default);
+        out.push('<');
+        out.push_str(tag);
+        // 几何属性：只抄形状真正用的那几个，避免把 class/id 这类无关属性带过去。
+        const GEOMETRY: &[&str] = &[
+            "d", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "width",
+            "height", "points", "transform",
+        ];
+        for name in GEOMETRY {
+            if let Some(value) = dom.attr(node, name) {
+                out.push(' ');
+                // DOM 的属性名一律小写；这里把 `viewBox` 那种首字母大写的 SVG 拼写补回来。
+                out.push_str(if *name == "viewbox" { "viewBox" } else { name });
+                out.push_str("=\"");
+                out.push_str(&xml_escape(value));
+                out.push('"');
+            }
+        }
+        push_paint(out, "fill", style.svg_fill);
+        push_paint(out, "stroke", style.svg_stroke);
+        out.push_str(" stroke-width=\"");
+        out.push_str(&style.svg_stroke_width.to_string());
+        out.push_str("\" stroke-linecap=\"");
+        out.push_str(match style.svg_stroke_linecap {
+            SvgLineCap::Round => "round",
+            SvgLineCap::Square => "square",
+            SvgLineCap::Butt => "butt",
+        });
+        out.push_str("\" stroke-linejoin=\"");
+        out.push_str(match style.svg_stroke_linejoin {
+            SvgLineJoin::Round => "round",
+            SvgLineJoin::Bevel => "bevel",
+            SvgLineJoin::Miter => "miter",
+        });
+        out.push_str("\"/>");
+        *any = true;
+    }
+    for child in dom.get(node).children.clone() {
+        walk_svg(dom, child, styles, out, any, depth + 1);
+    }
+}
+
+fn push_paint(out: &mut String, name: &str, paint: SvgPaint) {
+    out.push(' ');
+    out.push_str(name);
+    out.push_str("=\"");
+    match paint {
+        SvgPaint::None => out.push_str("none"),
+        SvgPaint::Color(color) if color.3 == 255 => {
+            out.push_str(&format!("#{:02x}{:02x}{:02x}", color.0, color.1, color.2));
+        }
+        SvgPaint::Color(color) => {
+            out.push_str(&format!(
+                "rgba({},{},{},{})",
+                color.0,
+                color.1,
+                color.2,
+                color.3 as f32 / 255.0
+            ));
+        }
+    }
+    out.push('"');
+}
+
+/// XML 属性 escaping：`&` / `<` / `>` / `"` 都得转，否则 path 的 `d` 里出现
+/// `&` 会让 usvg 把整棵 SVG 判成坏 XML，花边整块消失。
+fn xml_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod inline_tests {
+    use super::{inline_svg_data_uri, rasterize};
+    use crate::css::computed::{ComputedStyle, cascade};
+    use crate::css::{Origin, RuleSet};
+    use crate::dom::Dom;
+    use base64::Engine as _;
+
+    /// demo 的花边：<svg> 下两条 <path>，颜色/线宽全写在 class 的 CSS 里。
+    /// 序列化后必须把这三条声明带进 SVG 字节，且字节能被现有栅格化路解出位图。
+    #[test]
+    fn inline_svg_carries_css_paint_and_rasterizes() {
+        let dom = Dom::parse(
+            b"<div><svg class='art' viewBox='0 0 100 40'>              <path class='main' d='M5 5 L95 5'/>              <path class='line' d='M5 20 L95 20'/></svg></div>",
+        );
+        let rules = RuleSet::parse(
+            ".main { fill: none; stroke: #4f4539; stroke-width: 1.8; stroke-linecap: round }             .line { fill: none; stroke: #4f4539; stroke-width: 1.15 }",
+            Origin::Author,
+        );
+        let styles = cascade(&dom, &rules, &ComputedStyle::default(), "");
+        let svg = dom.elements()
+            .find(|(id, _)| dom.is_element(*id, "svg"))
+            .map(|(id, _)| id)
+            .expect("应有内联 svg");
+        let uri = inline_svg_data_uri(&dom, svg, &styles).expect("应序列出 data URI");
+        assert!(uri.starts_with("data:image/svg+xml;base64,"));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(uri.strip_prefix("data:image/svg+xml;base64,").unwrap().as_bytes())
+            .unwrap();
+        let xml = String::from_utf8(bytes.clone()).unwrap();
+        assert!(xml.contains("fill=\"none\""), "fill:none 要进字节：{xml}");
+        assert!(xml.contains("stroke=\"#4f4539\""), "stroke 颜色要进字节：{xml}");
+        assert!(xml.contains("stroke-width=\"1.8\""), "第一行的线宽：{xml}");
+        assert!(xml.contains("stroke-width=\"1.15\""), "第二行的线宽：{xml}");
+        assert!(xml.contains("stroke-linecap=\"round\""), "线端形状：{xml}");
+        let (png, mime) = rasterize(&bytes, Some((400, 160))).expect("应能栅格化");
+        assert_eq!(mime, "image/png");
+        assert!(png.len() > 100, "该画出非空位图");
+    }
+
+    #[test]
+    fn inline_svg_with_only_bitmap_image_is_not_claimed() {
+        let dom = Dom::parse(b"<svg><image href='cover.jpg'/></svg>");
+        let styles = cascade(&dom, &RuleSet::parse("", Origin::Author), &ComputedStyle::default(), "");
+        let svg = dom.elements()
+            .find(|(id, _)| dom.is_element(*id, "svg"))
+            .map(|(id, _)| id).unwrap();
+        assert!(inline_svg_data_uri(&dom, svg, &styles).is_none(), "位图封面不冒充矢量");
+    }
+}
+
 /// 认一认这段字节是不是 SVG。
 ///
 /// **不解析**，只看头部有没有 `<svg`：`usvg` 对非 XML 字节是要报错的，而这条判据落在

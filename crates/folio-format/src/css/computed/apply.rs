@@ -1,27 +1,26 @@
 //! 一条声明如何变成一个计算值：属性分发、简写展开、继承、边框。
-//!
-//! 从 `css::computed` 切出来只因为那台属性分发的 switch 本身就六百行；类型定义与层叠
-//! 入口留在父模块，这里的东西只对整个 `css` 内部开放，不属于对外公开面。
+//! 从 `css::computed` 切出来只因为那台属性分发的 switch 本身就六百行；只对整个 `css` 内部开放。
 
-use std::sync::Arc;
+mod border;
+mod inherit;
+mod values;
+use border::apply_border;
+use values::*;
+pub(crate) use inherit::inherit_from;
 
 use super::{
-    AlignItems, BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
-    BackgroundSize, BackgroundTile, BorderEdge, BorderStyle, BoxSizing, CellVAlign, Color,
-    ComputedStyle, DecorationStyle, Direction, Display, EmphasisPosition, EmphasisStyle,
-    FlexDirection, FlexWrap, GridTrack, Hyphens, InlineVAlign, JustifyContent, KNOWN_UNIMPLEMENTED,
-    Length, ObjectFit, Overflow, Positioning, QuotePair, RubyAlign, RubyPosition, ShadowLayer,
-    TextAlign, TextJustify, Transform, Visibility, WordBreak,
+    AlignItems, BorderStyle, BoxSizing, CellVAlign, ComputedStyle, DecorationStyle, Direction,
+    Display, EmphasisPosition, FlexDirection, FlexWrap, GeneratedContent, Hyphens, InlineVAlign,
+    JustifyContent, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning, RubyAlign,
+    RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify, Visibility, WordBreak,
 };
 use crate::css::Declaration;
 use crate::css::value::{
-    BorderElement, border_target, border_width_px, box_side_px, box_sides, edge_length, four_of,
-    parse_background_image_layer, parse_background_position, parse_background_repeat,
-    parse_background_size, parse_baseline_shift, parse_bleed, parse_border_radius,
-    parse_border_style, parse_break_when, parse_clear, parse_color, parse_count, parse_decoration,
-    parse_float, parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height,
-    parse_list_style, parse_text_shadow, parse_url_token, parse_writing_mode, relative_weight,
-    set_edge, set_length, set_margin, set_min_length, set_px, split_value_tokens,
+    box_side_px, box_sides, edge_length, parse_baseline_shift, parse_bleed, parse_border_radius,
+    parse_break_when, parse_clear, parse_color, parse_count, parse_decoration, parse_float,
+    parse_font_family_list, parse_font_size, parse_font_weight, parse_line_height, parse_list_style,
+    parse_text_shadow, parse_writing_mode, relative_weight, set_edge, set_length, set_margin,
+    set_min_length, set_px,
 };
 
 /// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
@@ -61,13 +60,8 @@ pub(super) fn apply_in_cascade_order(
 /// 元素的 `style="…"` 属性 → 声明列表，按书写顺序（同一属性后面那条盖前面那条）。
 /// 分隔符与声明解析复用样式表入口，容量超限时整份忽略。
 ///
-/// `base_dir` 是**这一章文档**在容器里的目录（`ChapterImages` 手里那一个），进来先走一遍
-/// `absolutize_css_urls`。这一折不是可有可无的整洁：样式表里那句 `url(../Images/x.png)`
-/// 在拼进层叠之前就按 CSS 自己的目录折成了容器内路径，而行内那一份从前**没人折过**，
-/// 于是同一张图在两处是两个形状。症状写在 `layout::tests::index` 那一条真书门上 ——
-/// 哈利波特的七张册扉页写的正是 `<body style="background: url(../Images/v2.jpg)">`：
-/// 图层表里躺着一条 `../Images/v2.jpg`，图片索引按容器路径精确查，查不到，
-/// 屏上仍是「白底上一片看不见的淡金字」，而 CSS 那一侧一切正常、`css-gap` 也报不出问题。
+/// `base_dir` 是这一章文档在容器里的目录；进来先按它把 `url(...)` 折成容器内路径，
+/// 与样式表那一份同形，否则同一张图在两处是两个形状、图片索引按容器路径查不到。
 pub(super) fn parse_inline_style(text: &str, base_dir: &str) -> Vec<Declaration> {
     if !crate::css::budget::allows(text) {
         tracing::warn!("行内 CSS 超过读取预算，忽略此属性");
@@ -78,779 +72,6 @@ pub(super) fn parse_inline_style(text: &str, base_dir: &str) -> Vec<Declaration>
         .into_iter()
         .filter_map(|decl| crate::css::parse_declaration(&decl))
         .collect()
-}
-
-/// 元素节点：可继承属性从父样式带下来，其余从默认值起算。
-///
-/// 可继承的就是下面抄走的这几项 —— font-* / color / text-align / letter-spacing /
-/// text-indent，另有 line-height 也在其中。margin / padding / display 不继承，
-/// 从 `ComputedStyle::default()` 起算。
-pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
-    ComputedStyle {
-        font_size: parent.font_size,
-        line_height: parent.line_height,
-        font_weight: parent.font_weight,
-        font_italic: parent.font_italic,
-        // `font-variant` 在 CSS 里可继承：书里常在 `<body>` 或整段上写一次。
-        small_caps: parent.small_caps,
-        font_family: parent.font_family.clone(),
-        font_families: parent.font_families.clone(),
-        text_align: parent.text_align,
-        // `text-justify` 在 CSS 里可继承：书里在 `<body>` 上写一次 `inter-ideograph`
-        // 就管全书，靠的正是这一行。
-        text_justify: parent.text_justify,
-        image_scale: parent.image_scale,
-        // `direction` 在 CSS 里可继承，而且它是 `start`/`end` 折边的唯一依据，
-        // 所以继承断了就等于整棵子树回到左起 —— RTL 书通常在 `<html>` 或 `<body>`
-        // 上写一次，靠的就是这一行。
-        direction: parent.direction,
-        // `writing-mode` 在 CSS 里同样可继承，理由与上面那一行一模一样：竖排的本子只在
-        // `<html>` 或 `<body>` 上写一次，整棵子树靠这一行拿到那一根推进轴。
-        writing_mode: parent.writing_mode,
-        color: parent.color,
-        // 「在一条链接里」按继承传播：链接里的 `<span>`、`<b>` 与其中的文本都算链接的一部分，
-        // 与下面装饰线那一格同一个理由。它不是 CSS 属性，判据见 `ComputedStyle::link`。
-        link: parent.link,
-        text_indent: parent.text_indent,
-        word_spacing: parent.word_spacing,
-        // 字距在 CSS 里可继承（`letter-spacing` 是 inheritable），书里常在 `<body>` 上写一次。
-        letter_spacing: parent.letter_spacing,
-        // `word-break` 在 CSS 里可继承：书里在 `<body>` 上写一次就管全书。
-        word_break: parent.word_break,
-        // ruby 两条在 CSS 里都可继承：写在 `<ruby>` 上管到里面的 `<rt>`，写在 `<body>`
-        // 上就管全书。落点读的是容器自己那一份，继承断了等于初值兜场。
-        ruby_align: parent.ruby_align,
-        ruby_position: parent.ruby_position,
-        // `border-collapse` 在 CSS 里可继承：写在 `<table>` 上就管到每个格子，
-        // 而合并要**按格**逐边判（见 `Layout::decor_seeds`），所以它得跟着继承下来。
-        border_collapse: parent.border_collapse,
-        // `border-spacing` 同样可继承（CSS 2.1 §17.6.1），且只在 `separate` 下生效。
-        border_spacing: parent.border_spacing,
-        // `text-shadow` 在 CSS 里可继承，书里一般在 `<body>` 或标题规则上写一次就管一片。
-        // 克隆的是一份 `Arc<[TextShadow]>`：没有影子的节点只加一次引用计数。
-        text_shadows: parent.text_shadows.clone(),
-        // `list-style-type` 在 CSS 2.1 里可继承，`<ol>` 的十进制就是靠这一行才落到
-        // 每一个 `<li>` 上的（浏览器 UA 表写的是 `ol { list-style-type: decimal }`）。
-        list_style_type: parent.list_style_type,
-        // `hyphens` 在 CSS 里可继承，写法与 `word_spacing` 同一档：书里通常在
-        // `<body>` 或 `html` 上声明一次「这本书不许在连字符处断行」。
-        hyphens: parent.hyphens,
-        // 可继承的排版属性：white-space / overflow-wrap / text-emphasis / visibility / quotes
-        // 写在 `<body>` 上一次就管全书，靠 inherit_from 这一条链带下去。
-        white_space_nowrap: parent.white_space_nowrap,
-        overflow_wrap_break: parent.overflow_wrap_break,
-        text_emphasis: parent.text_emphasis,
-        text_emphasis_color: parent.text_emphasis_color,
-        text_emphasis_position: parent.text_emphasis_position,
-        visibility: parent.visibility,
-        quotes: parent.quotes,
-        // 装饰线在 CSS 里**不是继承属性**，但会向后代**传播**（`text-decoration: none`
-        // 写在子元素上并不会去掉父元素的下划线，这是那条规则最有名的坑）。对我们的
-        // 行内/块级盒来说，「传播」与「继承」算出来的结果一致，所以这里按继承实现，
-        // 差别只留在原子行内盒（inline-block、图片）上 —— 那种盒一期没有内容会吃到
-        // 父级装饰。
-        underline: parent.underline,
-        line_through: parent.line_through,
-        // 形状与颜色跟着同一条「传播按继承近似」走：子元素只继承了下划线布尔，
-        // 而线还是子元素那份样式画的，不带上这两格就会把波浪线画成实线、红线变字色。
-        decoration_style: parent.decoration_style,
-        decoration_color: parent.decoration_color,
-        // `vertical-align` **不**继承（CSS 规定），所以 `baseline_shift` 不在这里出现：
-        // 上标只该抬高它自己那一小段，而不是让整段正文跟着上浮。
-        // orphans / widows 在 CSS 里是**可继承**的（分片属性里只有这两个继承），
-        // 所以书里在 `<body>` 上写一次就够；`break-*` 不继承，它们是「这一块怎么断」
-        // 而不是「这一带的默认值」。
-        orphans: parent.orphans,
-        widows: parent.widows,
-        ..Default::default()
-    }
-}
-
-/// `font` 简写：`[[style] [weight] size [/ line-height] family]`。
-///
-/// **有意不重置没写到的子属性。** CSS 规定 `font` 会把 `font-variant`、`font-stretch`、
-/// `line-height`、`font-size`… 一律拉回初值，而我们的行距与字重是通过 `root_base`
-/// 从读者偏好走进继承链的：一句 `font: 1em serif` 把读者的 1.75 行距改回 `normal`
-/// 是产品级的错，不是排版细节。除此之外按 CSS：字号支持 `/行距`，
-/// 字族取整条候选链并去引号（与 `font-family` 共用一个解析器）。
-/// `small-caps` / `condensed` / `caption` 这类 token 我们不认，整条作废并计 `ignored`。
-fn apply_font_shorthand(
-    style: &mut ComputedStyle,
-    parent: &ComputedStyle,
-    root_px: f32,
-    value: &str,
-) -> bool {
-    if value.eq_ignore_ascii_case("initial") || value.eq_ignore_ascii_case("unset") {
-        return false;
-    }
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    // 字号是这条声明里唯一的必需项，也是「前面是 style/weight、后面是 family」的分界。
-    let Some(at) = parts.iter().position(|part| {
-        let head = part.split('/').next().unwrap_or(part);
-        parse_font_size(head, parent.font_size, root_px).is_some()
-    }) else {
-        return false;
-    };
-    for part in &parts[..at] {
-        let token = part.to_ascii_lowercase();
-        match token.as_str() {
-            "normal" => {}
-            "italic" | "oblique" => style.font_italic = true,
-            _ => {
-                let Some(weight) = parse_font_weight(&token) else {
-                    return false;
-                };
-                style.font_weight = weight;
-            }
-        }
-    }
-    let size_token = parts[at];
-    let (size_part, leading) = match size_token.split_once('/') {
-        Some((size, leading)) => (size, Some(leading)),
-        None => (size_token, None),
-    };
-    let Some(px) = parse_font_size(size_part, parent.font_size, root_px) else {
-        return false;
-    };
-    style.font_size = px;
-    if let Some(leading) = leading {
-        let Some(lh) = parse_line_height(leading, px, root_px) else {
-            return false;
-        };
-        style.line_height = lh;
-    }
-    // family 可能带空格（`"Times New Roman", serif`），所以把剩下的 token 重新拼回去。
-    let family = parts[at + 1..].join(" ");
-    let list = parse_font_family_list(&family);
-    let Some(first) = list.first().cloned() else {
-        return false;
-    };
-    style.font_family = first;
-    style.font_families = list;
-    true
-}
-
-/// `flex: <grow> <shrink> <basis>` 简写。收 1–3 个 token：
-/// - 单个长度（含 `%`）当 basis，grow=1、shrink=1（`flex: 34%` 的常见写法）；
-/// - 单个数字当 grow，shrink=1、basis=auto（`flex: 1`）；
-/// - `auto` 当 basis=grow=shrink 的初值组合（`flex: auto` → 1 1 auto）；
-/// - 三值形态 `grow shrink basis`，basis 可为长度或 `auto`。
-///
-/// 任一段解析失败整条作废。
-fn apply_flex_shorthand(style: &mut ComputedStyle, own: f32, root_px: f32, value: &str) -> bool {
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.is_empty() || parts.len() > 3 {
-        return false;
-    }
-    let num = |p: &str| -> Option<f32> {
-        let n = p.parse::<f32>().ok()?;
-        (n >= 0.0).then_some(n)
-    };
-    let basis = |p: &str| -> Option<Option<Length>> {
-        if p.eq_ignore_ascii_case("auto") {
-            Some(None)
-        } else {
-            edge_length(p, own, root_px, false).map(Some)
-        }
-    };
-    // 单值：纯数字是 grow（`flex: 2`），带单位/`auto` 才是 basis（`flex: 34%`）。
-    // 必须先判数字 —— `edge_length` 会把裸数字当 px 收下，反过来会把 `flex: 2` 误读成 basis。
-    if parts.len() == 1 {
-        if let Some(g) = num(parts[0]) {
-            style.flex_grow = g;
-            style.flex_shrink = 1.0;
-            style.flex_basis = None;
-            return true;
-        }
-        if let Some(b) = basis(parts[0]) {
-            style.flex_grow = 1.0;
-            style.flex_shrink = 1.0;
-            style.flex_basis = b;
-            return true;
-        }
-        return false;
-    }
-    // 两/三值：第一段 grow，第二段 shrink，第三段 basis（缺省 auto）。
-    let grow = match num(parts[0]) {
-        Some(v) => v,
-        None => return false,
-    };
-    let shrink = match num(parts[1]) {
-        Some(v) => v,
-        None => return false,
-    };
-    let basis_val = if parts.len() == 3 {
-        match basis(parts[2]) {
-            Some(v) => v,
-            None => return false,
-        }
-    } else {
-        None
-    };
-    style.flex_grow = grow;
-    style.flex_shrink = shrink;
-    style.flex_basis = basis_val;
-    true
-}
-
-/// `transform`：只收会建立层叠上下文、绘制侧能兑现的 2D 基本型。
-/// `none` 清掉变换；`translate(x, y)` 与 `scale(s, [sy])` 各折一份。
-/// 其余（rotate / matrix / 3D）整条判不认识，如实计入 ignored。
-fn apply_transform(style: &mut ComputedStyle, own: f32, root_px: f32, value: &str) -> bool {
-    let v = value.trim();
-    if v.eq_ignore_ascii_case("none") {
-        style.transform = None;
-        return true;
-    }
-    let lower = v.to_ascii_lowercase();
-    // CSS 允许逗号或空白分隔函数参数（`translate(2px, 3px)` / `translate(2px 3px)`），
-    // 逗号统一成空白再切，两种写法都收。
-    let args = |inner: &str| -> Vec<String> {
-        inner
-            .replace(',', " ")
-            .split_whitespace()
-            .map(str::to_string)
-            .collect()
-    };
-    if let Some(inner) = lower
-        .strip_prefix("translate(")
-        .and_then(|s| s.strip_suffix(')'))
-    {
-        let parts = args(inner);
-        if parts.is_empty() || parts.len() > 2 {
-            return false;
-        }
-        let x = match edge_length(&parts[0], own, root_px, false) {
-            Some(v) => v,
-            None => return false,
-        };
-        let y = if parts.len() == 2 {
-            match edge_length(&parts[1], own, root_px, false) {
-                Some(v) => v,
-                None => return false,
-            }
-        } else {
-            Length::ZERO
-        };
-        style.transform = Some(Transform::Translate(x, y));
-        return true;
-    }
-    if let Some(inner) = lower
-        .strip_prefix("scale(")
-        .and_then(|s| s.strip_suffix(')'))
-    {
-        let parts = args(inner);
-        if parts.is_empty() || parts.len() > 2 {
-            return false;
-        }
-        let sx = match parts[0].parse::<f32>() {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let sy = if parts.len() == 2 {
-            match parts[1].parse::<f32>() {
-                Ok(v) => v,
-                Err(_) => return false,
-            }
-        } else {
-            sx
-        };
-        style.transform = Some(Transform::Scale(sx, sy));
-        return true;
-    }
-    false
-}
-
-/// `text-emphasis` 简写：`<style> [color] [position]`，这里只收 style 段与颜色段。
-fn apply_text_emphasis(style: &mut ComputedStyle, value: &str) -> bool {
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.is_empty() {
-        return false;
-    }
-    let mut consumed_color = false;
-    apply_text_emphasis_style(style, parts[0]);
-    for part in &parts[1..] {
-        if let Some(c) = parse_color(part) {
-            style.text_emphasis_color = Some(c);
-            consumed_color = true;
-        } else {
-            match part.to_ascii_lowercase().as_str() {
-                "under" => style.text_emphasis_position = EmphasisPosition::Under,
-                "over" => style.text_emphasis_position = EmphasisPosition::Over,
-                _ => {}
-            }
-        }
-    }
-    let _ = consumed_color;
-    // 首段必须能被认成 style（含 none）。
-    matches!(
-        parts[0].to_ascii_lowercase().as_str(),
-        "none" | "filled" | "open" | "dot" | "circle" | "double-circle" | "triangle" | "sesame"
-    )
-}
-
-fn apply_text_emphasis_style(style: &mut ComputedStyle, value: &str) -> bool {
-    let low = value.to_ascii_lowercase();
-    let emphasis = match low.as_str() {
-        "none" => EmphasisStyle::None,
-        "filled" | "filled dot" | "dot" => EmphasisStyle::FilledDot,
-        "open" | "open dot" => EmphasisStyle::OpenDot,
-        "filled circle" | "circle" => EmphasisStyle::FilledCircle,
-        "triangle" | "filled triangle" => EmphasisStyle::Triangle,
-        "sesame" | "filled sesame" => EmphasisStyle::Sesame,
-        _ => return false,
-    };
-    style.text_emphasis = emphasis;
-    true
-}
-
-/// `box-shadow`: 逗号分隔的多层，每层 `[inset] <dx> <dy> [blur] [color]`。
-fn apply_box_shadow(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
-    if value.trim().eq_ignore_ascii_case("none") {
-        style.box_shadows = Arc::from(Vec::new());
-        return true;
-    }
-    let layers = crate::css::selector::split_top_level(value, ',');
-    if layers.is_empty() {
-        return false;
-    }
-    let mut out = Vec::with_capacity(layers.len());
-    for layer in layers {
-        let tokens = split_value_tokens(layer.trim());
-        if tokens.len() < 2 {
-            return false;
-        }
-        let mut inset = false;
-        let mut nums = Vec::new();
-        let mut color = None;
-        for token in &tokens {
-            if token.eq_ignore_ascii_case("inset") {
-                inset = true;
-                continue;
-            }
-            if let Some(length) = edge_length(token, own, root_px, false) {
-                nums.push(length.resolve(own)); // em 按本元素字号折
-                continue;
-            }
-            if let Some(c) = parse_color(token) {
-                color = Some(c);
-                continue;
-            }
-            return false;
-        }
-        if nums.len() < 2 {
-            return false;
-        }
-        out.push(ShadowLayer {
-            dx: nums[0],
-            dy: nums[1],
-            blur: nums.get(2).copied().unwrap_or(0.0),
-            inset,
-            color,
-        });
-    }
-    style.box_shadows = Arc::from(out);
-    true
-}
-
-/// `outline: <width> <style> <color>`。宽度不占几何，绘制时画在边框盒外。
-fn apply_outline(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
-    if value.trim().eq_ignore_ascii_case("none") {
-        style.outline = None;
-        return true;
-    }
-    let tokens = split_value_tokens(value.trim());
-    let mut width = 0.0f32;
-    let mut border_style = BorderStyle::Solid;
-    let mut color = None;
-    let mut got_width = false;
-    let mut got_style = false;
-    for token in &tokens {
-        let low = token.to_ascii_lowercase();
-        // style 与 width 各自独立判（`1px solid red` 里 solid 在 1px 之后）。
-        if !got_style && parse_border_style(&low).is_some_and(|s| s != BorderStyle::None) {
-            border_style = parse_border_style(&low).unwrap();
-            got_style = true;
-            continue;
-        }
-        if !got_width && matches!(low.as_str(), "thin" | "medium" | "thick") {
-            width = match low.as_str() {
-                "thin" => 1.0,
-                "thick" => 3.0,
-                _ => 2.0,
-            };
-            got_width = true;
-            continue;
-        }
-        if !got_width && let Some(l) = edge_length(&low, own, root_px, false) {
-            width = l.resolve(own);
-            got_width = true;
-            continue;
-        }
-        if let Some(c) = parse_color(token) {
-            color = Some(c);
-            continue;
-        }
-        return false;
-    }
-    if !got_width {
-        width = 2.0; // medium
-    }
-    match &mut style.outline {
-        Some((_, _, _, offset)) => {
-            let offset = *offset;
-            style.outline = Some((width, color, border_style, offset));
-        }
-        None => style.outline = Some((width, color, border_style, 0.0)),
-    }
-    true
-}
-
-/// `quotes: "「" "」" "『" "』"` —— 1 或 2 对开合字符。
-fn apply_quotes(style: &mut ComputedStyle, value: &str) -> bool {
-    if value.trim().eq_ignore_ascii_case("none") {
-        style.quotes = None;
-        return true;
-    }
-    let parts = crate::css::selector::split_top_level(value, ' ');
-    let chars: Vec<char> = parts
-        .iter()
-        .filter_map(|p| {
-            let t = p.trim().trim_matches('"').trim_matches('\'');
-            t.chars().next()
-        })
-        .collect();
-    if chars.len() < 2 {
-        return false;
-    }
-    let pair = QuotePair {
-        open: chars[0],
-        close: chars[1],
-    };
-    let outer = if chars.len() >= 4 {
-        QuotePair {
-            open: chars[2],
-            close: chars[3],
-        }
-    } else {
-        pair
-    };
-    style.quotes = Some([outer, pair]);
-    true
-}
-
-/// `grid-template-columns`: 空格分隔的轨道（px/%/fr/minmax(N,M)/auto）。
-fn apply_grid_tracks(style: &mut ComputedStyle, value: &str, own: f32, root_px: f32) -> bool {
-    if value.trim().eq_ignore_ascii_case("none") {
-        style.grid_template_columns = Arc::from(Vec::new());
-        return true;
-    }
-    let tokens = split_value_tokens(value.trim());
-    let mut tracks = Vec::with_capacity(tokens.len());
-    for token in &tokens {
-        let low = token.to_ascii_lowercase();
-        if low == "auto" {
-            tracks.push(GridTrack::Auto);
-            continue;
-        }
-        if let Some(fr) = low
-            .strip_suffix("fr")
-            .and_then(|s| s.trim().parse::<f32>().ok())
-        {
-            tracks.push(GridTrack::Fr(fr));
-            continue;
-        }
-        if low.starts_with("minmax(") && low.ends_with(')') {
-            let inner = &low[7..low.len() - 1];
-            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
-            if parts.len() != 2 {
-                return false;
-            }
-            let min = edge_length(parts[0], own, root_px, false).unwrap_or(Length::Px(0.0));
-            // max 一侧可能是 `1fr` / `max-content` / 普通长度。
-            if let Some(fr) = parts[1]
-                .strip_suffix("fr")
-                .and_then(|s| s.trim().parse::<f32>().ok())
-            {
-                tracks.push(GridTrack::MinMaxFr(min, fr));
-                continue;
-            }
-            let max = if parts[1] == "max-content" {
-                Length::Px(1e6)
-            } else {
-                match edge_length(parts[1], own, root_px, false) {
-                    Some(b) => b,
-                    None => return false,
-                }
-            };
-            tracks.push(GridTrack::MinMax(min, max));
-            continue;
-        }
-        match edge_length(&low, own, root_px, false) {
-            Some(l) => tracks.push(GridTrack::Length(l)),
-            None => return false,
-        }
-    }
-    style.grid_template_columns = Arc::from(tracks);
-    true
-}
-
-/// 一条背景长手属性（`background-size` 那一族）的**图层列表**：按顶层逗号切，
-/// 每层各解一次。`url(a,b)` 里那个逗号在括号内，`split_top_level` 切不进去。
-/// 任何一层解不出就整条判不认识 —— 把六层里的第三层悄悄丢掉，屏上看不出原因。
-fn background_layer_list<T>(value: &str, parse: impl Fn(&str) -> Option<T>) -> Option<Vec<T>> {
-    let parts = crate::css::selector::split_top_level(value, ',');
-    if parts.is_empty() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(parts.len());
-    for part in parts {
-        let part = part.trim();
-        if part.is_empty() {
-            return None;
-        }
-        out.push(parse(part)?);
-    }
-    Some(out)
-}
-
-fn parse_background_image_list(value: &str) -> Option<Vec<Option<String>>> {
-    background_layer_list(value, |part| {
-        // 一层只有一个图源 token；`url(a) url(b)` 那种多写是非法值。
-        let tokens = split_value_tokens(part);
-        if tokens.len() != 1 {
-            return None;
-        }
-        parse_background_image_layer(&tokens[0])
-    })
-}
-
-/// `background-size` 长手的一层列表。em/rem 按本元素字号折（`own`），交给 [`edge_length`]。
-fn parse_background_size_list(value: &str, own: f32, root_px: f32) -> Option<Vec<BackgroundSize>> {
-    background_layer_list(value, |part| {
-        parse_background_size_fonted(part, own, root_px)
-    })
-}
-
-/// 单层 `background-size`，em/rem 已按字号折。`auto` / `cover` / `contain` 与百分比/px 同旧语义。
-fn parse_background_size_fonted(value: &str, own: f32, root_px: f32) -> Option<BackgroundSize> {
-    let parts = split_value_tokens(value);
-    if parts.is_empty() || parts.len() > 2 {
-        return None;
-    }
-    let axis = |t: &str| -> Option<Option<Length>> {
-        let low = t.to_ascii_lowercase();
-        if low == "auto" {
-            return Some(None);
-        }
-        Some(Some(edge_length(&low, own, root_px, false)?))
-    };
-    if parts.len() == 1 {
-        let low = parts[0].to_ascii_lowercase();
-        return match low.as_str() {
-            "cover" => Some(BackgroundSize::Cover),
-            "contain" => Some(BackgroundSize::Contain),
-            "auto" => Some(BackgroundSize::Auto),
-            _ => Some(BackgroundSize::Explicit {
-                width: Some(edge_length(&low, own, root_px, false)?),
-                height: None,
-            }),
-        };
-    }
-    Some(BackgroundSize::Explicit {
-        width: axis(&parts[0])?,
-        height: axis(&parts[1])?,
-    })
-}
-
-fn parse_background_position_list(value: &str) -> Option<Vec<BackgroundPosition>> {
-    background_layer_list(value, parse_background_position)
-}
-
-fn parse_background_repeat_list(value: &str) -> Option<Vec<BackgroundRepeat>> {
-    background_layer_list(value, parse_background_repeat)
-}
-
-fn parse_background_attachment_list(value: &str) -> Option<Vec<BackgroundAttachment>> {
-    background_layer_list(value, |part| match part.to_ascii_lowercase().as_str() {
-        "scroll" => Some(BackgroundAttachment::Scroll),
-        "fixed" => Some(BackgroundAttachment::Fixed),
-        "local" => Some(BackgroundAttachment::Local),
-        _ => None,
-    })
-}
-
-/// 把一条**长手**列表铺到图层表上：图层数取历史值与这条列表长度的较大者，
-/// 短的那一条从头循环。
-///
-/// 循环是规范定的，不是顺手写的：`background-image: url(a), url(b)` 配
-/// `background-repeat: no-repeat`（只有一个值），CSS 要的是两层都不重复。
-/// 只把值给第一层、第二层落回初值 `repeat`，症状是第二张图在扉页上铺成一片马赛克。
-fn for_each_layer(
-    style: &mut ComputedStyle,
-    count: usize,
-    mut set: impl FnMut(&mut BackgroundLayer, usize),
-) {
-    while style.background_layers.len() < count {
-        style.background_layers.push(BackgroundLayer::default());
-    }
-    for (index, layer) in style.background_layers.iter_mut().enumerate() {
-        set(layer, index % count);
-    }
-}
-
-/// `background` 简写切出来的**一层**：摆法三件 + 这一层里那条颜色（可无）。
-struct BackgroundLayerSpec {
-    layer: BackgroundLayer,
-    color: Option<Color>,
-}
-
-/// 解简写的一层。语法是 `<'bg-image'> || <'bg-position'> [/ <'bg-size'>] || <repeat-style>
-/// || <'bg-clip'> || <'box'> || <'color'>`，各项次序随意。
-///
-/// 认不出的走法：**只把这一层判失败**，由调用方让整条声明作废。分类靠「这个 token
-/// 是不是某种已知值」而不是靠位置，因为出版书里两种次序都见得到
-/// （`background: #f4f7f1 url(p0.png) no-repeat bottom right` 色在前，
-/// `background: url(x) repeat center` 色也在前，而 `background: center url(x)` 图在后）。
-fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerSpec> {
-    if text.is_empty() || text.eq_ignore_ascii_case("initial") || text.eq_ignore_ascii_case("unset")
-    {
-        return None;
-    }
-    // 尺寸挂在第一个顶层 `/` 后面：`center / cover`、`0 0/50% auto`。
-    // 「顶层」= 跳过引号与括号，所以路径里那一串斜杠（`OEBPS/Images/v1.jpg`）不会被当成分隔符。
-    let (main, size_part) = split_first_top_level(text, '/');
-    let mut layer = BackgroundLayer::default();
-    let mut color = None;
-    let mut position: Vec<String> = Vec::new();
-    let mut image_seen = false;
-    for token in split_value_tokens(main) {
-        let low = token.to_ascii_lowercase();
-        if low == "none" {
-            // 作者明确「这一层不要图」：`image` 留在 `None`，但这一层算已经写过图。
-            if image_seen {
-                return None;
-            }
-            image_seen = true;
-            continue;
-        }
-        if let Some(path) = parse_url_token(&token) {
-            if image_seen {
-                // 一层里两个图源（`url(a) url(b)`）是非法值。
-                return None;
-            }
-            layer.image = Some(path);
-            image_seen = true;
-            continue;
-        }
-        if let Some((x, y)) = repeat_keyword_pair(&low) {
-            layer.repeat.x = x;
-            layer.repeat.y = y;
-            continue;
-        }
-        // attachment 与 clip / origin：都收下来（clip / origin 只按边框盒摆，见
-        // `apply` 那一臂的注释）。这里负责**吃掉那个 token**，不让它掉进
-        // 「剩下的都是位置」那一桶里被解成一条非法坐标。
-        if matches!(low.as_str(), "scroll" | "fixed" | "local") {
-            layer.attachment = match low.as_str() {
-                "fixed" => BackgroundAttachment::Fixed,
-                "local" => BackgroundAttachment::Local,
-                _ => BackgroundAttachment::Scroll,
-            };
-            continue;
-        }
-        if matches!(low.as_str(), "border-box" | "padding-box" | "content-box") {
-            continue;
-        }
-        if let Some(rgba) = parse_color(&low) {
-            color = Some(rgba);
-            continue;
-        }
-        position.push(low);
-    }
-    if !position.is_empty() {
-        layer.position = parse_background_position(&position.join(" "))?;
-    }
-    layer.size = match size_part {
-        Some(part) => parse_background_size(part)?,
-        None => BackgroundSize::default(),
-    };
-    Some(BackgroundLayerSpec { layer, color })
-}
-
-/// 在第一个**顶层**分隔符处把值切成两半（尺寸那一截可能是空串，但存在）。
-///
-/// 不复用 `split_top_level` 再拼回去：那条只管切、不给字节位，靠「先切再拿 `find` 找回原串」
-/// 定位，分隔符本身出现在值里（路径的斜杠、引号内的空格）就会指到错的那一处。
-fn split_first_top_level(text: &str, sep: char) -> (&str, Option<&str>) {
-    let mut depth = 0i32;
-    let mut quote: Option<char> = None;
-    for (index, ch) in text.char_indices() {
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => quote = Some(ch),
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            c if c == sep && depth <= 0 => {
-                let head = text[..index].trim();
-                let tail = text[index + c.len_utf8()..].trim();
-                return (head, Some(tail));
-            }
-            _ => {}
-        }
-    }
-    (text.trim(), None)
-}
-
-/// `background` 简写：一层一条，全表重建。
-fn apply_background_shorthand(style: &mut ComputedStyle, value: &str) -> bool {
-    let parts = crate::css::selector::split_top_level(value, ',');
-    if parts.is_empty() {
-        return false;
-    }
-    // 先把每一层解完，**全解得开才动手改表**。反过来的后果是这条声明明明被 judged
-    // 不认识、计进了 ignored，却已经顺手把上一轮的底色与图层抹了个干净 ——
-    // 「作废的声明不许有副作用」是层叠的一条硬规矩，`apply_font_shorthand` 也是这么写的。
-    let mut parsed = Vec::with_capacity(parts.len());
-    for part in &parts {
-        let Some(spec) = parse_background_layer_spec(part.trim()) else {
-            return false;
-        };
-        parsed.push(spec);
-    }
-    // 简写先把每一条长手拉回初值（CSS 明文）。不重置的后果很具体：
-    // 转换器常写的 `.a{background:url(x) center/cover}` 后面再跟一条 `.a{background:#fff}`，
-    // 不重置就是白底**叠在图上**、扉页那张底图变成灰蒙蒙一片。
-    style.background_color = None;
-    style.background_layers.clear();
-    // 颜色归最底那一层（= 书写顺序的最后一条）。写在中间层上的色在浏览器里就是这个下场。
-    let mut color = None;
-    for BackgroundLayerSpec { layer, color: c } in parsed {
-        if c.is_some() {
-            color = c;
-        }
-        style.background_layers.push(layer);
-    }
-    style.background_color = color;
-    true
-}
-
-/// 一个铺法关键字当成「两轴一起写」的那一档；`repeat-x` / `repeat-y` 只能这么出现。
-fn repeat_keyword_pair(low: &str) -> Option<(BackgroundTile, BackgroundTile)> {
-    match low {
-        "repeat" => Some((BackgroundTile::Repeat, BackgroundTile::Repeat)),
-        "no-repeat" => Some((BackgroundTile::NoRepeat, BackgroundTile::NoRepeat)),
-        "repeat-x" => Some((BackgroundTile::Repeat, BackgroundTile::NoRepeat)),
-        "repeat-y" => Some((BackgroundTile::NoRepeat, BackgroundTile::Repeat)),
-        "space" => Some((BackgroundTile::Space, BackgroundTile::Space)),
-        "round" => Some((BackgroundTile::Round, BackgroundTile::Round)),
-        _ => None,
-    }
 }
 
 /// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。
@@ -1875,6 +1096,35 @@ pub(super) fn apply(
         }
         // ---- quotes（两对开合字符）----
         "quotes" => apply_quotes(style, value),
+        // `content`：生成盒的文字。open-quote/close-quote 在 cascade 里按继承的
+        // quotes 折成字面字符（见 `computed::cascade`），这里先记下意图。
+        "content" => {
+            let low = value.trim().to_ascii_lowercase();
+            let content = match low.as_str() {
+                "none" | "normal" => Some(GeneratedContent::None),
+                "open-quote" => Some(GeneratedContent::OpenQuote),
+                "close-quote" => Some(GeneratedContent::CloseQuote),
+                _ => {
+                    // 一段带引号的字面量：`"●"` / `'x'`。去首尾引号后取全部字符。
+                    let t = value.trim();
+                    if t.len() >= 2
+                        && ((t.starts_with('"') && t.ends_with('"'))
+                            || (t.starts_with('\'') && t.ends_with('\'')))
+                    {
+                        Some(GeneratedContent::Literal(t[1..t.len() - 1].to_string()))
+                    } else {
+                        None
+                    }
+                }
+            };
+            match content {
+                Some(content) => {
+                    style.content = content;
+                    true
+                }
+                None => false,
+            }
+        }
         // ---- grid-template-columns（轨道定义）----
         "grid-template-columns" => apply_grid_tracks(style, value, own, root_px),
         "grid-column" | "grid-row" => {
@@ -1903,6 +1153,63 @@ pub(super) fn apply(
                 true
             }
             None => false,
+        },
+        // ---- SVG 呈现属性。CSS 的 `fill` 与 `object-fit` 的 `fill` 值同名，但这里
+        //      分发的是属性名，不冲突。只在序列化内联 `<svg>` 时消费。 ----
+        "fill" | "stroke" => {
+            let paint = if value.eq_ignore_ascii_case("none") {
+                Some(SvgPaint::None)
+            } else {
+                parse_color(value).map(SvgPaint::Color)
+            };
+            match paint {
+                Some(paint) => {
+                    if decl.property == "fill" {
+                        style.svg_fill = paint;
+                    } else {
+                        style.svg_stroke = paint;
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+        "stroke-width" => match value.trim_end_matches("px").trim().parse::<f32>() {
+            Ok(width) if width >= 0.0 => {
+                style.svg_stroke_width = width;
+                true
+            }
+            _ => false,
+        },
+        "stroke-linecap" => match value.to_ascii_lowercase().as_str() {
+            "butt" => {
+                style.svg_stroke_linecap = SvgLineCap::Butt;
+                true
+            }
+            "round" => {
+                style.svg_stroke_linecap = SvgLineCap::Round;
+                true
+            }
+            "square" => {
+                style.svg_stroke_linecap = SvgLineCap::Square;
+                true
+            }
+            _ => false,
+        },
+        "stroke-linejoin" => match value.to_ascii_lowercase().as_str() {
+            "miter" => {
+                style.svg_stroke_linejoin = SvgLineJoin::Miter;
+                true
+            }
+            "round" => {
+                style.svg_stroke_linejoin = SvgLineJoin::Round;
+                true
+            }
+            "bevel" => {
+                style.svg_stroke_linejoin = SvgLineJoin::Bevel;
+                true
+            }
+            _ => false,
         },
         // `word-break`：只认 `normal` 与 `break-all`。`keep-all` 判不认识（见 [`WordBreak`]）。
         "word-break" => match value.to_ascii_lowercase().as_str() {
@@ -2035,120 +1342,4 @@ pub(super) fn apply(
     }
 }
 
-/// 边框一族的一条声明 → 写进 `style.border`。入口是 [`apply`] 里那条 `border` 前缀分支。
-fn apply_border(
-    style: &mut ComputedStyle,
-    property: &str,
-    value: &str,
-    own: f32,
-    root_px: f32,
-) -> bool {
-    let Some((side, element)) = border_target(property) else {
-        return false;
-    };
-    // 按**函数与括号外**的空白切：`border: 1px solid rgba(0, 0, 0, 0.8)` 里的空格属于
-    // 颜色函数，`split_whitespace` 会把它切成 `rgba(0,` / `0,` / `0,` —— `rgba` 那种写法
-    // 于是整条判不认识（诡秘那本 37 个元素）。与样式表解析用的是同一把切法。
-    let parts = crate::css::value::split_value_tokens(value);
-    if parts.is_empty() {
-        return false;
-    }
-    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-    // `border-top-width: 1px 2px` 这种是错的：边已经定死一条，值只能有一个。
-    if side.is_some() && element != BorderElement::All && parts.len() != 1 {
-        return false;
-    }
-    // 这条声明落到哪几条边上（`None` = 四条都要）。
-    let targets: [usize; 4] = match side {
-        Some(ix) => [ix, ix, ix, ix],
-        None => [0, 1, 2, 3],
-    };
-    match element {
-        // 简写把三要素**全部**写一遍：缺的那一项按 CSS 初值重置，而不是保持原样。
-        // 书里 `border: 2px` 因此等于「宽 2px、样式 none、颜色 currentColor」，
-        // 而样式是 none 就没有边可画（`BorderEdge::drawn` 随之给 0）—— 这是那条规则
-        // 最有名的坑，照抄比「看起来更合理」的保留原样要对。
-        BorderElement::All => {
-            let mut width = 3.0; // `medium`
-            let mut line = BorderStyle::None;
-            let mut color = None;
-            for part in &parts {
-                if let Some(px) = border_width_px(part, own, root_px) {
-                    width = px;
-                } else if let Some(kind) = parse_border_style(part) {
-                    line = kind;
-                } else if part.eq_ignore_ascii_case("transparent")
-                    || part.eq_ignore_ascii_case("currentcolor")
-                {
-                    // 两者在 `BorderEdge::color` 里是同一个记号 `None`（绘制层取这一块自己的
-                    // `color`）。`currentColor` 从前没被认，于是 `border-top: currentColor
-                    // none 0` 整条被丢掉 —— 《世界简史》5 个元素正是这么写的。
-                    // `transparent` 严格说该是「有边但不画」，这里也折进 `None`：
-                    // 边框色本来就没有 alpha 通道，画出来是实色，比丢掉整条更错。
-                    color = None;
-                } else if let Some(parsed) = parse_color(part) {
-                    color = Some(parsed);
-                } else {
-                    return false;
-                }
-            }
-            for ix in targets {
-                style.border[ix] = BorderEdge {
-                    width,
-                    style: line,
-                    color,
-                };
-            }
-            true
-        }
-        // 边框宽度走 px 版：CSS 的 `<border-width>` 不接受百分比，`box_side_px` 里
-        // 百分比折不出就整条作废，与另外三条边的 `<line-width>` 关键字一起判。
-        BorderElement::Width => match box_side_px(value, own, root_px) {
-            Some(each) => {
-                for ix in targets {
-                    style.border[ix].width = each[ix];
-                }
-                true
-            }
-            None => false,
-        },
-        BorderElement::Style => {
-            let mut each = Vec::with_capacity(parts.len());
-            for part in &parts {
-                match parse_border_style(part) {
-                    Some(kind) => each.push(kind),
-                    None => return false,
-                }
-            }
-            let Some(sides) = four_of(&each) else {
-                return false;
-            };
-            for ix in targets {
-                style.border[ix].style = sides[ix];
-            }
-            true
-        }
-        BorderElement::Color => {
-            let mut each = Vec::with_capacity(parts.len());
-            for part in &parts {
-                if part.eq_ignore_ascii_case("transparent")
-                    || part.eq_ignore_ascii_case("currentcolor")
-                {
-                    each.push(None);
-                } else {
-                    match parse_color(part) {
-                        Some(color) => each.push(Some(color)),
-                        None => return false,
-                    }
-                }
-            }
-            let Some(sides) = four_of(&each) else {
-                return false;
-            };
-            for ix in targets {
-                style.border[ix].color = sides[ix];
-            }
-            true
-        }
-    }
-}
+

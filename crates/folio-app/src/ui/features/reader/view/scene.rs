@@ -1,11 +1,8 @@
 //! 排版结果 → 绘制单元：把一段排版 y 覆盖到的行，摊成一批「已定好基线」的
 //! [`GlyphRun`] 与若干绝对摆位的图片。
 //!
-//! 从 [`crate::ui::features::reader::view::body`] 里抽出来的是**纯计算**：几何全部来自
-//! 排版层，这里只加三个偏移 —— 左边这一栏的 `x`（版心在窗口里的位置）、向上的
-//! `origin_y`（这一片的起点）、以及 `top`（页眉那条带子占掉的高度，正文从它下面开始
-//! 画）。不带任何 gpui 元素，只有 `GlyphRun`（它本身是个数据 struct），所以这一层
-//! 能在宿主上被 `cargo test` 跑、也能被别的摆法复用（连续滚动整章一条，分页/双页逐片）。
+//! 这是**纯计算**：几何全部来自排版层，这里只加三个屏幕偏移（栏 left、起点 origin_y、
+//! 页眉 top）。不带 gpui 元素，只有数据 [`GlyphRun`]，故能在宿主上跑 `cargo test`。
 
 use std::ops::Range;
 
@@ -425,6 +422,10 @@ impl Scene {
             for fragment in row.iter() {
                 match fragment {
                     RowFragment::Text(unit) => {
+                        // `visibility: hidden|collapse`：照常占位但绘制跳过；子级 visible 已在样式层折好。
+                        if unit.hidden {
+                            continue;
+                        }
                         runs.push(
                             GlyphRun::new(
                                 unit.text.clone(),
@@ -476,6 +477,9 @@ impl Scene {
                         );
                     }
                     RowFragment::Image(placed) => {
+                        if placed.hidden {
+                            continue;
+                        }
                         // 图片交给 gpui 自己的 `img` 元素画（纹理上传由它负责），
                         // 底贴基线：盒顶 = 基线 − 图高。解不出资源的 `<img>` 留位不画。
                         //
@@ -600,21 +604,13 @@ impl Scene {
     }
 }
 
-/// 把装饰短表按可见带裁一刀，再落三个平移数与主题前景。
+/// 把 `Layout::decor_seeds` 折好的装饰短表按可见带裁一刀，落平移数与主题前景。
+/// 不再走整章块表（那会每帧每章扫 160~600+ 块）；每帧只剩四件带「此刻」的事：
+/// 可见区间、滚动、主题色、随图片索引变的背景图固有尺寸（故不烘进表）。
 ///
-/// 表是 `Layout::decor_seeds` 在每次拿到新一代排版结果时折一次的（`Document::apply_typeset`），
-/// 所以这里**不再走整章的块表** —— 那一趟从前是每帧、链上每个进链的章各一次
-/// （一份语料一章 160 块、长章 600+）。
-/// 剩下来的这四件事确实必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、
-/// 主题色（主题不许烘进表 —— 那四条硬约束的），以及
-/// **背景图的固有尺寸**（它随图片索引变，`set_images` 会 bump `images_rev`，烘进
-/// `Layout::decor_seeds` 那张表就是第二个真相 —— 与 `RowImage` 只存 `href` 同一条理由）。
-///
-/// 相交判据与原式逐字一致（横排那条是 `y + height < start || y > end`，竖排换成物理 x），
-/// 而且**只能整表扫**：块是嵌套的，父盒的 `y + height` 远大于紧随其后的子盒，所以
-/// 「与一条带相交的那些块是连续下标区间」这个前提在块上不成立 —— `Layout::stacked`
-/// 那一格是为行盒量的，搬过来会悄悄漏画底色。这张表短（只有真带装饰的块），
-/// 短是它的代价低，不是它被二分了 —— 漏了这条前提的活证据就是下面那条高盒测试。
+/// 判据逐字沿用原式，且**只能整表扫**：块是嵌套的，父盒 `y+height` 远大于子盒，
+/// 「相交块是连续下标」这个前提在块上不成立（`Layout::stacked` 是为行盒量的）。
+/// 表短（只有真带装饰的块）是代价低，不是被二分 —— 高盒测试就是这条前提的活证据。
 #[allow(clippy::too_many_arguments)] // 九个都是「这一帧」的输入，包成结构体只是换个地方摆
 fn place_decorations(
     seeds: &[DecorSeed],

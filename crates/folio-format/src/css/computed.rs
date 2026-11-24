@@ -6,8 +6,14 @@
 //! [`KNOWN_UNIMPLEMENTED`]（认得、这一版不生效）。清单外的声明**被忽略而不是报错**，
 //! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
 //! 是最糟的失败方式。
+mod cascade;
+mod types;
+mod types2;
+pub use cascade::cascade;
+pub use types2::{Hyphens, BreakWhen, Color, SvgPaint, SvgLineCap, SvgLineJoin};
+pub use types::{BackgroundLayer, BackgroundAttachment, BackgroundSize, BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundRepeat, BackgroundTile, BoxSizing, Float, Clear};
 
-use crate::dom::{Dom, NodeId, NodeKind};
+use crate::dom::NodeId;
 use std::sync::Arc;
 
 use super::{Declaration, RuleSet};
@@ -16,7 +22,7 @@ mod apply;
 
 // `inherit_from` 原本就是 `pub(crate)`，`css::ua` 从这条路径取它，所以这里必须是再导出而非私有导入。
 pub(crate) use apply::inherit_from;
-use apply::{apply, apply_in_cascade_order, parse_inline_style};
+use apply::{apply, parse_inline_style};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAlign {
@@ -190,7 +196,7 @@ impl WritingMode {
 /// **CJK 汉字的 Bidi_Class 是 `L`**，所以中文段落在第一个字就上定下来，不必扫完全文。
 ///
 /// 表用 `unicode-bidi`（锁里本来就有那一份，理由写在根 `Cargo.toml`），自己不抄那七千行区间。
-fn first_strong_direction(text: &str) -> Option<Direction> {
+pub(super) fn first_strong_direction(text: &str) -> Option<Direction> {
     use unicode_bidi::BidiClass::{AL, L, R};
     text.chars()
         .find_map(|ch| match unicode_bidi::bidi_class(ch) {
@@ -501,172 +507,6 @@ impl BorderEdge {
     }
 }
 
-/// 背景图的一层：`background-image` 的一个 `url()` 加上与它**配对**的摆法三件。
-///
-/// 存的是 CSS 侧的原始数，一块背景图真正落在哪、多大要等排版期拿到盒尺寸才算得出
-/// （`cover` / `contain` / 百分比都要读那一个盒），所以这里不带任何 px 结果。
-///
-/// **图不在这里取**：`href` 是容器内的绝对路径（样式表拼进层叠前已由
-/// `content::format::absolutize_css_urls` 把 `../Images/a.png` 折算成 `OEBPS/Images/a.png`
-/// 并去掉引号），字节与固有尺寸每帧现问图片索引 —— 与行内图片 `RowImage::href`
-/// 同一个口径，理由也同一条：那两样随图片索引变，烘进这张表就是第二个真相。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct BackgroundLayer {
-    /// `None` = 这一层是 `background-image: none`（作者明确不要图），不是「没写过」。
-    pub image: Option<String>,
-    pub size: BackgroundSize,
-    pub position: BackgroundPosition,
-    pub repeat: BackgroundRepeat,
-    /// `background-attachment`。绘制一律按 `scroll`（图跟着纸走），这一格只有
-    /// `fixed` 在**章节根**上被排版层读：浏览器里那是铺满视口画布的整页底图，
-    /// 所以这一章至少占一屏高（见 `layout::layout_inner`）。挂在普通块上的 `fixed`
-    /// 仍与 `scroll` 同效 —— 流式排版里没有「钉在视口」的对应物。
-    pub attachment: BackgroundAttachment,
-}
-
-/// `background-attachment`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub enum BackgroundAttachment {
-    #[default]
-    Scroll,
-    /// 只看根章节这一格：铺满视口的整页底图，章节至少一屏高。
-    Fixed,
-    /// 跟着块的滚动区走；流式块没有自己的滚动区，按 `scroll` 摆。
-    Local,
-}
-
-/// `background-size`。
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum BackgroundSize {
-    /// 初值：图按固有尺寸摆，两轴都不缩。
-    #[default]
-    Auto,
-    /// 缩到**刚好装下**整张图（留白可见）。
-    Contain,
-    /// 缩到**盖满**这个盒（多出来的那一部分裁掉）。
-    Cover,
-    /// 一到两个显式长度／百分比；`None` 那一轴就是 `auto`。
-    /// 百分比按**这个盒**的对应轴折，不是按包含块 —— 与 `width` 那一族不同源是有意的，
-    /// CSS 规定 `background-size` 的基准是背景定位区（我们一律取边框盒）。
-    Explicit {
-        width: Option<Length>,
-        height: Option<Length>,
-    },
-}
-
-/// 一轴的摆法。`Fraction` 单独一档是因为 CSS 的百分比在这里的基准**不是盒宽**：
-/// `background-position: 25%` 说的是「图的 25% 处对齐盒的 25% 处」，
-/// 于是余量（盒宽 − 图宽）乘那个分数，`0%` 贴起始边、`100%` 贴结束边。
-/// 把它折成「盒宽的分数」会在图比盒大时把图推出可视区。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BackgroundAxis {
-    /// 关键字档（`left`/`top` = Start，`center` = Center，`right`/`bottom` = End），
-    /// 后面那条偏移是 `right 10px` 那种写法：从这一边再往里推。
-    Edge(BackgroundEdge, Option<Length>),
-    /// 一条长度（px / em / rem），从起始边量。
-    Length(Length),
-    /// CSS 的百分比：按「盒减图」那段余量的分数，`50%` 存成 `0.5`。
-    Fraction(f32),
-}
-
-/// `background-position` 落在哪一边。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackgroundEdge {
-    Start,
-    Center,
-    End,
-}
-
-/// `background-position` 的两轴。单值写法（`center`）在解析期就把另一轴补成 `Center`，
-/// 所以这里不带 `Option`。初值见下面那条手写的 `Default`。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BackgroundPosition {
-    pub x: BackgroundAxis,
-    pub y: BackgroundAxis,
-}
-
-impl Default for BackgroundPosition {
-    /// CSS 初值是 `0% 0%`（两条规范版本都写作 `left top`），不是 `center`。
-    fn default() -> Self {
-        Self {
-            x: BackgroundAxis::Edge(BackgroundEdge::Start, None),
-            y: BackgroundAxis::Edge(BackgroundEdge::Start, None),
-        }
-    }
-}
-
-/// `background-repeat` 的两轴。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct BackgroundRepeat {
-    pub x: BackgroundTile,
-    pub y: BackgroundTile,
-}
-
-/// 一个轴上的铺法。CSS 初值两轴都是 `repeat`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BackgroundTile {
-    #[default]
-    Repeat,
-    /// 铺满那一轴，隙缝均摊（不裁剪图）。
-    Space,
-    /// 铺满那一轴，整张图跟着缩放（会改纵横比）。
-    Round,
-    NoRepeat,
-}
-
-/// 作者写的那个尺寸**含不含**边框与内边距，即 CSS 的 `box-sizing`。
-///
-/// 只有两档：`content-box` 是 CSS 初值也是这一族从前唯一的行为；`border-box` 是出版书与
-/// 转换器实际写的那一档（插图框、色带标题、`padding` 不为 0 的定宽分隔条）。
-/// `padding-box`（css3-ui，Firefox 收）有意**不认**，判「不认识」而不是当成 `border-box`：
-/// 那一档要把边框留着只扣内边距，而扣错的表现是「盒子宽了边框那几像素」，比一条明确的
-/// 「不认识」难查。`min-*` 与 `max-*` 跟着同一格走 —— 分开判就成了两份「谁含谁不含」的定义。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum BoxSizing {
-    /// 初值：作者写的数是内容盒，边框与内边距在**外面**加。
-    #[default]
-    ContentBox,
-    /// 作者写的数已经含边框与内边距。
-    BorderBox,
-}
-
-/// `float`：盒子贴到所在块的哪一侧，后面的行带在它旁边让出宽度。
-///
-/// CSS 3 的 `inline-start` / `inline-end` / `float-inherit` 不接（判不认识）：那三个
-/// 要的是「方向敏感的左右」，而我们这一族里唯一真实的写法（出版书的插图与章首下沉）
-/// 都写死 `left` / `right`。
-///
-/// 落地分两条路，行内盒那一条只走了一半，这里说清：
-///
-/// - **块级盒**（UA 判成 block 的 `<div>` / `<p>` …）走 `layout::collect::place_float`，
-///   真的离开常规流。它的宽认两档：作者写了 `width`（`.muen .left { width:20%; float:left }`），
-///   或整块内容就是一张图（`div.img1` 那一族）。两档都对不上时按不浮动排。
-///   max-content 那种 shrink-to-fit 还没做 —— 猜宽会把整页正文挤成一条窄柱。
-/// - **行内盒**（`<span class=first>` 那种章首下沉）只有**站在这一段第一片**时才生效：
-///   `wrap_lines` 把它收成下沉盒（`Ctx::drop_cap`），按它自己的宽高跨几行让宽。
-///   落在段中或段尾的行内浮动不认 —— 那要的是「行内盒改判成块、并从行内流里摘出去」
-///   那一步（CSS 的 used-value 规则），动的是 `children` 的整条分流，比这一格大。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Float {
-    #[default]
-    None,
-    Left,
-    Right,
-}
-
-/// `clear`：这一块（的行盒）不许与哪一侧的浮动盒并排，于是往下挪到它们的下缘。
-///
-/// `left` / `right` 是真的按那一侧算的，不是都折成 `both`：那会让「右边还空着」
-/// 的写法白白多挪一段。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Clear {
-    #[default]
-    None,
-    Left,
-    Right,
-    Both,
-}
-
 impl ComputedStyle {
     /// 四条边各自在盒模型里占多宽，顺序 `[上, 右, 下, 左]`。
     ///
@@ -712,69 +552,6 @@ impl ComputedStyle {
         }
     }
 }
-
-/// 连字符相关的折行意图，来自 `hyphens`（含 EPUB 的 `-epub-` / `-webkit-` 前缀写法）。
-///
-/// 一期没有连字词典，所以 `Auto` 与 `Manual` 的**行为**相同：都只在已有的连字符处断，
-/// 不会把 `sais` 拆成 `sa-is`。差别留在「作者的意图有没有被记下来」——词典接上时不用
-/// 回头改书的样式表。这条边界记在 CSS 的忽略清单里。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Hyphens {
-    /// CSS 初值：已有连字符可断，不主动造连字符。
-    #[default]
-    Manual,
-    /// 连字符**不是**断点：`je-ne-sais-quoi` 整个留着。
-    None,
-    /// 请求词典连字；一期按 `Manual` 执行。
-    Auto,
-}
-
-/// 分片（分页 / 分栏）时的断点意图。
-///
-/// `Left` / `Right` 会补出空片占位，「双页对开」的左右页才不会错位；
-/// `Always` 是 CSS2.1 的旧写法，与 `Page` 同义 —— 老 EPUB 里满地都是，
-/// 认不出它就等于把这些书的作者意图丢掉。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BreakWhen {
-    /// 没有声明：由剩余可用高度决定。
-    #[default]
-    Auto,
-    Page,
-    Left,
-    Right,
-    Always,
-    /// `page-break-*: avoid` / `break-*: avoid`：尽量别在这断。不是强制断，
-    /// 所以 `is_forced()` 为假；分片器在「块能整块放下」时尊重它（见 fragment.rs）。
-    Avoid,
-}
-
-impl BreakWhen {
-    /// 是不是「强制断在这里」的意图。`Auto` 与 `Avoid` 都不是。
-    pub fn is_forced(self) -> bool {
-        matches!(self, Self::Page | Self::Left | Self::Right | Self::Always)
-    }
-
-    /// 是不是「尽量别在这断」的意图。分片器据此在放得下时避免切开。
-    pub fn is_avoid(self) -> bool {
-        matches!(self, Self::Avoid)
-    }
-
-    /// 强制断之后应当落在哪一侧。`None` = 不关心奇偶。
-    pub fn parity(self) -> Option<bool> {
-        match self {
-            Self::Left => Some(false),
-            Self::Right => Some(true),
-            _ => None,
-        }
-    }
-}
-
-/// 一个 CSS 颜色：RGBA 四通道。
-///
-/// 第四格是 alpha（0 = 全透明，255 = 不透明）。出版书里 `rgba(80, 70, 86, .7)`
-/// 这类半透明底色很常见（多看系的「人物志」框就是），丢掉 alpha 会把底图完全盖死。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Color(pub u8, pub u8, pub u8, pub u8);
 
 /// 一个尺寸值。`none` 用 `Option::None` 表示。百分比不在此刻折算 —— 它要按**包含块
 /// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。
@@ -1083,6 +860,13 @@ pub struct ComputedStyle {
     pub visibility: Visibility,
     /// `table-layout: fixed`：表格用固定列宽算法。不继承。
     pub table_layout_fixed: bool,
+    /// SVG 呈现属性（可继承）。只在序列化内联 `<svg>` 子树时消费：
+    /// `fill`/`stroke` 的颜色或 `none`、`stroke-width`（用户单位）、线端与折角形状。
+    pub svg_fill: SvgPaint,
+    pub svg_stroke: SvgPaint,
+    pub svg_stroke_width: f32,
+    pub svg_stroke_linecap: SvgLineCap,
+    pub svg_stroke_linejoin: SvgLineJoin,
     /// `text-size-adjust` / `-webkit-text-size-adjust`：阅读器字号提示（100% = 不缩放）。
     pub text_size_adjust: Option<f32>,
     /// `grid-template-columns` 的轨道定义与 `quotes`（均可继承 quotes、grid 轨道不继承）。
@@ -1259,6 +1043,41 @@ pub struct ComputedStyle {
     /// 以后 `font-family` 的候选链、字距这些加进来不用再动这里。
     /// 排版层拿它给首字符单成一个 run，并据此决定它压住几行（`layout` 里的 `drop_cap`）。
     pub first_letter: Option<Box<ComputedStyle>>,
+    /// `content` 声明：生成盒的文字从哪来。只对带 `::before` / `::after` 规则的元素有意义。
+    pub content: GeneratedContent,
+    /// `::before` / `::after` 各自算出来的那一份样式（含 `content`）。
+    /// `None` = 这条伪元素没写过规则，不生成盒。
+    pub before: Option<Box<ComputedStyle>>,
+    pub after: Option<Box<ComputedStyle>>,
+}
+
+/// `content` 声明的取值。生成字符没有 DOM 节点，派生出来的 run 把 `orig` 设为所属
+/// 元素的零长字节区间，因而不会移动选区、命中与进度的锚点。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum GeneratedContent {
+    #[default]
+    None,
+    /// `content: "字面文字"`，去引号后的字符串。
+    Literal(String),
+    /// `content: open-quote` / `close-quote`：按继承的 [`ComputedStyle::quotes`] 取字符。
+    OpenQuote,
+    CloseQuote,
+}
+
+/// 把 open-quote / close-quote 按 `quotes` 折成字面字符。没有 quotes 表时
+/// 生成盒不产生字符（与浏览器「quotes: none 时 open-quote 为空」一致）。
+pub(crate) fn resolve_generated(content: GeneratedContent, quotes: Option<[QuotePair; 2]>) -> GeneratedContent {
+    match content {
+        GeneratedContent::OpenQuote => quotes
+            .and_then(|q| q.last().copied())
+            .map(|pair| GeneratedContent::Literal(pair.open.to_string()))
+            .unwrap_or(GeneratedContent::None),
+        GeneratedContent::CloseQuote => quotes
+            .and_then(|q| q.last().copied())
+            .map(|pair| GeneratedContent::Literal(pair.close.to_string()))
+            .unwrap_or(GeneratedContent::None),
+        other => other,
+    }
 }
 
 impl Default for ComputedStyle {
@@ -1311,6 +1130,11 @@ impl Default for ComputedStyle {
             overflow_wrap_break: false,
             visibility: Visibility::default(),
             table_layout_fixed: false,
+            svg_fill: SvgPaint::Color(Color(0, 0, 0, 255)),
+            svg_stroke: SvgPaint::None,
+            svg_stroke_width: 1.0,
+            svg_stroke_linecap: SvgLineCap::default(),
+            svg_stroke_linejoin: SvgLineJoin::default(),
             text_size_adjust: None,
             grid_template_columns: Arc::from(Vec::new()),
             quotes: None,
@@ -1359,6 +1183,9 @@ impl Default for ComputedStyle {
             widows: 2,
             hyphens: Hyphens::Manual,
             first_letter: None,
+            content: GeneratedContent::None,
+            before: None,
+            after: None,
         }
     }
 }
@@ -1499,6 +1326,11 @@ impl std::hash::Hash for ComputedStyle {
         self.overflow_wrap_break.hash(h);
         (self.visibility as u8).hash(h);
         self.table_layout_fixed.hash(h);
+        self.svg_fill.hash(h);
+        self.svg_stroke.hash(h);
+        self.svg_stroke_width.to_bits().hash(h);
+        (self.svg_stroke_linecap as u8).hash(h);
+        (self.svg_stroke_linejoin as u8).hash(h);
         self.text_size_adjust.map(f32::to_bits).hash(h);
         self.grid_template_columns.len().hash(h);
         for track in self.grid_template_columns.iter() {
@@ -1610,6 +1442,16 @@ impl std::hash::Hash for ComputedStyle {
             Some(inner) => {
                 1u8.hash(h);
                 inner.hash(h);
+            }
+        }
+        self.content.hash(h);
+        for pseudo in [&self.before, &self.after] {
+            match pseudo {
+                None => 0u8.hash(h),
+                Some(inner) => {
+                    1u8.hash(h);
+                    inner.hash(h);
+                }
             }
         }
     }
@@ -1795,153 +1637,6 @@ impl StyledDom {
 /// 量具漏计一个形状，比引擎少接一个属性更坏：它会让「已经接住了」这个读数本身失真。
 pub fn inline_declarations(text: &str, base_dir: &str) -> Vec<Declaration> {
     parse_inline_style(text, base_dir)
-}
-
-/// 层叠整棵树。`root_base` 是读者偏好折算出来的根样式（字号、行距、字体等）。
-///
-/// `base_dir` 是**这一份文档**在容器里的目录（EPUB 就是 `OEBPS/Text` 那一段），
-/// 只被一件事用到：把元素 `style="…"` 里的 `url(...)` 折成容器内路径 ——
-/// 样式表那一侧早就由 `content::format::absolutize_css_urls` 折过了，两边必须同一个形状，
-/// 判据写在 `apply::parse_inline_style` 的注释上。用不到那一件事的调用方传空串即可。
-pub fn cascade(dom: &Dom, rules: &RuleSet, root_base: &ComputedStyle, base_dir: &str) -> StyledDom {
-    let mut styles = vec![root_base.clone(); dom.nodes.len()];
-    let mut ignored = 0usize;
-
-    // 先序遍历：算任一节点时它的父样式必定已算完，继承只需往上走一步。
-    for id in document_order(dom) {
-        let node = dom.get(id);
-        let parent = match node.parent {
-            Some(p) => styles[p as usize].clone(),
-            None => root_base.clone(),
-        };
-        if node.kind != NodeKind::Element {
-            // 文本节点没有选择器可言，直接沿用父元素算完的样式。
-            styles[id as usize] = parent;
-            continue;
-        }
-        // 空标签名命中不到任何 UA 规则，等价于「只继承」。
-        let mut style = crate::css::ua::seed(&parent, dom.tag_name(id).unwrap_or_default());
-        // 「在一条链接里」这一格来自 DOM 而不是样式表（判据与理由见 [`ComputedStyle::link`]）：
-        // 空 `href`（`<a name="x">` 那种老式锚点）不算链接 —— 它点不动，染蓝等于骗读者。
-        if dom.is_element(id, "a")
-            && dom
-                .attr(id, "href")
-                .is_some_and(|href| !href.trim().is_empty())
-        {
-            style.link = true;
-        }
-        // HTML 的 `dir="rtl|ltr"` 是一条**呈现提示**（presentational hint）：优先级在作者
-        // 样式表之下、UA 默认之上，所以落在 `apply_in_cascade_order` 之前 —— 作者真写了
-        // `direction` 就把这一格盖掉。RTL 的书在 EPUB 里几乎都靠根元素这一个属性标注，
-        // 只认样式表等于整本不认：出版工具很少往 RTL 书里另外写 `direction` 声明。
-        //
-        // `auto` 有意不当 RTL 用（也不当 LTR 用 —— 它就落回继承值）。那档要按「第一个强
-        // 方向字符」判，而我们没有那份字符表：`unicode-bidi` 只在依赖图里（gpui 的文本栈
-        // 带进来的），没转成直接依赖。猜错的方向比不猜更难查，所以宁可少接一档。
-        if let Some(dir) = dom.attr(id, "dir") {
-            match dir.trim().to_ascii_lowercase().as_str() {
-                "ltr" => style.direction = Direction::Ltr,
-                "rtl" => style.direction = Direction::Rtl,
-                "auto" => {
-                    // `auto` 要**看内容**才能定：第一个强方向字符是哪一边。判得出就订下来，
-                    // 一个强方向字符都没有就留继承值 —— 「不知道」不等于「左」。
-                    // 这一档常见到不能不做：聊天与社媒导出的 HTML 给每一段写 `<p dir="auto">`。
-                    if let Some(found) = first_strong_direction(&dom.text_of_subtree(id)) {
-                        style.direction = found;
-                    }
-                }
-                _ => {}
-            }
-        }
-        // `<img width="40%" height="300">` 与 `dir` 同属 HTML 的呈现提示：落在作者样式
-        // 之前，作者（或行内 `style`）真写了 `width` / `height` 就把它盖掉。老书给插图
-        // 定尺寸几乎全靠这两个属性，只认样式表等于整条丢掉（《哈利·波特》作者简介页
-        // 的 `<img width="40%">` 就是这么被无视、按固有宽顶满版心的）。
-        // 只认 `<img>`：SVG 的 `width` / `height` 是几何属性，走 `svg_aspect` 那条路。
-        if dom.is_element(id, "img") {
-            for (attr, field) in [("width", &mut style.width), ("height", &mut style.height)] {
-                if let Some(length) = dom.attr(id, attr).and_then(parse_dimension_attribute) {
-                    *field = Some(length);
-                }
-            }
-        }
-        let decls = rules.matching_declarations(dom, id);
-        // 元素的 `style="…"`。CSS 把它排在「作者普通声明」之上、`!important` 那两档之下：
-        // 整份追加到最后会让行内普通声明盖掉书里的 `color: red !important`，
-        // 放在最前又等于作者的行内样式没有优先权。
-        // `matching_declarations` 已经按层叠级别从低到高排好，而**普通声明全在重要声明
-        // 之前**，所以按 `important` 一刀切成两半，中间插入行内那两半，就是那个位置。
-        let inline = dom
-            .attr(id, "style")
-            .map(|text| parse_inline_style(text, base_dir))
-            .unwrap_or_default();
-        let mut ordered: Vec<&Declaration> = Vec::with_capacity(decls.len() + inline.len());
-        ordered.extend(decls.iter().filter(|d| !d.important));
-        ordered.extend(inline.iter().filter(|d| !d.important));
-        ordered.extend(inline.iter().filter(|d| d.important));
-        ordered.extend(decls.iter().filter(|d| d.important));
-
-        ignored += apply_in_cascade_order(&mut style, &parent, root_base.font_size, &ordered);
-
-        // 居中不缩：`text-indent` 只缩首行，居中时它会把整行推离中线（半个缩进）。
-        // 无论是读者注入的（《未来简史》扉页的出版社，2em 让整行右偏 1em），还是
-        // 作者自己写在内联样式里的（同一页的副标题 `text-indent:2em`），结果都是
-        // 「看起来没居中」。居中是展示文字的决定，首行缩进是正文段落的，两者同时
-        // 出现几乎总是转换工具留下的，按居中优先处理。标题那一档在 UA seed 里也归零。
-        if style.text_align == TextAlign::Center {
-            style.text_indent = Length::ZERO;
-        }
-
-        // `::first-letter`：首字符的盒要等这个元素自己算完才能起算（`3em` 的基准
-        // 就是它），所以放在后面。一份都没命中时留 `None`，排版层因此完全不走下沉那条路。
-        let cap_decls = rules.matching_first_letter(dom, id);
-        if !cap_decls.is_empty() {
-            let mut cap = style.clone();
-            // `parent` 传的是**这个元素自己**：`::first-letter` 的父盒就是它，
-            // 所以 `font-size: 3em` 的 em 按段落自己的字号折，不是按段落的父。
-            ignored += apply_in_cascade_order(&mut cap, &style, root_base.font_size, &cap_decls);
-            style.first_letter = Some(Box::new(cap));
-        }
-        styles[id as usize] = style;
-    }
-    StyledDom { styles, ignored }
-}
-
-fn document_order(dom: &Dom) -> Vec<NodeId> {
-    let mut out = Vec::with_capacity(dom.nodes.len());
-    let mut stack = vec![dom.document];
-    while let Some(id) = stack.pop() {
-        out.push(id);
-        let children = dom.get(id).children.clone();
-        stack.extend(children.iter().rev().copied());
-    }
-    out
-}
-
-/// HTML 尺寸属性（`<img width="40%" height="300">`）→ [`Length`]。
-///
-/// 不走 CSS 的长度表：这两个属性的值是「非负整数或百分比」，单位后缀按 HTML 的尺寸
-/// 解析规则被忽略 —— 浏览器实测 `width="400px"` 是 400px、`width="2em"` 是 2px。
-/// 百分比照收（HTML 3.2 起就这么写，浏览器一直认），进 [`Length::Percent`]，
-/// 等排版期按包含块宽折。
-///
-/// `%` 判的是**数字前缀后面紧跟的那一个字符**，不是整串的末尾：浏览器量完数字只看
-/// 下一格是不是 `%`，其后还剩什么一概不管。多看导出的《藩屏》封面页就写着
-/// `width="100%;"`（百分号后拖一条分号），按「整串以 % 结尾」判会落进像素那一支，
-/// 把 100% 读成 100px —— 1230×1756 的封面在手机上因此只画出 100×143 一小块。
-/// 现在这一条与浏览器同解：100% 折成栏宽，封面铺满。
-fn parse_dimension_attribute(value: &str) -> Option<Length> {
-    let v = value.trim();
-    let end = v
-        .char_indices()
-        .find(|(_, ch)| !ch.is_ascii_digit() && *ch != '.')
-        .map_or(v.len(), |(ix, _)| ix);
-    let n: f32 = v[..end].parse().ok()?;
-    if v[end..].starts_with('%') {
-        Some(Length::Percent(n / 100.0))
-    } else {
-        Some(Length::Px(n))
-    }
 }
 
 #[cfg(test)]

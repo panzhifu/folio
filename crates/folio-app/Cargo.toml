@@ -29,6 +29,8 @@ debug-ui = []
 
 [dependencies]
 folio-core.workspace = true
+# 内联 SVG 花边序列化成 data URI 后在这里解回字节。
+base64.workspace = true
 # 水墨模式需重建 image::Frame，移动离屏分享也使用图像编码。
 image.workspace = true
 qrcode.workspace = true

@@ -5,11 +5,11 @@
 //!
 //! 范围就是 `computed/apply.rs` 里那批 match 臂（属性名 → 计算样式的哪几个字段），
 //! 加上 `computed.rs` 里那份 `KNOWN_UNIMPLEMENTED`（认得、这一版不生效）。
-//! 清单外的声明**被忽略而不是报错**，
-//! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
-//! 是最糟的失败方式。
+//! 清单外的声明**被忽略而不是报错**：为一两个 `transform` 让整本书排版失败是最糟的失败方式。
 
 mod budget;
+mod font_face;
+mod media;
 pub mod color;
 pub mod computed;
 pub mod selector;
@@ -18,6 +18,9 @@ pub mod ua;
 pub(crate) mod value;
 
 pub use color::Rgba8;
+pub use font_face::{FontFaceRule, FontSrc};
+pub use media::MediaCondition;
+pub(crate) use media::{MediaDecision, media_decision};
 pub use settings::ImageScale;
 
 use crate::dom::{Dom, NodeId};
@@ -47,217 +50,6 @@ pub struct Rule {
     /// 这条规则所在的 `@media` 宽度条件。`None` = 无条件。条件要等读者视口宽
     /// （[`RuleSet::retain_for_viewport`]）才知道成不成立；解析期不替视口做决定。
     pub media: Option<MediaCondition>,
-}
-
-/// 一条 `@media` 里**能判**的那部分：逗号列表任一成立即命中。
-///
-/// 只判 `width` / `min-width` / `max-width`（`device-width` 同义）。`orientation`、
-/// `color`、`hover` 这些判不了的条件按成立处理 —— 与从前「判不了照收」同一条降级，
-/// 不能因为手机上没有陀螺仪就把整块版面丢掉。
-///
-/// `alternatives` 为空表示这条 `@media` 里没有可判条件（`screen`、`all`、`print`
-/// 已在解析期处理完），永远成立。
-#[derive(Debug, Clone, PartialEq)]
-pub struct MediaCondition {
-    alternatives: Vec<MediaRange>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct MediaRange {
-    min: Option<f32>,
-    max: Option<f32>,
-}
-
-impl MediaCondition {
-    /// 视口宽（CSS px，逻辑像素）下这条条件成不成立。边界按 CSS 的闭区间。
-    pub fn matches(&self, viewport_px: f32) -> bool {
-        self.alternatives.is_empty()
-            || self.alternatives.iter().any(|range| {
-                range.min.is_none_or(|min| viewport_px >= min)
-                    && range.max.is_none_or(|max| viewport_px <= max)
-            })
-    }
-
-    /// 嵌套 `@media` 是交集：两条条件的可选区间两两组合。
-    fn and(&self, other: &Self) -> Self {
-        if self.alternatives.is_empty() {
-            return other.clone();
-        }
-        if other.alternatives.is_empty() {
-            return self.clone();
-        }
-        let mut alternatives = Vec::new();
-        for a in &self.alternatives {
-            for b in &other.alternatives {
-                alternatives.push(MediaRange {
-                    min: match (a.min, b.min) {
-                        (Some(x), Some(y)) => Some(x.max(y)),
-                        (x, y) => x.or(y),
-                    },
-                    max: match (a.max, b.max) {
-                        (Some(x), Some(y)) => Some(x.min(y)),
-                        (x, y) => x.or(y),
-                    },
-                });
-            }
-        }
-        Self { alternatives }
-    }
-}
-
-/// `@media` 的判定结果。宽度条件不能在解析期判定，只能原样挂到规则上。
-enum MediaDecision {
-    /// 全是要打印的查询：整块丢掉（与从前一样记入诊断）。
-    Skip,
-    /// 没有可判条件（或含 `screen` / `all`）：照收，不挂条件。
-    Always,
-    Conditional(MediaCondition),
-}
-
-/// 把 `@media` 后面的查询串折成「跳过 / 无条件 / 宽度条件」。
-///
-/// 查不了的类型与特性一律按成立处理：本机没有哪个阅读器能判 `hover` / `pointer`，
-/// 按不成立会把一整块响应式版面直接删掉。真正能判的只有宽度。
-fn media_decision(query: &str) -> MediaDecision {
-    let mut alternatives = Vec::new();
-    let mut unconditional = false;
-    for part in split_top_level(query, ',') {
-        let low = part.trim().to_ascii_lowercase();
-        if low.is_empty() {
-            unconditional = true;
-            continue;
-        }
-        // `not screen` 是「非屏幕」，`not print` 才是要给阅读器的；`only` 只是
-        // 给老浏览器的噪音。
-        let (negated, rest) = match low.strip_prefix("not ") {
-            Some(rest) => (true, rest.trim_start()),
-            None => (false, low.as_str()),
-        };
-        let rest = rest.strip_prefix("only ").unwrap_or(rest).trim_start();
-        let type_end = rest
-            .find(|c: char| c.is_whitespace() || c == '(')
-            .unwrap_or(rest.len());
-        let media_type = &rest[..type_end];
-        let rest = rest[type_end..].trim_start();
-        match media_type {
-            "print" => {
-                if !negated {
-                    continue;
-                }
-                unconditional = true;
-                continue;
-            }
-            // 不认识的媒体类型（`speech` 之类）判不了，照收。
-            "" | "screen" | "all" => {
-                // `not` 后面跟了真类型才是「非这个媒体」；`not (min-width…)`
-                // 是否定整个条件，本版不判，落回「照收」。
-                if negated && !media_type.is_empty() {
-                    continue;
-                }
-            }
-            _ => {
-                unconditional = true;
-                continue;
-            }
-        }
-
-        let mut range = MediaRange {
-            min: None,
-            max: None,
-        };
-        let mut saw_width = false;
-        let mut tail = rest;
-        while let Some(open) = tail.find('(') {
-            let Some(close) = tail[open..].find(')').map(|at| open + at) else {
-                break;
-            };
-            let feature = &tail[open + 1..close];
-            tail = &tail[close + 1..];
-            let Some((name, value)) = feature.split_once(':') else {
-                continue;
-            };
-            let Some(px) = media_length_px(value.trim()) else {
-                continue;
-            };
-            match name.trim() {
-                "min-width" | "min-device-width" => {
-                    range.min = Some(range.min.map_or(px, |known| known.max(px)));
-                    saw_width = true;
-                }
-                "max-width" | "max-device-width" => {
-                    range.max = Some(range.max.map_or(px, |known| known.min(px)));
-                    saw_width = true;
-                }
-                "width" | "device-width" => {
-                    range.min = Some(px);
-                    range.max = Some(px);
-                    saw_width = true;
-                }
-                _ => {}
-            }
-        }
-        if saw_width {
-            alternatives.push(range);
-        } else {
-            // 这一段只剩判不了的条件（`orientation` 等），按成立处理。
-            unconditional = true;
-        }
-    }
-    if unconditional {
-        MediaDecision::Always
-    } else if alternatives.is_empty() {
-        MediaDecision::Skip
-    } else {
-        MediaDecision::Conditional(MediaCondition { alternatives })
-    }
-}
-
-/// `@media` 里的长度：只收 px / em / rem。`em` 在媒体查询里相对**初始字号**
-/// （16px），不是正文当前字号 —— 用它折正文的 `em` 会随读者调字号把断点一起拖走。
-fn media_length_px(value: &str) -> Option<f32> {
-    let value = value.trim();
-    if let Some(v) = value.strip_suffix("px") {
-        return v.trim().parse().ok();
-    }
-    if let Some(v) = value.strip_suffix("rem") {
-        return v.trim().parse::<f32>().ok().map(|n| n * 16.0);
-    }
-    if let Some(v) = value.strip_suffix("em") {
-        return v.trim().parse::<f32>().ok().map(|n| n * 16.0);
-    }
-    None
-}
-
-/// `@font-face` 的一条声明。**只存声明，不存字节** —— 字节由 `format` 那层按
-/// `src` 里的容器路径去读，CSS 这层不该知道 ZIP 的存在。
-#[derive(Debug, Clone, PartialEq)]
-pub struct FontFaceRule {
-    /// `font-family` 描述符，已去引号。一条 `@font-face` 写了逗号列表时**每个名字一条**。
-    pub family: String,
-    /// `src`，按书写顺序，第一个是首选。
-    pub src: Vec<FontSrc>,
-    /// `font-weight`。写了区间（`400 700`）取第一个值。缺省 400。
-    pub weight: u16,
-    /// `font-style`：`italic` / `oblique` 为 `Some(true)`，`normal` 为 `Some(false)`，
-    /// **没写是 `None`**，不等于 `normal` —— 没写时书的意图是「这套字体的常规面」，
-    /// 而注册进来的内部名自己带面信息。
-    pub italic: Option<bool>,
-}
-
-/// `src` 描述符里的一项。`format()` / `tech()` 这些修饰下一个来源的函数认得但不影响
-/// 来源本身，解析时跳过。
-#[derive(Debug, Clone, PartialEq)]
-pub enum FontSrc {
-    /// 容器内的规范路径。EPUB 的 CSS 在拼接前把 `url(../Fonts/a.otf)` 改写成了绝对路径
-    /// （见 `format::epub`），所以这里的串可以直接当查表键。
-    Url(String),
-    /// 设备上已装的字体名：只查注册名单，不注册字节。
-    Local(String),
-    /// 设备上的字体文件（`res://…` / `file://…` / `/system/fonts/…`）。
-    ///
-    /// 字节不随书来，也读不到：只拿文件名去设备已注册的家族里找同一张脸
-    /// （见 `BookFonts::for_document`）。http(s) 之类的来源仍然整条丢掉。
-    System(String),
 }
 
 /// 层叠级别，从低到高。
@@ -559,6 +351,24 @@ impl RuleSet {
         node: crate::dom::NodeId,
     ) -> Vec<&Declaration> {
         self.matched_in(dom, node, Some(selector::PseudoElement::FirstLetter))
+    }
+
+    /// 命中该元素、且声明属于它 `::before` / `::after` 生成盒的那一份。
+    /// 与 [`Self::matching_first_letter`] 同一条层叠序，三条路径不会分叉。
+    pub fn matching_before(
+        &self,
+        dom: &crate::dom::Dom,
+        node: crate::dom::NodeId,
+    ) -> Vec<&Declaration> {
+        self.matched_in(dom, node, Some(selector::PseudoElement::Before))
+    }
+
+    pub fn matching_after(
+        &self,
+        dom: &crate::dom::Dom,
+        node: crate::dom::NodeId,
+    ) -> Vec<&Declaration> {
+        self.matched_in(dom, node, Some(selector::PseudoElement::After))
     }
 
     fn matched_in(
@@ -1082,7 +892,7 @@ fn matching_brace(text: &str) -> Option<usize> {
     None
 }
 
-fn split_top_level(text: &str, sep: char) -> Vec<String> {
+pub(crate) fn split_top_level(text: &str, sep: char) -> Vec<String> {
     selector::split_top_level(text, sep)
 }
 

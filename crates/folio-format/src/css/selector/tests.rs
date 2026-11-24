@@ -113,7 +113,6 @@ fn rejects_constructs_outside_the_subset() {
         "p:hover",
         "div::first-line",
         "a:not(b)",
-        "div span::before",
         "p > ",
         "> p",
         "p >> q",
@@ -128,12 +127,12 @@ fn rejects_constructs_outside_the_subset() {
         ":nth-child(nn)",
         ":nth-last-child(2)",
         ":nth-of-type(2)",
-        // 伪元素：只接 `::first-letter`，其余构造要造出不存在的盒。
+        // 伪元素：接 `::first-letter` / `::before` / `::after`，其余构造不接。
         // 单冒号的遗留写法也不接 —— 接了就得给每个伪类名再判一次「它是不是伪元素」。
         "p:first-letter",
-        "p::before",
         "p::first-letter em",
         "::first-letter",
+        "p::hover",
     ] {
         assert!(Selector::parse(text).is_none(), "不该接受 {text:?}");
     }
@@ -310,4 +309,20 @@ fn text_nodes_are_not_matched_directly() {
     let dom = parse_dom("<p>文</p>");
     let text_id = dom.get(find(&dom, "p")).children[0];
     assert!(!sel("*").matches(&dom, text_id));
+}
+
+/// `::before` / `::after` 与 `::first-letter` 同属接住的伪元素集合。
+#[test]
+fn before_and_after_pseudo_elements_are_accepted() {
+    use super::{PseudoElement, Selector};
+    for (text, want) in [
+        ("q::before", PseudoElement::Before),
+        ("q::after", PseudoElement::After),
+        (".note::after", PseudoElement::After),
+    ] {
+        let selector = Selector::parse(text).unwrap_or_else(|| panic!("该接受 {text:?}"));
+        assert_eq!(selector.complexes[0].pseudo, Some(want), "{text:?}");
+    }
+    // 伪元素之后的复合选择器仍不接（CSS 规定伪元素必须落在最右）。
+    assert!(Selector::parse("p::before em").is_none());
 }

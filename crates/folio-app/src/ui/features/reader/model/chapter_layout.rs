@@ -232,19 +232,12 @@ pub struct Document {
     measure: OnceLock<GpuiMeasure>,
     /// 已经 shaping 过的行：`(行号, 行内片段槽位)` → 那份几何。
     ///
-    /// gpui 自己的 `LineLayoutCache` 只保两帧（`previous_frame` 与 `current_frame` 在
-    /// `finish_frame` 里互换，`gpui-pre/text_system/line_layout.rs:586-600`），而邻章那些行
-    /// 从「排版作业 shape 完」到「首次进屏」隔了远不止两帧 —— 所以进屏那一帧总要重 shape
-    /// 一次，而且命中也要把整段文本哈希一遍。这一张表把它按章留住，绘制只搬运字形。
+    /// gpui 自己的 `LineLayoutCache` 只保两帧，邻章那些行从 shape 完到首次进屏隔了远不止
+    /// 两帧，进屏时总要重 shape。这一张表按章留住，绘制只搬运字形。
     ///
-    /// **值里没有颜色**：存的是 `Arc<LineLayout>`（`font_id` + 字形 + 落点），不是
-    /// `ShapedLine` —— 后者带 `decoration_runs`，那里面有主题色，烘进表就是「换了夜间
-    /// 模式线还是旧色」那种看不出来的错。装饰线本来也是绘制层自己画的
-    /// （见 `paint::paint_run` 里 `decoration_y` 那一段），`decoration_runs` 从没人读过。
-    ///
-    /// `RefCell` 而不是 `&mut self`：填表发生在渲染帧里，而那一刻手上是
-    /// `Book::span_doc` 给的 `&Document`。`Document` 本来就因为 `slices: Rc<..>` 不是
-    /// `Send`，加一格内部可变性不改变任何约束。
+    /// **值里没有颜色**：存 `Arc<LineLayout>` 而非 `ShapedLine` —— 后者带 `decoration_runs`
+    /// 里的主题色，烘进表就会「换了夜间模式线还是旧色」。装饰线本来也是绘制层自己画的。
+    /// `RefCell` 而非 `&mut self`：填表在渲染帧、手上只有 `&Document`（本就因 `Rc` 非 `Send`）。
     shaped: RefCell<HashMap<(u32, u32), Arc<LineLayout>>>,
     /// 已经物化过的行：行号 → 那一行的片段单元。懒建——某一行的单元只在它第一次
     /// 进带时才建，所以驻留上界是「这一章进过屏的那些行」，随章进出 ±窗口一起释放。
@@ -312,6 +305,8 @@ pub struct RowImage {
     pub node: NodeId,
     /// 这张图怎么在这个盒里摆（CSS 的 `object-fit`）。绘制层按它裁或留底。
     pub fit: crate::ui::foundation::images::ObjectFit,
+    /// `visibility: hidden|collapse`：图片仍占位，绘制时整张跳过。
+    pub hidden: bool,
 }
 
 /// 屏幕尺寸的量化：与 [`quantize_px`] 同一把尺（1 px 一格），只是落到整数上。
@@ -1000,6 +995,7 @@ impl Document {
                             emphasis: run.style.emphasis,
                             emphasis_color: run.style.emphasis_color,
                             emphasis_position: run.style.emphasis_position,
+                            hidden: run.style.hidden,
                         }));
                     }
                     // 这一段点过的隙数（空格或字符，看摊法）；空片段也照数，与排版同源。
@@ -1018,6 +1014,7 @@ impl Document {
                         href: placed.href.clone(),
                         node: placed.node,
                         fit: placed.fit.into(),
+                        hidden: placed.hidden,
                     }));
                     x += placed.advance;
                 }
@@ -1049,6 +1046,7 @@ impl Document {
                             emphasis: marker.style.emphasis,
                             emphasis_color: marker.style.emphasis_color,
                             emphasis_position: marker.style.emphasis_position,
+                            hidden: marker.style.hidden,
                         }));
                     }
                 }

@@ -61,4 +61,6 @@ pub struct RowUnit {
     pub emphasis: EmphasisStyle,
     pub emphasis_color: Option<Color>,
     pub emphasis_position: EmphasisPosition,
+    /// `visibility: hidden|collapse`：文字仍在行内占位，绘制时整片跳过。
+    pub hidden: bool,
 }

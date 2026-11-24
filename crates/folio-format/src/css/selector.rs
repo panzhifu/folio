@@ -63,10 +63,12 @@ pub enum Simple {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PseudoElement {
-    /// 首字下沉。清单里只有它：`::before` / `::after` 要的是「凭空造一个盒」，
-    /// 而我们的盒全部来自 DOM 节点，锚点坐标系也建在那些节点的字节偏移上 ——
-    /// 造出来的字符没有地方可锚。
+    /// 首字下沉。盒来自元素自己的首字符，不新增 DOM 节点。
     FirstLetter,
+    /// `::before` / `::after`：文字由 CSS `content` 生成，挂在这个元素盒的前后。
+    /// 生成字符不进 DOM，锚点按所属元素的零长字节区间处理（见 `computed::cascade`）。
+    Before,
+    After,
 }
 
 /// 一串紧挨着的简单选择器，如 `p.intro#first`。
@@ -304,6 +306,8 @@ fn parse_complex(text: &str) -> Option<Complex> {
             let name = read_ident(&mut cur)?;
             pseudo = match name.to_ascii_lowercase().as_str() {
                 "first-letter" => Some(PseudoElement::FirstLetter),
+                "before" => Some(PseudoElement::Before),
+                "after" => Some(PseudoElement::After),
                 _ => return None,
             };
             // 之后不许再挂选择器内容：`p::first-letter em` 在 CSS 里就是非法的。

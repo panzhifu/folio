@@ -1,5 +1,4 @@
 //! 本章的排版状态（本文件）与 `measure.rs` 在宿主上跑的用例。
-//!
 //! 为什么这些算移动端的测试：移动 UI 本身只在 `cfg(mobile)` 下编译，宿主的
 //! `cargo test` 碰不到那一侧的视图。但「同一本书在两端排出一样的行」这件事
 //! 完全落在这一层 —— 源文本包装、层叠、版心宽度、断行与缓存都在这里，
@@ -44,8 +43,7 @@ fn window(cx: &mut TestAppContext, width: f32, height: f32) -> AnyWindowHandle {
         .into()
 }
 
-/// 两端对齐摊开的位移也要推图片：文本 run 靠 `justify_shift` 在绘制时推，
-/// 图片没有那一层，漏掉就会被前面的字挤到左边。
+/// 两端对齐摊开的位移也要推图片：文本靠 `justify_shift` 在绘制时推，图片没有那一层，漏掉就被挤到左边。
 #[test]
 fn a_justified_line_pushes_an_inline_image_with_its_text() {
     use super::inline_image_x;
@@ -319,15 +317,10 @@ fn an_unlaid_out_document_maps_everything_to_the_chapter_start() {
     assert_eq!(document.text_map().text(), LONG);
 }
 
-/// **接线的证据**：块级缓存在应用侧的调用路径上真的活着，不是只在 core 的单测里活着。
-///
-/// 增量本身由 core 的 `block_cache_only_relayouts_the_changed_block` 钉住；这条钉的是
-/// 生产里最容易重现的那一幕 —— 读者的字号滑条**拉上去又拉回来**：第二趟回来时每个块的
-/// 子树样式哈希与第一趟逐个相同，键的「复用范围」（章文本 / 图片 / 字体表 / 度量口径）
-/// 也没变，于是一块都不必重排，只把缓存里的行盒搬出来。
-///
-/// 为什么不是「把同一个偏好再设一遍」：那算出的是**同一把键**，压根不会派活
-/// （见 `setting_the_same_preferences_relayouts_nothing`），拿它测复用等于测了个空转。
+/// **接线的证据**：块级缓存在应用侧真的活着（增量本身由 core 的单测钉住）。
+/// 钉的是字号滑条**拉上去又拉回来**：第二趟每个块的子树样式哈希与复用范围都不变，
+/// 于是一块都不必重排，只搬运缓存行盒。不设「同一个偏好再设一遍」——那是同一把键，
+/// 压根不派活（`setting_the_same_preferences_relayouts_nothing`），等于测空转。
 #[gpui_kit::test]
 fn a_font_size_round_trip_reuses_every_block(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -830,16 +823,10 @@ fn every_preference_is_classified() {
     assert_eq!(PREFS.len(), NAMES.len(), "分类表与解构清单对不上长度");
 }
 
-/// **改了这项偏好，版式必须真的变** —— core 那条
-/// `every_reader_preference_changes_the_key` 的另一半。
-///
-/// 那一条只钉「会不会重排」，钉不住「重排完还是不是原来那份」。差别是实测出来的：
-/// `paragraph_gap_em` 曾经键换了、整章重排、行盒纹丝不动。
-/// 断言取**整章高 + 每一行的 (x, y, width)**，不是行数：只看行数会在「改了字号却恰好
-/// 没多出一行」时假绿。
-///
-/// 字族这一类不在这里断言几何：那要求这台机器真装着两个能解析出不同宽度的家族，
-/// 换一台机器就变红，而红的原因与代码无关。
+/// **改了偏好，版式必须真的变** —— core 那条 `every_reader_preference_changes_the_key`
+/// 只钉「会不会重排」，钉不住「重排完还是不是原来那份」（`paragraph_gap_em` 曾键换了、
+/// 行盒纹丝不动）。断言取**整章高 + 每行的 (x, y, width)**，不是行数：只看行数会在
+/// 「改了字号却恰好没多出一行」时假绿。字族不在这里断言几何：需要机器真装两个不同宽度的家族。
 #[gpui_kit::test]
 fn a_layout_preference_change_moves_the_geometry(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -1086,17 +1073,11 @@ fn a_relative_link_into_a_heading_is_not_a_footnote() {
     );
 }
 
-/// 正文**由作业按位置取**的那一路：键声称的章与作业取回的章必须是同一章。
-///
-/// 这一格是 2026-10-15 把取文本塞进排版作业时**新引入的唯一坏法**。
-/// `LayoutKey::chapter` 不再含正文，于是「换章」这件事在键这一侧只剩
-/// `Document::set_chapter` 里那一句 `self.chapter = source.identity()` 在管。
-/// 漏掉它：键不换 → `request_typeset` 在「已应用的这把键就是想要的」那一支直接返回 →
-/// 屏幕上继续是上一章的行盒，而界面以为自己已经在新章上 —— 页眉、进度、落库全跟着错，
-/// 并且没有任何一处会报错。把那一句删掉，这一条当场红。
-///
-/// 另一半钉的是「作业真的去取了」：`Document::fetching` 构造时界面没有正文，
-/// 第一趟排版必须带回**按章号取到的那一段**，而不是构造时那份空章。
+/// 正文**由作业按位置取**：键声称的章与作业取回的章必须是同一章。
+/// `LayoutKey::chapter` 不含正文后，「换章」只剩 `set_chapter` 里那句 identity 在管；
+/// 漏掉它 → 键不变 → `request_typeset` 直接返回 → 屏上还是上一章的行盒，而页眉、进度、
+/// 落库全跟着错且无一处报错。把那句删掉这一条当场红。
+/// 另一半：`Document::fetching` 构造时没有正文，首趟排版必须带回**按章号取的那一段**。
 #[gpui_kit::test]
 fn the_key_and_the_fetched_chapter_are_the_same_chapter(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
@@ -1212,15 +1193,11 @@ fn asking_for_the_key_never_rehashes_the_inputs(cx: &mut TestAppContext) {
     );
 }
 
-/// 装饰短表**只随排版换代重折**，每帧问键都不重折。
-///
-/// 这是 §十一 第 12 条的门。改之前 `collect_decorations` 每帧、链上每个进链的章各把
-/// **整章的块表**走一遍才筛出那几条装饰（一份语料一章 160 块，长章 600+）；现在整章
-/// 只在 `apply_typeset` 里走一次（`Document::decorated`），每帧扫的是那张短表。
-///
-/// 前后两半各钉一头：反复问键必须一次都不重折（**这一头是这次的收益**，把
-/// `Document::apply_typeset` 里那行改成每帧现折就当场红）；而换了字号必须重折
-/// （**这一头防的是缓存化本身**，删掉重折就会停在旧表上，画出的底色与新行盒不配套）。
+/// 装饰短表**只随排版换代重折**，每帧问键都不重折（§十一 第 12 条门）。
+/// 改之前每帧每章走**整章块表**（一章 160、长章 600+ 块）才筛出几条装饰；现在整章只在
+/// `apply_typeset` 里走一次，每帧扫短表。
+/// 前后两半各钉一头：反复问键一次都不重折（收益；改成每帧现折就红）；换了字号必须重折
+/// （防缓存化本身；删掉重折就停在旧表上，底色与新行盒不配套）。
 #[gpui_kit::test]
 fn scrolling_never_rebuilds_the_decor_table(cx: &mut TestAppContext) {
     use folio_core::infra::metrics::{Metric, take_local};
@@ -1906,17 +1883,10 @@ fn a_vertical_book_settles_on_the_vertical_axis(cx: &mut TestAppContext) {
     assert!(doc.page_count() > 1, "这么长一章在 600 宽的页里该不止一页");
 }
 
-/// 界面那一格有没有真的把**屏幕尺寸**递进键里。
-///
-/// core 那两条门（`a_wide_image_is_capped_by_the_screen_rather_than_the_column`、
-/// `the_fills_the_screen_rule_keyed_on_object_fit_and_size`）问的是「给了屏宽怎么算」，
-/// 而它们当时的夹具**清一色 `screen_width: None`** —— 界面这一头也一直是 `None`，
-/// 于是「图片按屏幕缩 / 大图铺满」整条在真机一步都没跑到，两边各自绿，缝在中间。
-/// 这一条钉的就是中间那一格。
-///
-/// 宽取的是**阅读层那一块**（窗口宽减掉不属于阅读栏的侧栏），不是整窗：手机上侧栏是 0
-/// 所以等于屏宽，桌面上溢出去的那一截不该盖进侧栏里。高给整窗 —— 仿真折页那张纸
-/// 现在也从窗口顶铺到底（见 `view::body` 的 `sheet_area`），两边同一口径。
+/// 界面那一格有没有真的把**屏幕尺寸**递进键里。core 两条门问「给了屏宽怎么算」，
+/// 但夹具清一色 `screen_width: None`，界面也一直是 `None` —— 「按屏幕缩 / 大图铺满」
+/// 整条在真机一步没跑到，两边各自绿，缝在中间。这一条钉中间那一格。
+/// 宽取**阅读层那一块**（窗口减侧栏），高给整窗（仿真折页从窗口顶铺到底）。
 #[gpui_kit::test]
 fn the_viewport_reports_the_screen_into_the_layout_key(cx: &mut TestAppContext) {
     use crate::ui::features::reader::model::chapter_layout::Viewport;
@@ -2101,4 +2071,34 @@ fn the_selection_band_hugs_the_text_not_the_line_box(cx: &mut TestAppContext) {
         top + height,
         line.y + line.height
     );
+}
+
+/// `visibility: hidden` 的 run 照常占位（行还在），但 RowUnit 上带 hidden 供绘制侧跳过。
+#[gpui_kit::test]
+fn visibility_hidden_reaches_the_row_units_without_dropping_the_line(cx: &mut TestAppContext) {
+    use crate::ui::features::reader::model::chapter_layout::RowFragment;
+    cx.update(gpui_kit::init);
+    let handle = window(cx, 300.0, 900.0);
+    let mut document = Document::new(
+        "<p><span class='hide'>甲</span>乙</p>".to_string(),
+        ".hide { visibility: hidden } p { text-indent: 0 }",
+        bare_prefs(),
+        Arc::new(ChapterImages::empty()),
+        Arc::new(BookFonts::empty()),
+    );
+    cx.update_window(handle, |_, win, cx| document.ensure_layout(win, cx, 0.0))
+        .expect("应当排得出版");
+    assert!(document.line_count() >= 1, "hidden 不删行");
+    let row = document.row_units(0);
+    let texts: Vec<_> = row
+        .iter()
+        .filter_map(|f| match f {
+            RowFragment::Text(unit) => Some((unit.text.to_string(), unit.hidden)),
+            _ => None,
+        })
+        .collect();
+    let hidden = texts.iter().find(|(t, _)| t == "甲");
+    assert!(hidden.is_some_and(|(_, h)| *h), "hide 段的 RowUnit 标 hidden");
+    let shown = texts.iter().find(|(t, _)| t == "乙");
+    assert!(shown.is_some_and(|(_, h)| !*h), "可见段不标 hidden");
 }

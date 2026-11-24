@@ -1,7 +1,5 @@
 //! 断行：硬行方案、逐字符与逐词扫描、UAX #14 断点与禁则、行尾空白，产出 `LinePlan`。
-//!
-//! 从 `layout` 主模块切出来只为了一个文件能一次读完；跨文件的条目用
-//! `pub(super)`，即**只对 `layout` 内部开放**，不属于对外公开面。
+//! 从 `layout` 切出来只为一个文件能一次读完；条目 `pub(super)` 只对 `layout` 内部开放。
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -10,7 +8,9 @@ use super::collect::{Collected, DEFAULT_STYLE, IMAGE_GLYPH, ImageAtom, Piece};
 use super::font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
-use folio_format::css::computed::{ComputedStyle, Hyphens, InlineVAlign, RubyPosition, StyledDom};
+use folio_format::css::computed::{
+    ComputedStyle, GeneratedContent, Hyphens, InlineVAlign, RubyPosition, StyledDom,
+};
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
 /// `font-variant: small-caps` 的小写字号比例。
@@ -263,6 +263,7 @@ impl LineAcc {
             x_offset: img.x_offset,
             baseline_shift: img.baseline_shift,
             fit: img.fit,
+            hidden: img.hidden,
         }));
     }
 }
@@ -397,15 +398,12 @@ pub(super) fn scan_by_char(
     );
 }
 
-/// 按「词」扫描一个硬行，把行方案追加进 `plans`。
+/// 按「词」扫描一个硬行，把行方案追加进 `plans`。词 = 两断点间的连续段（拉丁≈单词，
+/// CJK 退化为单字）；词宽用宽度表连续切片求和，每词只判一次溢出（逐字符→逐词）。
 ///
-/// 词 = 两个断点之间的连续段（拉丁文≈单词，CJK 退化成单字）；词宽用宽度表的连续
-/// 切片求和，每个词只做一次溢出判断，把「逐字符判溢出」降成「逐词判溢出」。
-///
-/// 溢出发生在某个词内部时，逐字符实现里 `last_break_before` 返回的正是**该词词首**
-/// （词首就是一个断点），所以在词首断行与逐字符结果一致。唯一例外是「行首超长词」
-/// （单个词就宽过整行）：这时返回 `Some(位置)`，交给 [`scan_by_char`] 从该位置继续
-/// 硬切（复现「排不下就硬切」的兜底）；正常走完返回 `None`。
+/// 溢出在某词内部时，逐字符的 `last_break_before` 返回的正是**该词词首**，故词首断行与逐字
+/// 一致。唯一例外「行首超长词」（单词宽过整行）：返回 `Some(位置)` 交 [`scan_by_char`] 硬切
+/// （「排不下就硬切」兜底）；正常走完返回 `None`。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn scan_by_word(
     collected: &Collected,
@@ -542,14 +540,9 @@ pub(super) fn hard_lines(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// 折一趟行内内容要用的三个**尺寸基准**。
-///
-/// 并成一个结构体的理由不是「参数太多想收拢一下」，而是这三个数**同源同批**：
-/// 都由调用方从 `LayoutOptions` 与这一块的可用宽一起给出，少给一个就换一档口径 ——
-/// `screen_width` 是 `None` 就是「界面没报屏」那一档（图片退回按栏宽算，见
-/// [`super::collect::Ctx::screen` 的文档]），`page_height` 是 `None` 时「够不够大」
-/// 只按宽判。拆成三个散参数时 `collect` 的实参涨到了 clippy 的七格上限之外，
-/// 而那就是「这三位本来是一个东西」的信号。
+/// 折一趟行内内容要用的三个**尺寸基准**。三个数同源同批（都由调用方从 `LayoutOptions`
+/// 与可用宽一起给）：`screen_width: None` = 界面没报屏（图片退回按栏宽），`page_height: None`
+/// 时「够不够大」只按宽判。并成结构体而非散参数（散参已超 clippy 七格上限）。
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Sizes {
     /// 段落可用宽：图片百分比宽度与折行的基准。
@@ -563,16 +556,10 @@ pub(super) struct Sizes {
     pub screen_height: Option<f32>,
 }
 
-/// 简化版标点挤压：只做**收尾标点后半格**。
-///
-/// 全角逗号/句号的 advance 是 1em，而字墨在左半边，右半边是空的；下一个字从 1em 处
-/// 起笔，读起来就离了半个字。这里把收尾标点自己的前进量减半，下一段自然从墨的右边
-/// 开始。只压「后一个字是汉字/假名/谚文」的情况，拉丁词前的空白可能是有意的。
-///
-/// 不做的（留给下一刀）：开引号/括号左侧的半格、相邻标点不重复压。
-/// 那几样要按上下文成对判断，已经不是「一行宽表」能收的了。行尾悬挂见
-/// [`hangs_at_end`] 与 [`hanging_width`]：它不压前进量，而是把标点留在行尾、
-/// 让它的字形伸进版心外的空白。
+/// 简化版标点挤压：只做**收尾标点后半格**。全角逗号/句号的 advance 是 1em、字墨在左半边，
+/// 下一字从 1em 起笔就离了半格；把收尾标点前进量减半，下一段自然从墨右边开始。只压「后一个字
+/// 是汉字/假名/谚文」的情况（拉丁词前的空白可能有意）。不做开引号/括号左半格、相邻标点不重复压
+/// （那要按上下文成对判断）。行尾悬挂见 [`hangs_at_end`]/[`hanging_width`]：不压前进量，把标点留在行尾。
 const PUNCT_TRIM_EM: f32 = 0.5;
 
 /// 收尾标点：它们的字墨在左半，右半是空白。
@@ -585,13 +572,9 @@ fn trims_after(ch: char) -> bool {
 
 /// 行尾可以悬挂的标点：收尾标点，外加闭引号与全角右括号。
 ///
-/// 这是 LaTeX xeCJK `PunctStyle=kaiming` 那一档「行尾标点悬挂」的同一口径：
-/// 标点的前进量不算进这一行该对齐到的版心宽，字形照旧画在行尾之外。它和
-/// [`PUNCT_TRIM_EM`] 的挤压不是一回事 —— 挤压改的是**行内**下一个字从哪儿起，
-/// 悬挂只在**行尾**把最后一个标点让到版心外。
-///
-/// 闭引号不在挤压表里：`”` / `’` 的排版宽度随字体不同，按全角假设去减半格会
-/// 在比例引号上压出负数。悬挂只借用它的前进量，不改宽度表。
+/// LaTeX xeCJK `PunctStyle=kaiming` 「行尾标点悬挂」同口径：标点前进量不算进版心宽，
+/// 字形画在行尾外。与 [`PUNCT_TRIM_EM`] 挤压不同（挤压改**行内**下一个字起点，悬挂只在**行尾**
+/// 把标点让到版心外）。闭引号 `”`/`’` 不在挤压表：其宽度随字体变，按全角减半格会压出负数。
 pub(super) fn hangs_at_end(ch: char) -> bool {
     trims_after(ch) || matches!(ch, '”' | '’' | '〉' | '］' | '｝')
 }
@@ -770,11 +753,10 @@ impl<'a> Collector<'a> {
     /// `vertical-align: text-top / text-bottom` 折成 px。
     ///
     /// 对齐的参照是**声明所在行内盒的父盒**：盒顶（`text-top`）贴父盒字体的顶，
-    /// 盒底（`text-bottom`）贴父盒字体的底。度量必须按真实字体量 —— 中英混排时
-    /// 父盒声明的拉丁字体不等于汉字实际用的那张脸（与 `Measure::font_extents` 同一条）。
-    ///
-    /// `own_ascent` / `own_descent` 由调用方给：文字是这段字的字体度量，图片是
-    /// `(高度, 0)` —— 图片占满基线以上、基线以下没有东西，与 CSS 的替换盒同一口径。
+    /// 盒底（`text-bottom`）贴父盒字体的底。度量必须按真实字体量（中英混排时父盒声明的
+    /// 拉丁字体不等于汉字实际用的那张脸，同 `Measure::font_extents`）。
+    /// `own_ascent`/`own_descent` 由调用方给：文字是这段字的字体度量，图片是 `(高度, 0)`
+    /// （图片占满基线以上，与 CSS 替换盒同口径）。
     fn inline_valign_shift(
         &self,
         node: NodeId,
@@ -870,15 +852,10 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// 把一段文本按收尾标点切成几个 `Piece`。
-    ///
-    /// 切开的理由只有一个：`LineRun` 的起点是**片段累计宽**。如果逗号还在一条长 run
-    /// 里，宽度表把它的前进量减半了，可 run 内部的字形仍按 shaping 的 1em 摆，下一段
-    /// 不会跟着前移。切成「标点单独一段 + 后面的文字另起一段」，绘制与命中才吃同一个
-    /// 累计宽。
-    ///
-    /// 空白折叠过的文本（`norm.len() != orig.len()`）不切：`orig` 无法逐段精确映射，
-    /// 切了会让选区/锚点漂；那一类文本也通常不是中文正文。
+    /// 把一段文本按收尾标点切成几个 `Piece`。`LineRun` 起点是**片段累计宽**：逗号若留在长
+    /// run 里，宽度表把前进量减半了、但 run 内字形仍按 shaping 的 1em 摆，下一段不跟着前移。
+    /// 切成「标点单独一段 + 后文另起一段」，绘制与命中才吃同一个累计宽。
+    /// 折叠过空白的文本（`norm.len() != orig.len()`）不切：`orig` 无法逐段映射，切了锚点会漂。
     fn push_text_pieces(
         &mut self,
         node: NodeId,
@@ -1006,7 +983,7 @@ impl<'a> Collector<'a> {
         // 行内替换元素：`<img>` 与 Calibre 封面那一族 `<svg><image xlink:href/></svg>`
         // —— 判据与「这一格该多大」的来源见 [`super::collect::picture_src`]。
         // 命中就当一张图占住，不再递归它的子节点（svg 里那张 image 不能再被收一次）。
-        if super::collect::picture_src(self.dom, node).is_some() {
+        if super::collect::picture_src(self.dom, node, self.styles).is_some() {
             self.push_image(node);
             return;
         }
@@ -1018,34 +995,61 @@ impl<'a> Collector<'a> {
         }
         // 文本继承的是**它所在元素**的样式，所以往下走要换成元素自己的样式。
         let own = self.intern_style(node);
+        // `::before` 生成盒：写在元素自己的样式里（`q::before { content: open-quote }`）。
+        // 它排在元素所有子节点之前，和子文本同一条流、同一行宽。
+        self.push_generated(node, true);
         for child in dom_node.children.clone() {
             self.push_node(child, pre, own);
         }
+        self.push_generated(node, false);
     }
 
-    /// `<ruby>` 容器：基字照常规流行内走，注音（`<rt>`）排在它上方或下方。
+    /// 把一个伪元素的生成文字塞进行内流。
     ///
-    /// 只认「基字在前、注音在后」那一种形状 —— 本机唯一带真 ruby 的书（《诡秘之主》，
-    /// 40 章 552 组）写的就是 `<ruby>愚者<rt>The Fool</rt></ruby>`。三种情况返回 `false`
-    /// 交回普通行内递归：没有注音、没有可见的基字、注音后面还站着别的内容（HTML 规范
-    /// 那种 `<rp>(</rp>` 括号形态正好落在这一档，见 `ua::INLINE_TAGS` 那条注释）。
+    /// 生成字符**不在 DOM 里**，所以 `orig` 取一个零长区间（指向元素起点）——
+    /// 锚点那边 `chars_of_bytes` 对零长区间给出空字符段，`line_chars` 直接跳过，
+    /// 全章可见文本与进度坐标一个字都不会多出来。宽与行盒则照常参与。
+    fn push_generated(&mut self, node: NodeId, before: bool) {
+        let Some(style) = self.styles.get(node) else {
+            return;
+        };
+        let generated = if before { &style.before } else { &style.after };
+        let Some(generated) = generated else {
+            return;
+        };
+        let text = match &generated.content {
+            GeneratedContent::Literal(text) => text.clone(),
+            // open/close-quote 已在 cascade 折成字面量；留这一档只是兜底。
+            _ => return,
+        };
+        if text.is_empty() {
+            return;
+        }
+        let run = RunStyle::new(generated);
+        let style_ref = self.arena.intern(run);
+        let norm_start = self.text.len();
+        self.text.push_str(&text);
+        self.push_widths(norm_start, style_ref);
+        self.pieces.push(Piece {
+            node,
+            norm: norm_start..self.text.len(),
+            // 零长、指向元素起点的字节区间：生成字符不进锚点/选区坐标系。
+            orig: 0..0,
+            style: style_ref,
+            x_offset: 0.0,
+        });
+    }
+
+    /// `<ruby>` 容器：基字常规流行内走，注音（`<rt>`）排在它上/下方。
+    /// 只认「基字在前、注音在后」（《诡秘之主》40 章 552 组就是 `<ruby>愚者<rt>The Fool</rt></ruby>`）。
+    /// 无注音、无基字、注音后还有内容（`<rp>` 括号形态）都返回 `false` 交回普通递归。
     ///
-    /// **三个数在这一趟里算清，全部折进既有的那几张表，不新开一条几何通道**：
-    ///
-    /// 1. **容器前进量** = max(基字宽, 注音宽)。差值补给基字最后一个字符在宽度表里的
-    ///    那一格，于是断行、行宽、对齐、命中吃的还是同一份表 —— 这个引擎的纪律是「换一处
-    ///    就要改三处」，另开一条前进量来源就是第二个真相。
-    /// 2. **抬升量** = 基字上沿 + 一道缝 + 注音下沿（`ruby-position: under` 时符号相反、
-    ///    换成两条下沿）。它写进注音子树每一条样式的 `baseline_shift`：`LineAcc::push_text`
-    ///    本来就把这一格算进 `ascent`，所以行盒自己长高、分片跟着走，绘制那一路早就认它。
-    ///    注音的上下 extent 要等它落进表里才量得出，而 `baseline_shift` 得在推之前就知道 ——
-    ///    所以先按零位移铺进去，再逐 piece 换成带位移的那一份样式（一章的注音是几十到
-    ///    几百个 piece，不是正文那种一万量级，这一趟换样式不贵）。
-    /// 3. **横向落点** = `ruby-align` 折出来的偏移。注音在流动里排在**容器末尾**（它前面的
-    ///    基字已经让过 container 宽），要挪回的那一段就是 `container − flow_offset`。
-    ///
-    /// 注音的字符在宽度表里是 0，但 `RunStyle::advance` 照自己的字号走 —— 所以注音内部的字
-    /// 距与选中矩形都正常，只有它对**容器之外**的流动不贡献前进量。
+    /// **三个数在这一趟算清、折进既有表，不新开几何通道**：
+    /// 1. 容器前进量 = max(基字宽, 注音宽)，差值补给基字末字那格宽度表 —— 断行/命中仍吃同一份表。
+    /// 2. 抬升量 = 基字上沿 + 缝 + 注音下沿（under 时符号反），写进注音样式的 `baseline_shift`；
+    ///    因 extent 要先落表才量得出，故先零位移铺入再逐 piece 换样式（注音一章几十到几百个）。
+    /// 3. 横向落点 = `ruby-align` 偏移：注音排在容器末尾，挪回 `container − flow_offset`。
+    /// 注音字符在宽度表里是 0（`RunStyle::advance` 照自己字号走），对容器外流动不贡献前进量。
     fn push_ruby(&mut self, node: NodeId, pre: bool) -> bool {
         let children = self.dom.get(node).children.clone();
         let mut bases: Vec<NodeId> = Vec::new();
@@ -1179,7 +1183,7 @@ impl<'a> Collector<'a> {
     ///   画的那一层查不到就是不画。
     /// - `<img>`：尺寸只能从图本身来，取不到就整张跳过（不产出字符，也不会把段落撑乱）。
     fn push_image(&mut self, node: NodeId) {
-        let Some(src) = super::collect::picture_src(self.dom, node) else {
+        let Some(src) = super::collect::picture_src(self.dom, node, self.styles) else {
             return;
         };
         let aspect = super::collect::svg_aspect(self.dom, node);
@@ -1224,21 +1228,12 @@ impl<'a> Collector<'a> {
             && w < screen
             && resolved.is_some()
         {
-            // `contain` 还要求「本来就不小」：宽至少是栏宽的八成，或高至少是**一屏**的
-            // 八成（一张页内的插图不该被撑满整屏）。`cover` 是作者显式要盖满，不再加这一条。
-            //
-            // 页高那一格分页/仿真有、连续滚动没有（滚动档 `page_height` 传 `None`），
-            // 所以它必须退回**屏高**：只按页高判会让同一张图在滚动里被放大、切到仿真又
-            // 缩回去 —— 读者报的「切到仿真图变小」正是这一条。判据只留一处，见
-            // [`super::collect::fills_the_screen`]。
-            // 行内那一臂传 `bleed` 而不是 `wide`：读者那一档「铺满屏幕」只管整块独占的图，
-            // 夹在字里的一张图标被拉成满屏等于把整段顶走（这一条由 `the_fills_the_screen_rule`
-            // 那条门钉住）。作者的 `duokan-bleed` 照旧算数。
-            //
-            // 但「够不够大」这一条**两档共用同一份输入**：页高缺省时退回屏高。从前这里
-            // 只认页高，连续滚动（`page_height: None`）里 `contain` 恒不放大，切到分页
-            // 又放大 —— 读者报的「切到仿真图变小」正是这一条。
-            // 「该铺」恒为真（读者那一档已撤掉）；「本来就不小」仍由宽/高八成挡着。
+            // `contain` 还要求「本来就不小」：宽 ≥ 栏宽八成或高 ≥ 一屏八成（`cover` 是作者
+            // 显式要盖满，不加这条）。页高分页有、滚动无（`page_height: None`），故退回**屏高**：
+            // 只认页高会让同一张图滚动里放大、切仿真又缩回（读者报的「切到仿真图变小」）。
+            // 判据只留一处：`super::collect::fills_the_screen`。
+            // 行内那一臂传 `bleed` 而非 `wide`：读者的「铺满」只管独占整块的图，夹在字里的图标
+            // 拉成满屏等于顶走整段（`the_fills_the_screen_rule` 钉住），作者的 duokan-bleed 照旧。
             let big_enough = super::collect::fills_the_screen(
                 bleed,
                 w,
@@ -1331,6 +1326,11 @@ impl<'a> Collector<'a> {
             baseline_shift,
             at,
             fit: style.object_fit,
+            hidden: matches!(
+                style.visibility,
+                folio_format::css::computed::Visibility::Hidden
+                    | folio_format::css::computed::Visibility::Collapse
+            ),
         });
         self.pending_space = false;
     }

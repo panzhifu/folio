@@ -18,6 +18,15 @@ use folio_core::layout::{ImageProvider, ResolvedImage};
 use gpui_kit::RenderImage;
 use gpui_kit::{Image, ImageFormat};
 
+/// 给内联 SVG 的 data URI 造一个短键：href 本身就是整段 base64 SVG，
+/// 原样当键会把整张矢量图塞进图集的键表里，太长。
+fn short_hash(href: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    href.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// 容器绝对路径 → 图片字节；真实容器与内存测试来源共用此入口。
 /// `Send + Sync` 供排版与后台解码线程使用，来源不参与解码策略。
 pub type ByteSource = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
@@ -34,19 +43,11 @@ pub fn document_source(doc: Arc<dyn Document>) -> ByteSource {
     Arc::new(move |href| doc.image_bytes(href))
 }
 
-/// 内嵌位图长边的上限（图像原始像素）。
-///
-/// 选 2048 不是随便挑的：gpui 把图放进 sprite atlas，单张 atlas 纹理的上限是设备的
-/// `max_texture_dimension_2d`（GLES 上常见 4096，部分只有 2048），而 tile 用的是
-/// **图像原始像素**（不是显示尺寸）。一张 1200×1600 的插图在 2.8 倍屏手机上显示出来
-/// 是 3360×4480，超过了就只写一条日志、图静默消失 —— 手机上「书里的图看不见」
-/// 十有八九是这一条。KOReader 的 `ImageWidget` 同样先按显示尺寸缩一遍再缓存
-/// （`reference/koreader/frontend/ui/widget/imagewidget.lua` 的 `scale_factor` 与 `ImageCache`）。
-///
-/// 这一条**不是**显存阀门：《未来简史》55 张插图最大的是 1039×1386，一张都没被它夹到
-/// （2026-10-15 按 `images` 表与 EPUB 里真实的 IHDR/SOF 头各数过一遍，两边同一个总数）。
-/// 它省的是「解码 + 重编码」那一笔 CPU，实测 8–38 ms / 张。真正管显存的是
-/// `reader::image_atlas`。
+/// 内嵌位图长边的上限（**原始像素**）。gpui sprite atlas 单张纹理上限是设备的
+/// `max_texture_dimension_2d`（GLES 常见 4096、部分只 2048），超了图静默消失 ——
+/// 手机上「书里的图看不见」十有八九是这条（tile 用原始像素，不是显示尺寸）。
+/// 这不是显存阀门：《未来简史》55 张图最大 1039×1386，一张没被夹到；省的是解码+重编码
+/// 那一笔 CPU（实测 8–38 ms/张）。真正管显存的是 `reader::image_atlas`。
 const MAX_IMAGE_EDGE: u32 = 2048;
 
 /// 低清那一档的长边上限（图像原始像素）。
@@ -119,6 +120,31 @@ pub struct DecodeRequest {
 }
 
 impl DecodeRequest {
+    /// 一条内联 SVG（`data:image/svg+xml;base64,…`）的解码活儿：与容器图共用图集，
+    /// 只是取字节不进容器、直接解 data URI；格式已知，仍走 [`svg::rasterize`]。
+    pub(crate) fn inline_svg(token: u64, href: &str) -> Option<Self> {
+        const PREFIX: &str = "data:image/svg+xml;base64,";
+        let encoded = href.strip_prefix(PREFIX)?;
+        use base64::Engine as _;
+        let svg = base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .ok()?;
+        let loader: Arc<dyn Fn() -> Option<Arc<Image>> + Send + Sync> = Arc::new(move || {
+            let (png, _) = folio_core::content::format::svg::rasterize(
+                &svg,
+                Some((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE)),
+            )?;
+            Some(Arc::new(Image::from_bytes(ImageFormat::Png, png)))
+        });
+        Some(DecodeRequest {
+            key: format!("{token}/inline-svg/{:016x}", short_hash(href)),
+            loader,
+            tile_bytes: UNKNOWN_TILE_BYTES,
+            size_known: false,
+            priority: folio_core::Priority::Interactive,
+        })
+    }
+
     /// 跑那一趟活儿。**在后台线程上调**（`reader::image_atlas` 负责），UI 线程调它
     /// 就是回到「每滚进一张图顿一下」那条老路。
     pub fn decode(&self) -> Option<Arc<Image>> {
@@ -141,22 +167,13 @@ impl DecodeRequest {
         Arc::clone(&self.loader)
     }
 
-    /// 同一张图的**低清**那一档：键在末尾挂 `@preview`，活儿复用本请求那条取字节 +
-    /// 出图的链子，到手之后缩到 [`PREVIEW_EDGE`] 再重编。
+    /// 同一张图的**低清**档：键末尾挂 `@preview`，复用取字节链，到手缩到 [`PREVIEW_EDGE`] 重编。
     ///
-    /// 给 `None` 的三种情况：
-    /// - 高清那一格本来就不大（估计值不到低清那一格的四倍）—— 小插图、图标、分隔条，
-    ///   为它们再排一趟活儿是纯亏；
-    /// - 尺寸**不知道**的那一族（[`DecodeRequest::size_known`] 为 `false`：SVG 与
-    ///   manifest 没写宽高的那些）。SVG 那条链子是「栅格化到 [`MAX_IMAGE_EDGE`] 再交出去」，
-    ///   包一层缩小就是**栅格化两趟**，低清省下的那点解码钱抵不过多画一遍；
-    /// - `shrink_image` 自己退回（动画 GIF、解不开、重编反而比原图大）。
-    ///
-    /// 这一句每帧都可能被问一次，所以前两个判断**排在克隆链子之前**：不相干的图一次
-    /// 分配也不发生。真要低清的图上一屏也就一三张，代价量在 `perf::image_ns` 那笔账里。
-    ///
-    /// 低清那一档不解 EXIF 之外的口径问题：`shrink_image` 自己应用方向、一律编成 JPEG
-    /// （带 alpha 的源会连它自己那份 RGB 一起编进去，与封面那一路同一个口径）。
+    /// 给 `None` 三种情况：高清格本就不大（不到低清四倍，小插图/图标/分隔条）；尺寸**不知道**
+    /// 那族（[`DecodeRequest::size_known`] 为 false：SVG 与 manifest 没写宽高的，缩小等于
+    /// 栅格化两趟）；`shrink_image` 自己退回（GIF/解不开/重编反而更大）。
+    /// 前两个判断**排在克隆链子之前**（这句每帧都问）：不相干的图一次分配也不发生。
+    /// `shrink_image` 自己应用 EXIF 方向、一律编 JPEG（与封面同口径）。
     pub fn preview(&self) -> Option<DecodeRequest> {
         // 低清那一档只对「尺寸知道的图」排：`false` 那一族（SVG、manifest 没写宽高的）
         // 包一层缩小就是栅格化两趟。判据用 `size_known` 而不是「估计值等于那个哨兵数」——
@@ -449,23 +466,13 @@ impl BookImages {
     }
 
     /// 定版式里**要算出来才有字节**的那一页（`PageSource::Render`，PDF 那一族）→ 那条活儿。
+    /// 与 [`job`](Self::job) 只差取字节那一半：那条按 `href` 读现成字节，这条叫 `render` 现画。
+    /// 格式已知 PNG，不必缩小；跑 `render` 仍在后台线程（一页 A4 按 2048 档实测约 30–90 ms，
+    /// 图多的页按源图密度封顶后约 100 ms），绝不能在绘制帧里问。
     ///
-    /// 与 [`job`](Self::job) 的分别只在取字节那一半：那条按 `href` 去容器读现成的字节，
-    /// 这一条叫 `render` 现画一张。所以格式是**已知的** PNG（不必猜字节头），也不必缩小 ——
-    /// 「画多大」是这一问的输入，不是事后补的一步。跑 `render` 的那一趟仍然在后台线程上
-    /// （由图集那一层调度）：一页 A4 按 2048 那一档实测 30–90 ms（本机 release、纯字的页），
-    /// 图多的那类书到 400–500 ms —— 图片页现在按源图密度封顶（`format::pdf::native_edge`），
-    /// 那 400–500 ms 落在 100 ms 上下；这一趟仍然绝不能在绘制帧里问。
-    ///
-    /// 键里带页号**和**那一档的长边：同一本书将来若改成按视口宽栅格，同一页会并存好几个
-    /// 尺寸，撞键的后果是「按 1024 摆的那一格画出 2048 的像素」。token 前缀与图片那一族
-    /// 同一条理由 —— 两本书的第 7 页可以长得一模一样。
-    ///
-    /// `region` 是放大那一档：同一页的**一块**按更高档重画，键再补一段斜杠
-    /// （`render/<page>@<edge>/<x0>,<y0>,<x1>,<y1>`）。不复用整页那个键是因为整数与像素
-    /// 都不同，同一键画出两种东西是最难查的那种错。图集排挤出顺序时只读
-    /// `render/<page>@` 那一段（`image_atlas::distance_of`），后面那截不影响 ——
-    /// 那里有一条门按这个形状钉着。
+    /// 键里带页号**和**长边：同一页将来若按视口宽栅格会并存好几个尺寸，撞键就画出错像素；
+    /// token 前缀同理（两本书第 7 页可以一样）。
+    /// `region` 是放大那一档，键再补 `…/<x0>,<y0>,<x1>,<y1>`；图集排挤只读 `render/<page>@` 那段。
     pub fn render_job(
         &self,
         page: usize,
@@ -648,6 +655,9 @@ impl ChapterImages {
     /// 不知道** —— 那两件事要到后台跑 [`DecodeRequest::decode`] 才知道，而它们的表现
     /// 都是「那块空着，正文照排」，与从前一致。
     pub fn decode_request(&self, href: &str) -> Option<DecodeRequest> {
+        if href.starts_with("data:image/svg+xml;base64,") {
+            return DecodeRequest::inline_svg(self.book.token, href);
+        }
         let entry = self.book.get(href)?;
         Some(self.book.job(entry))
     }
@@ -1001,21 +1011,11 @@ mod tests {
     }
 
     /// 图集那一格的生命周期：**离开元素树 → `drop_image` 放掉 → 回屏自己重新上传**。
-    ///
-    /// 这一条是「回收图片」那件事的地基门，两头各钉一件事：
-    /// - **放得掉**：`App::drop_image` 之后 `Window::has_image_atlas_entry` 必须变
-    ///   `false`。仍为 `true` 就说明 gpui 那个口是空转的，任何回收方案都白做。
-    /// - **回得来**：图重新上屏必须自动再传一次（`window.rs:4944` 的
-    ///   `sprite_atlas.get_or_insert_with`）。回不来，「回收」就等于「这张图永久画丢」——
-    ///   那是「手机上看不到图」那一类查不出根因的错。
-    ///
-    /// 这里先让图**离开树**再回收，是因为那就是生产里的形状（滚出可见带 ⇒ 那一栏不再
-    /// 产出 `img` 元素）。顺序本身**不是**约束 —— 另一条
-    /// `a_tile_dropped_while_still_painted_comes_back_on_the_next_paint` 钉的是
-    /// 「图还在树上就回收，下一帧也会自己补回来」。
-    ///
-    /// `has_image_atlas_entry` 是 gpui 的 test-only 接口（`test-support` 已是本 crate 的
-    /// dev 依赖特性），所以这条门不需要真 GPU，也不看渲染器脸色。
+    /// 两头各钉一件：**放得掉**（`drop_image` 后 `has_image_atlas_entry` 必须 false，
+    /// 仍 true 则 gpui 那口空转、任何回收方案白做）；**回得来**（重上屏必须自动再传一次，
+    /// 回不来等于「图永久画丢」）。先让图离树再回收是生产形状（滚出可见带就不产 `img`），
+    /// 顺序本身不是约束（另一条门钉「还在树上就回收，下帧也补回来」）。
+    /// `has_image_atlas_entry` 是 gpui test-only 接口，不需要真 GPU。
     #[gpui_kit::test]
     fn an_atlas_tile_is_reclaimed_after_it_leaves_the_tree(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
