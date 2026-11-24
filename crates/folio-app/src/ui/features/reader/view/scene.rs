@@ -32,25 +32,14 @@ fn stack_neighbor(index: u16, current: u16) -> bool {
     index == current.saturating_add(1) || index + 1 == current
 }
 
-/// 一块背景图最多摆多少格。
-///
-/// 铺法那一族在数学上是无界的：一块 4×4 的纹理盖在 600×4000 的长条上是一万五千格，
-/// 而连续滚动那一档一章就是一根长条。封顶之后**退化成只摆定位那一格**
-/// （`no-repeat`），因为多出来的那一整片元素会把一帧的绘制预算吃光 ——
-/// 画少几格是看得出的糙，卡成个位数帧是全书都读不下去。
-/// 这一档在本仓库的真实语料上从没碰到过（哈利波特那 23 处最多 15×30 = 450 格），
-/// 它是护栏，不是路径。
+/// 一块背景图最多摆多少格。铺法那一族数学上无界（4×4 纹理盖 600×4000 长条是一万五千格），
+/// 封顶后**退化成只摆定位那一格**（`no-repeat`）：画少几格是看得出的糙，卡成个位数帧全书都读不下去。
+/// 真实语料从没碰到（哈利波特 23 处最多 450 格）—— 它是护栏，不是路径。
 const MAX_BACKGROUND_TILES: usize = 1024;
 
-/// 一块背景图在这个盒里要摆的那些格子（相对盒左上角）。
-///
-/// 三个入参全是这一帧已经拿得到的数：盒的边框盒尺寸来自排版，固有尺寸每帧现问图片索引
-/// （`natural` 取不到就是 `(0, 0)`），CSS 侧的摆法来自层叠。
-///
-/// **拿不到固有尺寸就一条都不摆**：`cover` / `contain` 与「一条只写了百分比」的尺寸
-/// 都要按比例反算另一轴，没有那个比例就只能猜一个 —— 猜错的表现是扉页那张底图被拉成
-/// 一个怪形状，比那块空着更难查。`background-size: 50px` 这种两轴里至少有一条写死的，
-/// 走的是另一条路（写死那轴不需要比例）。
+/// 一块背景图在这个盒里要摆的格子（相对盒左上角）。入参全是这一帧拿得到的数。
+/// **拿不到固有尺寸就一条都不摆**：`cover` / `contain` 与百分比尺寸都要按比例反算另一轴，
+/// 猜一个的后果是底图被拉成怪形状，比空着更难查。`background-size` 至少一条写死的走另一条路。
 fn background_tiles(
     box_w: f32,
     box_h: f32,
@@ -96,17 +85,11 @@ fn background_tiles(
     out
 }
 
-/// 一轴上要摆的那些格子，给的已经是**这一轴上的绝对位置** `(起点, 长)`。
-///
-/// 只列与 `[0, side)` 真的相交的那些。从前按 ±`ceil(side/tile)+1` 对称铺开，
-/// 一块 40×40 的纹理盖满 600 宽的版心会算出 33 列，两轴一乘 1089 格，
-/// **在完全正当的写法上**撞上护栏然后退化成一张 —— 护栏是给 pathological 那种情况的，
-/// 不该被正常书写撞响。按相交范围收，同一张图是 15 列。
-///
-/// `space` 与 `round` 会改步进或改图的大小，这正是这两档的关键：
-/// - `space`：装得下几张就摆几张，剩下的余量**均摊成隙**（图不缩放、边缘不裁）；
-///   装不下一张时 CSS 就是画一张、溢出裁掉，所以张数至少 1。
-/// - `round`：按能装下的张数取整，然后**把图缩放到整除**，于是没有缝也没有裁切。
+/// 一轴上要摆的格子：**这一轴上的绝对位置** `(起点, 长)`，只列与 `[0, side)` 相交的。
+/// 从前按 ±`ceil(side/tile)+1` 对称铺开会在正当写法上撞护栏（40×40 盖 600 版心算 1089 格），
+/// 按相交范围收同一张图是 15 列。
+/// `space`：装几张摆几张、余量**均摊成隙**（图不缩、边不裁），装不下就画一张溢出裁掉；
+/// `round`：按能装的张数取整再**把图缩放到整除**，无缝也无裁切。
 fn axis_span(side: f32, tile: f32, mode: BackgroundTile, origin: f32) -> Vec<(f32, f32)> {
     match mode {
         BackgroundTile::NoRepeat => vec![(origin, tile)],
@@ -549,13 +532,9 @@ impl Scene {
                 }
             }
         }
-        // 量具：一次构造记一笔。**逐 run 计数会把量具自己变成被测量的开销**
-        // （`folio_core::infra::metrics` 模块头那条纪律），而这一趟要回答的问题是一次的：
-        // 这一帧重建了几次场景。
-        //
-        // `Metric::SceneRuns` 不在这里数了——它的口径 2026-10-15 起是「这一帧新建了几条
-        // 行单元」，那笔钱在 `Document::row_units` 里付，计数也就跟着挪到那一处。
-        // 滚回走过的地方应当增量 0，往前滚那一趟该付（单元表按行懒物化）。
+        // 量具：一次构造记一笔（**逐 run 计数会让量具变成被测量的开销**）。
+        // `Metric::SceneRuns` 的口径 2026-10-15 起是「这一帧新建了几条行单元」，在
+        // `Document::row_units` 里付；滚回应当增量 0，往前滚该付（单元表按行懒物化）。
         Metric::SceneRebuilds.count();
         let mut scene = Self {
             upcoming,
@@ -656,14 +635,32 @@ fn place_decorations(
         // 背景图：一张都取不到字节就整条跳过 —— 「这一块没有底」与「底还在解」在
         // 屏幕上与从前一样，都是空着，但别拿着一个假的 `DecodeRequest` 去登记图集，
         // 那会让回收那一账记在一张根本不存在的图上。
+        let background_rect = if vertical {
+            (
+                x + seed.background_rect.0 + slide,
+                top + seed.background_rect.1,
+                seed.background_rect.2,
+                seed.background_rect.3,
+            )
+        } else {
+            (
+                x + seed.background_rect.0,
+                seed.background_rect.1 - origin_y + top,
+                seed.background_rect.2,
+                seed.background_rect.3,
+            )
+        };
         let mut pictures = Vec::new();
         for picture in &seed.pictures {
             let Some(request) = images.decode_request(&picture.href) else {
                 continue;
             };
+            // 格子按**裁剪盒**的尺寸算：`background-clip: padding-box` 等收进来之后，
+            // 图的 cover / 百分比定位都以裁剪盒为基准（CSS 的 origin 默认是 padding-box，
+            // 与这一档正好同形；origin 的另外两档未实现，记在 `background-clip` 的文档上）。
             let tiles = background_tiles(
-                seed.width,
-                seed.height,
+                background_rect.2,
+                background_rect.3,
                 images.natural_size(&picture.href),
                 &picture.size,
                 &picture.position,
@@ -690,6 +687,7 @@ fn place_decorations(
             },
             width: seed.width,
             height: seed.height,
+            background_rect,
             background: if page_color_is_drawn_by_reader(index, seed, picture_only_chapter) {
                 // 整页底色只由 `reading_theme::resolve` 画一次（`column.bg(reading.bg)`），
                 // 这里再画一遍就是同一件事的第二个真相 —— 见判据那一条的文档。
@@ -772,6 +770,7 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
         top,
         width,
         height,
+        background_rect: (x, top, width, height),
         background: None,
         radius: [0.0; 4],
         border: [(0.0, hsla(0.0, 0.0, 0.0, 0.0), BorderStyle::None); 4],
@@ -785,8 +784,7 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
 mod tests {
     //! 装饰短表的**每帧那一半**：按可见带裁、加三个平移数、落主题前景。
     //!
-    //! 「哪些块带装饰、色走 currentColor 折成什么」不在这里测了 —— 那是
-    //! `Layout::decor_seeds` 的职责，2026-10-15 从这一层挪进引擎层，
+    //! 「哪些块带装饰、色走 currentColor 折成什么」在 `Layout::decor_seeds`（引擎层）测，
     //! 对应用例在 `layout::tests::index`（拿接线前那趟每帧全表扫描当参照实现比的）。
     //! 这一层剩下的几件事必须每帧做，因为它们里面都有「此刻」：可见区间、滚动偏移、主题色，
     //! 以及背景图的固有尺寸与字节。
@@ -856,6 +854,7 @@ mod tests {
             y,
             width: 300.0,
             height,
+            background_rect: (12.0, y, 300.0, height),
             background: Some(Color(193, 204, 192, 255)),
             full_bleed: false,
             radius: [0.0; 4],
@@ -1337,6 +1336,7 @@ mod tests {
                 top: 0.0,
                 width: 300.0,
                 height: 40.0,
+                background_rect: (0.0, 0.0, 300.0, 40.0),
                 background: Some(colored),
                 radius: [0.0; 4],
                 border: [(2.0, colored, BorderStyle::Solid); 4],

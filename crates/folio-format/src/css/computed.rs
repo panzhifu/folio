@@ -17,8 +17,8 @@ pub use types::{
     BackgroundRepeat, BackgroundSize, BackgroundTile, BoxSizing, Clear, Float,
 };
 pub use types2::{
-    BreakWhen, CellVAlign, Color, Hyphens, InlineVAlign, Positioning, RubyAlign, RubyPosition,
-    SvgLineCap, SvgLineJoin, SvgPaint, TextShadow, TextTransform, WordBreak,
+    BackgroundClip, BreakWhen, CellVAlign, Color, Hyphens, InlineVAlign, Positioning, RubyAlign,
+    RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextShadow, TextTransform, WordBreak,
 };
 
 use crate::dom::NodeId;
@@ -750,6 +750,8 @@ pub struct ComputedStyle {
     /// `grid-template-columns` 的轨道定义与 `quotes`（均可继承 quotes、grid 轨道不继承）。
     pub grid_template_columns: Arc<[GridTrack]>,
     pub quotes: Option<[QuotePair; 2]>,
+    /// `background-clip`：底色与背景图裁到哪个盒。不继承。
+    pub background_clip: BackgroundClip,
     /// `grid-column` / `grid-row` 的显式定位：起点（1-based，`None` = 自动）与跨格数。
     /// 不继承 —— 子项各自定位。
     pub grid_column_start: Option<u16>,
@@ -878,25 +880,15 @@ pub struct ComputedStyle {
     pub link: bool,
     pub white_space_pre: bool,
     /// 尺寸六件套。作者写的数**含不含**边框与内边距由 [`ComputedStyle::box_sizing`] 定，
-    /// 折算只走 [`ComputedStyle::content_size`] 那一个式子（四个落点共用）。落点分两条：
+    /// 折算只走 [`ComputedStyle::content_size`]（四个落点共用）。落点分两条：
     ///
-    /// - 替换元素（`<img>` / `<svg>`）：`layout::ports::image_size` 拿它与固有尺寸、
-    ///   可用宽一起折出这张图实际多大。这一条早就生效。
-    /// - 流内块级盒：`width` / `max-width` / `min-width` 定出这一块的边框盒宽
-    ///   （`layout::collect::solve_block_width`），于是写着 `margin: 0 auto` 的定宽插图
-    ///   与分隔条第一次能居中；`height` / `max-height` / `min-height` 定出盒高与游标推进量，
-    ///   **内容照排、溢出可见** —— 与浏览器同一条规则，不是我们的取巧。
-    ///   `<body>` 那一层除外：根不吃 `width`，版心归视口与读者设定，判据写在
-    ///   `layout::layout_inner`。
+    /// - 替换元素：`layout::ports::image_size` 拿它与固有尺寸、可用宽折出实际大小。
+    /// - 流内块级盒：`width` / `max-*` / `min-*` 定边框盒宽与盒高，**内容照排、溢出可见**；
+    ///   `<body>` 除外（根不吃 `width`，判据在 `layout::layout_inner`）。
     ///
-    /// 两个 `min-*` 的**夹序**是 CSS 2.1 §10.4 / §10.7 那一条：`max-*` 先夹、`min-*` 后夹，
-    /// 所以作者写出「`max-width` 比 `min-width` 还小」这种自相矛盾的声明时赢的是
-    /// `min-width`，与浏览器一致。它们也管 `width: auto` 那一档：没写 `width` 的块填满
-    /// 包含块之后仍会被 `min-width` 抬到溢出 —— 那是 CSS 的行为，不是排版 bug。
-    ///
-    /// `height` / `max-height` / `min-height` 的百分比在这里落空：它们的基准是包含块的**高**，
-    /// 而流式排版里父块的高本来就是由内容算出来的，CSS 在同一条规则下也判 `auto`
-    /// （`definite()` 只认 px，三条一起走那一格）。
+    /// `min-*` 的夹序是 CSS 2.1 §10.4/§10.7：`max-*` 先夹、`min-*` 后夹，也管 `width: auto`
+    /// 那档（填满后仍被抬到溢出）。`height` 一族的百分比基准是包含块**高**，流式里拿不到，
+    /// 同一条规则判 `auto`。
     pub width: Option<Length>,
     pub min_width: Option<Length>,
     pub max_width: Option<Length>,
@@ -1030,6 +1022,7 @@ impl Default for ComputedStyle {
             text_transform: TextTransform::None,
             text_size_adjust: None,
             grid_template_columns: Arc::from(Vec::new()),
+            background_clip: BackgroundClip::BorderBox,
             grid_column_start: None,
             grid_column_span: 1,
             grid_row_start: None,
@@ -1233,6 +1226,7 @@ impl std::hash::Hash for ComputedStyle {
         (self.text_transform as u8).hash(h);
         self.text_size_adjust.map(f32::to_bits).hash(h);
         self.grid_template_columns.len().hash(h);
+        (self.background_clip as u8).hash(h);
         self.grid_column_start.hash(h);
         self.grid_column_span.hash(h);
         self.grid_row_start.hash(h);

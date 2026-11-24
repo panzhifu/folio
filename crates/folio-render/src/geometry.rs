@@ -10,11 +10,13 @@ use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use folio_format::css::computed::ObjectFit;
 use folio_format::css::computed::{
-    BackgroundAttachment, BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color,
-    ComputedStyle, Display, ShadowLayer, StyledDom, TextAlign, WritingMode,
+    BackgroundAttachment, BackgroundClip, ComputedStyle, Display, StyledDom, TextAlign, WritingMode,
 };
 use folio_format::dom::NodeId;
 use folio_format::metrics::Metric;
+
+mod seed;
+pub use seed::{DecorPicture, DecorSeed};
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
 #[derive(Debug, Clone, PartialEq)]
@@ -234,77 +236,6 @@ pub struct BlockBox {
     pub border_box: bool,
 }
 
-/// 一块要画的装饰的**输入**：几何 + CSS 侧的颜色，主题色一格都没落地。
-///
-/// 为什么要单独有这张表：「哪些块带底色或可见边框」只随层叠结果变，而层叠结果随排版
-/// 一起换 —— 它**不随帧变**。从前绘制侧每帧、每个进链的章各把整章的块表走一遍来筛
-/// 这几条（一份语料一章 160 块、长章 600+）。
-/// 现在整章走一次、折成这张短表存着，每帧扫的是短表。
-///
-/// **这张表为什么不能像 `lines_in_band` 那样按 y 二分**：块是**嵌套**的，父盒的
-/// `y + height` 远大于紧随其后的子盒（父 5000、子 120），所以「与一条带相交的那些块
-/// 是连续下标区间」这个前提在块表上根本不成立 —— `Layout::stacked` 那一格是为行盒
-/// 量的（行不嵌套），搬到块上就会悄悄漏画。于是这张表的正确用法就是整表扫：
-/// 它短（只有真带装饰的块），而且扫得对。
-#[derive(Debug, Clone, PartialEq)]
-pub struct DecorSeed {
-    /// 边框盒左上角（章内坐标，与 `BlockBox::x`/`y` 同一套）。
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-    /// `background-color`。`None` = 书里没写这一条 —— 绘制侧别拿不透明色去盖主题底色。
-    pub background: Option<Color>,
-    /// `[上, 右, 下, 左]` 的（要画的宽, 色, 画法）。宽 0 不画。
-    ///
-    /// 色在这里**已经把 `currentColor` 折完了**：没写 border-color 就取本块自己的
-    /// `color`（`color` 可继承，所以那一色在层叠期不一定写在本元素上）。
-    /// 剩下的只有「`None` 落主题前景」那一步 —— 那是主题，必须每帧现落，不许烘进这张表。
-    ///
-    /// 画法只可能是 `Solid` / `Double` / `Dotted` / `Dashed`（[`BorderEdge::drawn`] 已经把
-    /// `none` 折成 0 的边挡在外面）。画法必须带出去：`Double` 要拆成两条 1/3 细线、
-    /// `Dotted` / `Dashed` 要按段切开，丢了画法就退化成一条实线
-    /// （真书《人类简史》的章名 `.biaoti` 上下双线、哈利·波特 `.line` 那条点线）。
-    ///
-    /// [`BorderEdge::drawn`]: folio_format::css::computed::BorderEdge::drawn
-    pub border: [(f32, Option<Color>, BorderStyle); 4],
-    /// 四个角的圆角半径（px），顺序 `[左上, 右上, 右下, 左下]`，由
-    /// [`ComputedStyle::corner_radii`] 按这一块的盒尺寸折好。
-    ///
-    /// 只作用于**底色**那一块四边形：边框仍是四条轴对齐的直条，所以圆角盒配粗边框时
-    /// 四角是直的（`ui::reader::view::body::decoration_child` 那一段）。
-    /// [`ComputedStyle::corner_radii`]: folio_format::css::computed::ComputedStyle::corner_radii
-    pub radius: [f32; 4],
-    /// `background-image` 的那些层，按 CSS 书写顺序（先画的在屏幕上更靠上）。空 = 没图。
-    ///
-    /// **字节与固有尺寸不在这里**，与 `RowImage::href` 同一个口径：那两样随图片索引变，
-    /// 每帧现问 `ChapterImages` 才是对的，烘进这张表就是第二个真相。
-    /// 摆位要的盒尺寸倒是已经在 `x/y/width/height` 里了。
-    pub pictures: Vec<DecorPicture>,
-    /// `box-shadow` 的层列表（含 `inset`）。色在层叠期已是 `Color`；`None` 落本块字色。
-    /// 空 = 没有阴影。
-    pub box_shadows: Arc<[ShadowLayer]>,
-    /// `outline`：`(宽, 色, 画法, 偏移)`，画在边框盒**外侧**。`None` = 没有或宽 0。
-    pub outline: Option<(f32, Option<Color>, BorderStyle, f32)>,
-    /// 这是**章节根**的一块 `background-attachment: fixed` 底图：书要的是一整页的画。
-    ///
-    /// 阅读器把它当整窗背板画（贴在窗口上、不进版心），并把这条种子从常规块装饰里
-    /// 滤掉 —— 否则同一张画会在版心里再画一遍，位置还差着一个页眉与安全区。
-    /// 判据与「这一章至少一屏高」那条同源（见 `layout_inner`）。
-    pub full_bleed: bool,
-}
-
-/// 一块背景图的一层：哪张图 + 怎么摆。全是 CSS 侧的原始数，一个像素结果都不带。
-#[derive(Debug, Clone, PartialEq)]
-pub struct DecorPicture {
-    /// 容器内的绝对路径。样式表拼进层叠前已由 `absolutize_css_urls` 折算过，
-    /// 所以这里能直接拿去问图片索引，不需要再按本章目录解一次相对路径。
-    pub href: String,
-    pub size: BackgroundSize,
-    pub position: BackgroundPosition,
-    pub repeat: BackgroundRepeat,
-}
-
 /// 排版结果：两张扁平表 + 两张**排完就折好**的查询索引。
 ///
 /// 索引放在结构里而不是让调用方每次现算是因为查询的形状：`blocks` 与 `lines` 都按**先序**
@@ -338,10 +269,9 @@ pub struct Layout {
     /// 真排版满足，但那是假设；二分错了是**静默答错**（点这行选中别处）。所以为假时按推进轴
     /// 的查询退回线性扫 —— 慢一点但不会答错（接负外边距那天症状先出现在速度上）。
     stacked: bool,
-    /// 每一行的**绘制层叠序**（z 值），与 `lines` 等长；由 [`super::stacking`] 在 layout
-    /// 入口算好。绘制侧按它重排行盒的先后，正文/命中仍按 `lines` 的原序（源序），两件事分开。
-    /// 空表 = 这一份没有层叠需求（z 全 0、无 opacity/transform），绘制走原序零回归。
-    pub line_z: Vec<i32>,
+    /// 每一行的**层叠上下文 z 链**（根→owner），与 `lines` 等长；由 [`super::stacking`] 算好。
+    /// 绘制按链字典序重排行盒，正文/命中仍按 `lines` 源序。全 `None` = 无层叠需求，零回归。
+    pub line_z: Vec<Option<Arc<[i32]>>>,
 }
 
 /// 把**逻辑横排**长条整体投影成竖排物理坐标。断行、基线、shaping、命中
@@ -579,8 +509,12 @@ impl Layout {
     /// 命中与分页不读这一份，仍用源序。
     pub fn paint_order(&self, from: usize, to: usize) -> Vec<usize> {
         let mut order: Vec<usize> = (from..to).collect();
-        if self.line_z.iter().any(|&z| z != 0) {
-            order.sort_by_key(|&ix| (self.line_z.get(ix).copied().unwrap_or(0), ix));
+        if self.line_z.iter().any(Option::is_some) {
+            order.sort_by(|&a, &b| {
+                let za = self.line_z.get(a).and_then(|z| z.as_deref()).unwrap_or(&[]);
+                let zb = self.line_z.get(b).and_then(|z| z.as_deref()).unwrap_or(&[]);
+                za.cmp(zb).then(a.cmp(&b))
+            });
         }
         order
     }
@@ -746,11 +680,38 @@ impl Layout {
             let page_box =
                 index == 0 || (block.y <= 0.5 && block.height + 0.5 >= self.height * 0.8);
             let full_bleed = (fixed_bg && page_box) || (index == 0 && self.root_full_bleed);
+            // `background-clip` 的裁剪盒：百分比内边距按这一块的宽折（包含块宽在这里拿不到，
+            // 与表格量固有宽同一档近似）。
+            let pad =
+                |length: folio_format::css::computed::Length| length.resolve(block.width).max(0.0);
+            let [bt, br, bb, bl] = drawn;
+            let (pad_t, pad_r, pad_b, pad_l) = (
+                pad(style.padding_top),
+                pad(style.padding_right),
+                pad(style.padding_bottom),
+                pad(style.padding_left),
+            );
+            let background_rect = match style.background_clip {
+                BackgroundClip::BorderBox => (block.x, block.y, block.width, block.height),
+                BackgroundClip::PaddingBox => (
+                    block.x + bl,
+                    block.y + bt,
+                    (block.width - bl - br).max(0.0),
+                    (block.height - bt - bb).max(0.0),
+                ),
+                BackgroundClip::ContentBox => (
+                    block.x + bl + pad_l,
+                    block.y + bt + pad_t,
+                    (block.width - bl - br - pad_l - pad_r).max(0.0),
+                    (block.height - bt - bb - pad_t - pad_b).max(0.0),
+                ),
+            };
             out.push(DecorSeed {
                 x: block.x,
                 y: block.y,
                 width: block.width,
                 height: block.height,
+                background_rect,
                 full_bleed,
                 background: style.background_color,
                 radius: style.corner_radii(block.width, block.height),

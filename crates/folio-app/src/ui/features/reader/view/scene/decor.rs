@@ -21,6 +21,9 @@ pub struct BlockDecor {
     pub height: f32,
     /// `background-color`。`None` = 书里没写这一条 —— 别拿不透明色去盖主题底色。
     pub background: Option<Hsla>,
+    /// 底色与背景图的**裁剪盒**（章内坐标已折成屏幕量）：`background-clip` 的结果，
+    /// 默认与边框盒重合，`padding-box` / `content-box` 时向内缩。铺色与裁图都按它。
+    pub background_rect: (f32, f32, f32, f32),
     /// 四个角的圆角半径（px），顺序 `[左上, 右上, 右下, 左下]`，由排版层按盒尺寸折好。
     ///
     /// 只作用于**底色**那一块四边形；边框仍是四条轴对齐的直条，所以圆角盒配粗边框时

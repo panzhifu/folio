@@ -350,11 +350,38 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
         if block.width <= 0.0 || block.height <= 0.0 {
             continue;
         }
+        let pad =
+            |length: folio_format::css::computed::Length| length.resolve(block.width).max(0.0);
+        let [bt, br, bb, bl] = drawn;
+        let (pad_t, pad_r, pad_b, pad_l) = (
+            pad(style.padding_top),
+            pad(style.padding_right),
+            pad(style.padding_bottom),
+            pad(style.padding_left),
+        );
+        let background_rect = match style.background_clip {
+            folio_format::css::computed::BackgroundClip::BorderBox => {
+                (block.x, block.y, block.width, block.height)
+            }
+            folio_format::css::computed::BackgroundClip::PaddingBox => (
+                block.x + bl,
+                block.y + bt,
+                (block.width - bl - br).max(0.0),
+                (block.height - bt - bb).max(0.0),
+            ),
+            folio_format::css::computed::BackgroundClip::ContentBox => (
+                block.x + bl + pad_l,
+                block.y + bt + pad_t,
+                (block.width - bl - br - pad_l - pad_r).max(0.0),
+                (block.height - bt - bb - pad_t - pad_b).max(0.0),
+            ),
+        };
         out.push(DecorSeed {
             x: block.x,
             y: block.y,
             width: block.width,
             height: block.height,
+            background_rect,
             full_bleed: false,
             background: style.background_color,
             radius: style.corner_radii(block.width, block.height),

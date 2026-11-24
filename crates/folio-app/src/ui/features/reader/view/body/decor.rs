@@ -13,7 +13,8 @@ use crate::ui::features::reader::view::scene::{
 use folio_core::content::format::css::computed::BorderStyle;
 use gpui_kit::{
     AnyElement, App, Background, BoxShadow, Corners, Entity, EntityId, Hsla, IntoElement,
-    ParentElement as _, PathBuilder, Pixels, Point, RenderImage, Styled, Window, div, img, point, px,
+    ParentElement as _, PathBuilder, Pixels, Point, RenderImage, Styled, Window, div, img, point,
+    px,
 };
 
 /// 把要盖在纸上的那一个多边形填进场景。顶点已经带在元素坐标里（与字形的 `run.x` /
@@ -60,12 +61,15 @@ pub(super) fn background_child(
     picture: &BlockPicture,
     rendered: Arc<RenderImage>,
 ) -> AnyElement {
+    // 外壳就是裁剪盒（`background-clip` 的结果）；里面的格子坐标已由 scene 侧
+    // 按「裁剪盒原点 − 裁剪盒原点」折好，相对外壳左上角。
+    let (bg_x, bg_top, bg_w, bg_h) = decor.background_rect;
     div()
         .absolute()
-        .left(px(decor.x))
-        .top(px(decor.top))
-        .w(px(decor.width))
-        .h(px(decor.height))
+        .left(px(bg_x))
+        .top(px(bg_top))
+        .w(px(bg_w))
+        .h(px(bg_h))
         .overflow_hidden()
         .children(picture.tiles.iter().map(|(left, top, width, height)| {
             div()
@@ -125,11 +129,7 @@ fn box_shadows(layers: &[BlockShadow]) -> Vec<BoxShadow> {
         .map(|layer| {
             let shadow = BoxShadow::new(px(layer.dx), px(layer.dy), layer.color)
                 .blur_radius(px(layer.blur.max(0.0)));
-            if layer.inset {
-                shadow.inset()
-            } else {
-                shadow
-            }
+            if layer.inset { shadow.inset() } else { shadow }
         })
         .collect()
 }
@@ -372,7 +372,7 @@ pub(super) fn push_border(
 /// 差一个斜切，肉眼分不出来。
 ///
 /// **三段的先后就是 CSS 的层次**：底色在最下、图盖在底色上、边框再盖在图上
-/// （`background-clip` 我们一律按边框盒，所以那道边正好压在底图边上，与浏览器一致）。
+/// 底色与图都按 `background_rect` 那个裁剪盒铺，默认与边框盒重合。
 /// 图层倒着摆：`background-image` 列表里最后写的那一层垫底，而 gpui 的子元素是
 /// 「后入树的压在上面」，两个次序正好反。
 /// 这一块背景图是否都能画出来：每张都拿到了像素，或图集已判它失败。
@@ -418,13 +418,16 @@ pub(super) fn decoration_child(
     // 作者声明的底色**照画**，水墨那一档也一样：那一档是「正常版式、全黑白」，不是
     // 「把书里的颜色撤掉」。墨水下这块颜色已经在 `Scene` 里去过饱和，这里不另判一档。
     if let Some(background) = decor.background {
+        // 裁剪盒与边框盒重合时沿边框盒的圆角；向内缩的裁剪盒圆角要按边框宽递减，
+        // CSS 有一套折算式，这里取整档近似为直角。
+        let radius = if decor.background_rect == (decor.x, decor.top, decor.width, decor.height) {
+            decor.radius
+        } else {
+            [0.0; 4]
+        };
+        let (bg_x, bg_top, bg_w, bg_h) = decor.background_rect;
         parts.push(fill_rounded_quad(
-            decor.x,
-            decor.top,
-            decor.width,
-            decor.height,
-            background,
-            decor.radius,
+            bg_x, bg_top, bg_w, bg_h, background, radius,
         ));
     }
     for picture in decor.pictures.iter().rev() {

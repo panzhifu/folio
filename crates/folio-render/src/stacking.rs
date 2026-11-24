@@ -9,13 +9,11 @@
 //! - `opacity < 1`；
 //! - `transform ≠ none`。
 //!
-//! 取**最近**那一个的 z。都不满足时 z=0 —— 与「没有层叠需求」同值，绘制走原序，零回归。
-//!
-//! 边界（如实记录）：这是**扁平**的层叠序 —— 嵌套层叠上下文取最近那一层的 z，不构造 CSS
-//! 规范里那棵 stacking context 树（外层 z 带着整棵子树一起排的语义未建模）。负 z 排在
-//! 正文前、正 z 排在正文后、`opacity` / `transform` 建上下文隔离都已覆盖；书的样本只有
-//! 单层（海报 z=0、标题 z=1），所以这一档足够。真正到了多层嵌套且需要严格 CSS 顺序的书，
-//! 这一处要升级成「从根到 owner 的上下文 z 链」做字典序比较，而不是单个 i32。
+//! 每行存的是**从根到 owner 的 z 链**（外层在前、最近一层在后），绘制按链做字典序比较：
+//! 外层 z 先分胜负，外层相同再比内层 —— 这就是 CSS `stacking context` 树的扁平化表示。
+//! 没有建立上下文时存 `None`（与全 0 同义，绘制走源序，零回归）。
+
+use std::sync::Arc;
 
 use folio_format::css::computed::{Positioning, StyledDom};
 use folio_format::dom::{Dom, NodeId};
@@ -35,22 +33,31 @@ fn establishes(style: &folio_format::css::computed::ComputedStyle) -> Option<i32
     None
 }
 
-/// 一条 owner 行的有效绘制 z：从 owner 往根走，取最近建立上下文那格的 z。
-fn effective_z(dom: &Dom, styles: &StyledDom, owner: NodeId) -> i32 {
+/// 一条 owner 行的层叠上下文 z 链：从根到 owner，依次收集每个建立上下文那格的 z。
+/// 一个上下文都没有时给 `None`。
+fn effective_z(dom: &Dom, styles: &StyledDom, owner: NodeId) -> Option<Arc<[i32]>> {
+    let mut path = Vec::new();
     for node in dom.ancestors_including_self(owner) {
         if let Some(style) = styles.get(node)
             && let Some(z) = establishes(style)
         {
-            return z;
+            path.push(z);
         }
     }
-    0
+    if path.is_empty() {
+        return None;
+    }
+    // `ancestors_including_self` 是 owner→根，翻成根→owner。
+    path.reverse();
+    Some(Arc::from(path))
 }
 
-/// 为一份排版结果算每行 z 值表。与 `lines` 等长。
-///
-/// 全部为 0 时返回的 `Vec` 仍全 0 —— 绘制层据此判定「无层叠需求」，走原序。
-pub(super) fn compute_line_z(dom: &Dom, styles: &StyledDom, layout: &Layout) -> Vec<i32> {
+/// 为一份排版结果算每行 z 链。与 `lines` 等长；全 `None` = 无层叠需求。
+pub(super) fn compute_line_z(
+    dom: &Dom,
+    styles: &StyledDom,
+    layout: &Layout,
+) -> Vec<Option<Arc<[i32]>>> {
     layout
         .lines
         .iter()

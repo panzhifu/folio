@@ -4,11 +4,11 @@
 //! 这里验的是「拿到有序声明之后算得对不对」。
 
 use crate::css::computed::{
-    BackgroundAttachment, BackgroundAxis, BackgroundEdge, BackgroundPosition, BackgroundSize,
-    BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color, ComputedStyle,
-    DeclStatus, DecorationStyle, Direction, Display, Float, Hyphens, Length, ListStyle, RubyAlign,
-    RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode, cascade,
-    declaration_status,
+    BackgroundAttachment, BackgroundAxis, BackgroundClip, BackgroundEdge, BackgroundPosition,
+    BackgroundSize, BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color,
+    ComputedStyle, DeclStatus, DecorationStyle, Direction, Display, Float, Hyphens, Length,
+    ListStyle, RubyAlign, RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode,
+    cascade, declaration_status,
 };
 use crate::css::{Declaration, Origin, RuleSet};
 use crate::dom::{Dom, NodeId};
@@ -321,15 +321,10 @@ fn unknown_values_count_as_ignored_but_known_lazily_supported_do_not() {
     assert_eq!(page.styled.ignored, 1, "只有 transform 是清单外属性");
 }
 
-/// 百分比外边距要按包含块宽度算，层叠期不知道那个数，所以宁可判不支持。
-/// 用 div 而不是 p：div 的 UA 外边距是 0，能看清「被拒的声明什么都没留下」。
-/// 百分比边距**存下来，不在层叠期折**。
-///
-/// 这一条以前是「宁可判不支持」：`margin-top: 10%` 整条丢掉、计进 ignored。改掉的理由
-/// 是账 —— 多看转换的《哈利·波特》有 86441 个元素挂着 `margin: 0% 1% 0% 1%`，全书
-/// 92698 条「不认识」里绝大多数就是这一族写法。判不支持等于把作者的边距静默抹掉，
-/// 而基准（包含块宽）只是**当时**不知道，排版期拿得到。
-/// 折算点在哪：`layout::collect` 的 `basis`，见 `the_percent_margin_folds_against_the_containing_block`。
+/// 百分比边距**存下来，不在层叠期折**（折算点在 `layout::collect` 的 `basis`）。
+/// 以前是「宁可判不支持」：《哈利·波特》86441 个元素挂着 `margin: 0% 1% 0% 1%`，
+/// 判不支持等于把作者的边距静默抹掉，而基准只是**当时**不知道、排版期拿得到。
+/// 用 div 而不是 p：div 的 UA 外边距是 0，能看清被拒的声明什么都没留下。
 #[test]
 fn percentage_boxes_are_kept_for_the_layout_phase() {
     let page = author("<div>文</div>", "div { margin-top: 10%; text-indent: 5% }");
@@ -342,15 +337,10 @@ fn percentage_boxes_are_kept_for_the_layout_phase() {
     );
 }
 
-/// `auto` 边距**原样留在计算样式里**，既不折成 0，也不计进 `ignored`。
-///
-/// 这一条改过两次。第一版把 `margin: 5px auto` 整条判为不认识，于是连那 5px 的上下
-/// 边距一起丢掉（《蛇结》就是这么丢的）；第二版折成 `Px(0)`，因为当时块级不吃
-/// `width` / `max-width` 的收窄，剩余宽度恒为 0，取 0 恰好等于 CSS 的均分结果。
-/// 现在排版层真按作者的 `width` 收窄盒子了（`layout::collect::solve_block_width`），
-/// 「均分多少」取决于那块折出来多宽 —— 那是排版期才知道的数，层叠期再猜一次就是
-/// 把居中猜没了。所以这一格只负责「认得、留下」，具体几个像素归排版层，
-/// 那一侧的断言在 `layout::tests`。
+/// `auto` 边距**原样留在计算样式里**，不折 0 也不计 ignored。改过两次：第一版整条判
+/// 不认识（连 5px 上下边距一起丢），第二版折 `Px(0)`；现在排版层真按 `width` 收窄盒子，
+/// 均分多少是排版期才知道的数 —— 这一格只负责「认得、留下」，具体像素归排版层，
+/// 断言在 `layout::tests`。
 #[test]
 fn auto_margin_survives_the_cascade() {
     let page = author("<p>文</p>", "p { margin-left: auto }");
@@ -1691,7 +1681,7 @@ fn the_background_layers_change_the_style_hash() {
 /// `background: url(x) no-repeat fixed center` 里那个 `fixed` 要是不认，
 /// 底色与图会一起消失，症状比「fixed 没生效」大一个量级。
 #[test]
-fn attachment_is_applied_while_clip_and_origin_stay_inert() {
+fn attachment_is_applied_and_clip_too_while_origin_stays_inert() {
     let page = author(
         "<p class=t>正文</p>",
         ".t { background-image: url(a.png); background-attachment: fixed; background-clip: padding-box }",
@@ -1712,13 +1702,22 @@ fn attachment_is_applied_while_clip_and_origin_stay_inert() {
         DeclStatus::Applied,
         "attachment 进了样式、排版层会读它，不能再报「不生效」"
     );
-    for name in ["background-clip", "background-origin"] {
-        assert_eq!(
-            declaration_status(&decl(name, "padding-box"), own, own.font_size),
-            DeclStatus::Inert,
-            "{name} 该报「认得，不生效」"
-        );
-    }
+    // `background-clip` 2026-11-24 接上了：真落到 `background_clip` 那一格。
+    assert_eq!(own.background_clip, BackgroundClip::PaddingBox);
+    assert_eq!(
+        declaration_status(&decl("background-clip", "padding-box"), own, own.font_size),
+        DeclStatus::Applied,
+        "clip 已接住，报 Applied"
+    );
+    assert_eq!(
+        declaration_status(
+            &decl("background-origin", "padding-box"),
+            own,
+            own.font_size
+        ),
+        DeclStatus::Inert,
+        "origin 仍在名单里，报「认得，不生效」"
+    );
     assert_eq!(
         own.background_layers[0].attachment,
         BackgroundAttachment::Fixed
@@ -2551,17 +2550,11 @@ fn box_sizing_takes_two_keywords_and_leaves_percent_for_the_layout_phase() {
     );
 }
 
-/// **真书门**：哈利·波特全集那七张册扉页，样式表里的整页底图必须真的落到图层表上，
-/// 而且那个容器路径必须在这本书自己的图片清单里查得到。
-///
-/// 为什么值得为它开一次真书（`#[ignore]`，几秒）：这一条同时钉住两处**屏幕上看不出区别**
-/// 的断口 ——
-/// - 解析断了：`<body style="background: url(...) no-repeat center; background-size: cover">`
-///   里那个 `url()` 被当成颜色之外的东西丢掉，扉页变成白底上一片看不见的淡金字；
-/// - 图源断了：EPUB 的图片清单按 manifest 里所有 `image/*` 建（`epub.rs` 的
-///   「全文图片」那一段），而样式表里的路径是 `absolutize_css_urls` 折算出来的形状。
-///   两边**拼写对不上时屏上同样是白底**，而且比解析断了更难查 —— CSS 那侧一切正常。
-///   只被 CSS 引用、不被任何 `<img src>` 引用的图（`v2.jpg` 就是）正踩在这一条上。
+/// **真书门**（`#[ignore]`，几秒）：哈利·波特那七张册扉页的整页底图必须落到图层表，
+/// 且路径能在本书图片清单里查到。它钉住两处屏幕上看不出区别的断口：
+/// 解析断了（`url()` 被当垃圾丢掉，扉页成白底淡金字）、图源断了（图片清单按
+/// manifest 的 `image/*` 建，而样式表路径是折算后的形状；拼写对不上同样白底，
+/// 只被 CSS 引用的 `v2.jpg` 正踩这条）。
 #[test]
 #[ignore = "开真书并把 301 章的样式表走一遍"]
 fn the_harry_potter_title_pages_carry_their_backdrop() {

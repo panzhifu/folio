@@ -13,19 +13,14 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 会让这种标题变成白纸上的白字、整条标题消失。2026-10-23 这一轮把 `url(...)`
     // 那一截也接上了，落在 [`ComputedStyle::background_layers`]。
     //
-    // 这一族里**只有两条**留在「认得、不生效」这一档：
-    // - `background-clip` / `background-origin` —— 一律按**边框盒**，正是出版书里
-    //   「底色盖到边框下面」那一大片的写法；`padding-box` / `content-box` 那一档
-    //   要给的是内缩的矩形，本书语料里一次没出现过。
-    // 留在这份名单里而不是在 `apply` 里返回 `true`：单写这两条时长手确实什么都不改，
-    // 报成「接住了」就是把「没做」记成「做了」，`examples/css-gap` 的表会跟着说谎。
-    // 简写里的这些词仍然被**吃掉**（不作废整条），判据写在 `apply` 那一臂的注释上。
+    // 这一族里只剩 `background-origin` 留在「认得、不生效」这一档：一律按**边框盒**
+    // 定位底图；`padding-box` / `content-box` 要给的是内缩的基准矩形。`background-clip`
+    // 2026-11-24 接上了（底色与底图裁到指定盒），简写里的盒值也一并捕获。
     //
     // `background-attachment` 2026-10-31 移了出去：`fixed` 挂在章节根上时，排版层
     // 把这一章抬到至少一屏高（浏览器里那是铺满视口画布的整页底图，卷首/扉页正是这么
     // 写的）。绘制仍跟着纸走、不钉在视口上 —— 那一半的降级写在
     // [`BackgroundAttachment`] 上。它现在真会改屏上的东西，所以不能再记成「不生效」。
-    "background-clip",
     "background-origin",
     // `min-height` 在这份名单里空转过（认得、不生效）：2026-10-21 与 `min-width` 一起
     // 接进 `used_content_height` / `solve_block_width` 那两夹，所以移了出去。

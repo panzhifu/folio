@@ -6,13 +6,14 @@ mod values;
 use border::apply_border;
 pub(crate) use inherit::inherit_from;
 use values::*;
+pub(crate) use values::{apply_in_cascade_order, parse_inline_style};
 
 use super::{
-    AlignItems, BorderStyle, BoxSizing, CellVAlign, ComputedStyle, DecorationStyle, Direction,
-    Display, EmphasisPosition, FlexDirection, FlexWrap, Hyphens, InlineVAlign, JustifyContent,
-    JustifySelf, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning, RubyAlign,
-    RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify, TextTransform,
-    Visibility, WordBreak,
+    AlignItems, BackgroundClip, BorderStyle, BoxSizing, CellVAlign, ComputedStyle, DecorationStyle,
+    Direction, Display, EmphasisPosition, FlexDirection, FlexWrap, Hyphens, InlineVAlign,
+    JustifyContent, JustifySelf, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning,
+    RubyAlign, RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify,
+    TextTransform, Visibility, WordBreak,
 };
 use crate::css::Declaration;
 use crate::css::value::{
@@ -23,63 +24,9 @@ use crate::css::value::{
     set_margin, set_min_length, set_px,
 };
 
-/// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
-///
-/// 分批而不是照书写顺序：`em` / `%` 都按**元素自己的**字号折算，
-/// 若照书写顺序，`text-indent: 2em; font-size: 20px` 会按继承字号算错一档。
-/// 同一批内部仍严格按传进来的层叠顺序。
-pub(super) fn apply_in_cascade_order(
-    style: &mut ComputedStyle,
-    parent: &ComputedStyle,
-    root_px: f32,
-    decls: &[&Declaration],
-) -> usize {
-    let mut ignored = 0usize;
-    // 四批：font-size → line-height → `color` → 其余。
-    // `color` 单独一批是因为 `currentColor` 要拿它：`background-color: currentcolor` 写在
-    // `color` **前面**也得折对 —— 照书写顺序的话，先算的两句拿到的是上一轮的色。
-    for group in 0..4 {
-        for decl in decls {
-            let is_font_size = decl.property == "font-size";
-            let is_line_height = decl.property == "line-height";
-            let is_color = decl.property == "color";
-            let mine = match group {
-                0 => is_font_size,
-                1 => is_line_height,
-                2 => is_color,
-                _ => !is_font_size && !is_line_height && !is_color,
-            };
-            if mine && !apply(style, parent, root_px, decl) {
-                ignored += 1;
-            }
-        }
-    }
-    ignored
-}
-
-/// 元素的 `style="…"` 属性 → 声明列表，按书写顺序（同一属性后面那条盖前面那条）。
-/// 分隔符与声明解析复用样式表入口，容量超限时整份忽略。
-///
-/// `base_dir` 是这一章文档在容器里的目录；进来先按它把 `url(...)` 折成容器内路径，
-/// 与样式表那一份同形，否则同一张图在两处是两个形状、图片索引按容器路径查不到。
-pub(super) fn parse_inline_style(text: &str, base_dir: &str) -> Vec<Declaration> {
-    if !crate::css::budget::allows(text) {
-        tracing::warn!("行内 CSS 超过读取预算，忽略此属性");
-        return Vec::new();
-    }
-    let text = crate::href::absolutize_css_urls(text, base_dir);
-    crate::css::selector::split_top_level(&text, ';')
-        .into_iter()
-        .filter_map(|decl| crate::css::parse_declaration(&decl))
-        .collect()
-}
-
 /// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。
-///
-/// `root_px` 是根元素（读者偏好）的字号，rem 只按它折算；`parent` 提供 font-size 的
-/// 相对基准 —— `em` 在 `font-size` 里按父字号，在别处按自己的字号，这是 CSS 的规定，
-/// 不是我们的选择。`break-before` / `break-after` 与它们的 CSS2.1 同名前缀版本
-/// （`page-break-*`）共用一条解析。
+/// `root_px` 是根字号（rem 按它折）；`parent` 是 font-size 的相对基准（CSS 的规定）。
+/// `break-before` / `break-after` 与 CSS2.1 前缀版（`page-break-*`）共用一条解析。
 pub(super) fn apply(
     style: &mut ComputedStyle,
     parent: &ComputedStyle,
@@ -526,6 +473,22 @@ pub(super) fn apply(
         },
         // 背景一族。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
         // 是两件事（后者可能被更高 specificity 的一条颜色盖住），所以两条都要认。
+        // `background-clip`：只收一档盒值；每层各写一个的列表判不认识（见枚举文档）。
+        "background-clip" => match value.to_ascii_lowercase().as_str() {
+            "border-box" => {
+                style.background_clip = BackgroundClip::BorderBox;
+                true
+            }
+            "padding-box" => {
+                style.background_clip = BackgroundClip::PaddingBox;
+                true
+            }
+            "content-box" => {
+                style.background_clip = BackgroundClip::ContentBox;
+                true
+            }
+            _ => false,
+        },
         "background-color" => {
             // `currentColor` = 本元素自己的 `color`（没写就取继承来的那份）。`color` 那一批
             // 已经先落地，所以这里折得出数 —— 与它写在 `color` 前面还是后面无关。
@@ -579,10 +542,9 @@ pub(super) fn apply(
             }
             None => false,
         },
-        // `background-attachment`：`fixed` 只对**章节根**有排版含义（整页底图至少一屏高，
-        // 见 `layout::layout_inner`），其余元素上它与 `scroll` 同效；`local` 要的是
-        // 「按这一块的内容盒滚动」，而流式块没有自己的滚动区。这里照样收下：
-        // 记成「不生效」会把根上那一条真正生效的声明也一起埋掉。
+        // `background-attachment: fixed` 只对章节根有排版含义（见 `layout::layout_inner`），
+        // 其余元素上与 `scroll` 同效；`local` 在流式块里没有对应物。照样收下：
+        // 记成「不生效」会把根上那条真生效的声明一起埋掉。
         "background-attachment" => match parse_background_attachment_list(value) {
             Some(list) => {
                 let count = list.len();
@@ -591,12 +553,9 @@ pub(super) fn apply(
             }
             None => false,
         },
-        // `background-clip` / `background-origin` 按边框盒画就够（判据在
-        // `KNOWN_UNIMPLEMENTED`）。简写里仍**吃掉**那些词：`background: url(x) … fixed`
-        // 的 `fixed` 是真语法，不认整条简写就作废、底色与图一起消失；长手单写时屏上无变化，
-        // 量具因此必须说真话。
-        // `background` 简写接住**颜色**与**图**两截，丢掉就整块消失；没写到的子属性拉回初值
-        // （判据在 `apply_background_shorthand`）。`initial` 只收简写这一档：整条通用路太大。
+        // `background-origin` 仍按边框盒定位底图（名单里的降级）；简写里的盒值已由
+        // `apply_background_shorthand` 捕获。简写接住**颜色**与**图**两截、未写到的子属性
+        // 拉回初值；`initial` 只收简写这一档。
         "background" if value.eq_ignore_ascii_case("initial") => {
             style.background_color = None;
             style.background_layers.clear();

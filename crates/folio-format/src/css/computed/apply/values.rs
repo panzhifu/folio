@@ -6,10 +6,11 @@
 use std::sync::Arc;
 
 use super::super::{
-    BackgroundAttachment, BackgroundLayer, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundTile, BorderStyle, Color, ComputedStyle, EmphasisPosition, EmphasisStyle,
-    GeneratedContent, GridTrack, Length, QuotePair, ShadowLayer, Transform,
+    BackgroundAttachment, BackgroundClip, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
+    BackgroundSize, BackgroundTile, BorderStyle, Color, ComputedStyle, EmphasisPosition,
+    EmphasisStyle, GeneratedContent, GridTrack, Length, QuotePair, ShadowLayer, Transform,
 };
+use crate::css::Declaration;
 use crate::css::value::{
     edge_length, parse_background_image_layer, parse_background_position, parse_background_repeat,
     parse_background_size, parse_border_style, parse_color, parse_font_family_list,
@@ -631,6 +632,9 @@ pub(super) fn for_each_layer(
 pub(super) struct BackgroundLayerSpec {
     layer: BackgroundLayer,
     color: Option<Color>,
+    /// 简写里出现的视觉盒关键字：一个值时 origin 与 clip 都取它，两个值时
+    /// 前者是 origin、后者是 clip。origin 尚未实现，所以只带走 clip。
+    clip: Option<BackgroundClip>,
 }
 
 /// 解简写的一层。语法是 `<'bg-image'> || <'bg-position'> [/ <'bg-size'>] || <repeat-style>
@@ -650,6 +654,7 @@ pub(super) fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerS
     let (main, size_part) = split_first_top_level(text, '/');
     let mut layer = BackgroundLayer::default();
     let mut color = None;
+    let mut boxes: Vec<BackgroundClip> = Vec::new();
     let mut position: Vec<String> = Vec::new();
     let mut image_seen = false;
     for token in split_value_tokens(main) {
@@ -688,6 +693,11 @@ pub(super) fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerS
             continue;
         }
         if matches!(low.as_str(), "border-box" | "padding-box" | "content-box") {
+            boxes.push(match low.as_str() {
+                "padding-box" => BackgroundClip::PaddingBox,
+                "content-box" => BackgroundClip::ContentBox,
+                _ => BackgroundClip::BorderBox,
+            });
             continue;
         }
         if let Some(rgba) = parse_color(&low) {
@@ -703,7 +713,13 @@ pub(super) fn parse_background_layer_spec(text: &str) -> Option<BackgroundLayerS
         Some(part) => parse_background_size(part)?,
         None => BackgroundSize::default(),
     };
-    Some(BackgroundLayerSpec { layer, color })
+    // 一个盒值同时管 origin 与 clip；两个值时后一个是 clip。
+    let clip = match boxes.as_slice() {
+        [] => None,
+        [only] => Some(*only),
+        [_, clip, ..] => Some(*clip),
+    };
+    Some(BackgroundLayerSpec { layer, color, clip })
 }
 
 /// 在第一个**顶层**分隔符处把值切成两半（尺寸那一截可能是空串，但存在）。
@@ -756,11 +772,20 @@ pub(super) fn apply_background_shorthand(style: &mut ComputedStyle, value: &str)
     // 不重置就是白底**叠在图上**、扉页那张底图变成灰蒙蒙一片。
     style.background_color = None;
     style.background_layers.clear();
+    style.background_clip = BackgroundClip::BorderBox;
     // 颜色归最底那一层（= 书写顺序的最后一条）。写在中间层上的色在浏览器里就是这个下场。
     let mut color = None;
-    for BackgroundLayerSpec { layer, color: c } in parsed {
+    for BackgroundLayerSpec {
+        layer,
+        color: c,
+        clip,
+    } in parsed
+    {
         if c.is_some() {
             color = c;
+        }
+        if clip.is_some() {
+            style.background_clip = clip.unwrap_or_default();
         }
         style.background_layers.push(layer);
     }
@@ -814,4 +839,55 @@ pub(super) fn apply_content(style: &mut ComputedStyle, value: &str) -> bool {
     };
     style.content = content;
     true
+}
+
+/// 按「font-size → line-height → 其余」三批算完一组已排好序的声明，返回没接住的条数。
+///
+/// 分批而不是照书写顺序：`em` / `%` 都按**元素自己的**字号折算，
+/// 若照书写顺序，`text-indent: 2em; font-size: 20px` 会按继承字号算错一档。
+/// 同一批内部仍严格按传进来的层叠顺序。
+pub(crate) fn apply_in_cascade_order(
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    root_px: f32,
+    decls: &[&Declaration],
+) -> usize {
+    let mut ignored = 0usize;
+    // 四批：font-size → line-height → `color` → 其余。
+    // `color` 单独一批是因为 `currentColor` 要拿它：`background-color: currentcolor` 写在
+    // `color` **前面**也得折对 —— 照书写顺序的话，先算的两句拿到的是上一轮的色。
+    for group in 0..4 {
+        for decl in decls {
+            let is_font_size = decl.property == "font-size";
+            let is_line_height = decl.property == "line-height";
+            let is_color = decl.property == "color";
+            let mine = match group {
+                0 => is_font_size,
+                1 => is_line_height,
+                2 => is_color,
+                _ => !is_font_size && !is_line_height && !is_color,
+            };
+            if mine && !super::apply(style, parent, root_px, decl) {
+                ignored += 1;
+            }
+        }
+    }
+    ignored
+}
+
+/// 元素的 `style="…"` 属性 → 声明列表，按书写顺序（同一属性后面那条盖前面那条）。
+/// 分隔符与声明解析复用样式表入口，容量超限时整份忽略。
+///
+/// `base_dir` 是这一章文档在容器里的目录；进来先按它把 `url(...)` 折成容器内路径，
+/// 与样式表那一份同形，否则同一张图在两处是两个形状、图片索引按容器路径查不到。
+pub(crate) fn parse_inline_style(text: &str, base_dir: &str) -> Vec<Declaration> {
+    if !crate::css::budget::allows(text) {
+        tracing::warn!("行内 CSS 超过读取预算，忽略此属性");
+        return Vec::new();
+    }
+    let text = crate::href::absolutize_css_urls(text, base_dir);
+    crate::css::selector::split_top_level(&text, ';')
+        .into_iter()
+        .filter_map(|decl| crate::css::parse_declaration(&decl))
+        .collect()
 }

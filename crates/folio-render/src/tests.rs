@@ -3656,11 +3656,13 @@ fn cells(dom: &Dom, laid: &Layout) -> Vec<(f32, f32, f32, f32)> {
 }
 
 mod align;
+mod decor;
 mod flex;
 mod generated;
 mod grid;
 mod index;
 mod inline;
+mod stacking;
 mod table;
 mod text;
 // 竖排：同一份几何在两根轴上的逐条对照（转置漏一面、接反轴、基线符号错都在这片露）。
@@ -5246,48 +5248,6 @@ fn synthetic_chapter_heading_keeps_its_background_and_border() {
         });
     assert!(title.border[1].0 > 0.0, "右边框要进表：{title:?}");
     assert!(title.border[3].0 > 0.0, "左边框要进表：{title:?}");
-}
-
-// ---- 层叠序（z-index，2026-11-23）----
-
-/// 每条行按 owner 的祖先链取最近的层叠上下文 z。正文 0、绝对定位海报 0、相对定位
-/// 标题 1 → 绘制时标题盖在海报之上（海报虽被追加到末尾，但 z=1 排在它后面）。
-#[test]
-fn line_z_orders_positioned_title_above_absolute_poster() {
-    let html = "<p>正文</p><div class='poster'><img/></div>\
-                <h1 class='title'>章</h1><img src='poster.png'/>";
-    let css = ".poster { position: absolute; z-index: 0; bottom: 0; left: 0 } \
-               .title { position: relative; z-index: 1 }";
-    let (_, laid) = typeset(html, css, 200.0);
-    assert_eq!(laid.line_z.len(), laid.lines.len(), "每行都有 z 值");
-    // 找标题行与正文行的 z。
-    let dom = Dom::parse(html.as_bytes());
-    let title = find(&dom, "h1");
-    let para = find(&dom, "p");
-    let title_lines: Vec<usize> = laid
-        .lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.owner == title)
-        .map(|(i, _)| i)
-        .collect();
-    let para_lines: Vec<usize> = laid
-        .lines
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.owner == para)
-        .map(|(i, _)| i)
-        .collect();
-    assert!(!title_lines.is_empty() && !para_lines.is_empty());
-    assert_eq!(laid.line_z[title_lines[0]], 1, "相对定位 z=1 的标题行 z=1");
-    assert_eq!(laid.line_z[para_lines[0]], 0, "正文没建立层叠上下文，z=0");
-}
-
-/// 没有定位/z-index/opacity/transform 时所有行 z=0 —— 绘制走原序的零回归前提。
-#[test]
-fn line_z_is_all_zero_without_stacking_contexts() {
-    let (_dom, laid) = typeset("<p>甲</p><p>乙</p>", "p { text-indent: 0 }", 200.0);
-    assert!(laid.line_z.iter().all(|&z| z == 0));
 }
 
 /// `visibility: hidden` 只跳过绘制、不跳过排版：行与文字都还在，run 标上 hidden；

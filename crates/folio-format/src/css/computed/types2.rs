@@ -65,6 +65,17 @@ impl BreakWhen {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Color(pub u8, pub u8, pub u8, pub u8);
 
+/// `background-clip`：底色与背景图裁到哪一个盒。初值 `border-box`（CSS 同）。
+///
+/// 只收一档值（CSS 允许每层各写一个，这里统一处理）；`text` 等非盒值判不认识。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BackgroundClip {
+    #[default]
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+}
+
 /// `text-transform`：只收不改**字节长度**的三档。`ß → SS` 那类会改长度，保留原文。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextTransform {
