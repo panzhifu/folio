@@ -58,8 +58,8 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 就是我们做的事，于是改成只收初值（见 `apply` 里那一条臂）。
     // `font-kerning` / `font-feature-settings` / `text-rendering` 2026-11-25 移了出去：
     // 它们折成 OpenType 特性表进 `FontKey`，量宽与绘制共用同一份。
-    // 2026-11-25 移出：`font-stretch` 关键字/百分比折字面宽度档，进 `FontKey` 与
-    // gpui `Font::stretch` 选面；连续可变轴 `wdth` 仍降级（见 `FontStretch`）。
+    // 2026-11-25 移出：`font-stretch` 关键字/百分比折字面宽度档，进 `FontKey` 度量键；
+    // 固定 gpui fork 尚未提供绘制端选面接口，连续可变轴 `wdth` 仍降级（见 `FontStretch`）。
     // 字距 2026-10-16 起真的生效了（`letter-spacing` 已从这份名单移除），所以这里不再列。
     //
     // `cursor` 2026-11-25 移了出去：界面层按命中到的元素读 `ComputedStyle::cursor`，

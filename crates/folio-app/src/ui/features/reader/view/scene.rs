@@ -6,9 +6,9 @@
 
 use std::ops::Range;
 
-use folio_core::content::format::css::computed::{BorderStyle, Color};
+use folio_core::content::format::css::computed::BorderStyle;
 use folio_core::infra::metrics::Metric;
-use folio_core::layout::{DecorPicture, DecorSeed};
+use folio_core::layout::DecorPicture;
 use gpui_kit::{Hsla, SharedString, hsla};
 
 use crate::ui::features::reader::model::chapter_layout::{Document, RowFragment};
@@ -22,8 +22,8 @@ mod tiles;
 use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::{desaturate, desaturate_author, run_color, run_color_link};
 pub(in crate::ui::features::reader) use decor::full_page_picture;
+use decor::overscan_backdrop;
 pub use decor::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
-use decor::{overscan_backdrop, page_color_is_drawn_by_reader};
 use decor_pipeline::place_decorations;
 use tiles::background_tiles;
 pub(in crate::ui::features::reader) use tiles::picture_fills_width;
@@ -466,11 +466,12 @@ mod tests {
 
     use super::place_decorations;
     use super::{
-        BlockDecor, BlockOutline, BlockShadow, DecorSeed, Scene, overscan_backdrop, stack_neighbor,
+        BlockDecor, BlockOutline, BlockShadow, Scene, decor, overscan_backdrop, stack_neighbor,
     };
     use crate::ui::features::reader::view::paint::GlyphRun;
     use crate::ui::foundation::images::ChapterImages;
     use folio_core::content::format::css::computed::TextShadow;
+    use folio_core::layout::DecorSeed;
     use gpui_kit::{Font, Rgba, SharedString, hsla};
 
     use folio_core::content::format::css::computed::ShadowLayer;
@@ -509,7 +510,7 @@ mod tests {
     /// 正文中间自己写了底的块（真装饰）、以及根块以外的高盒，都照旧画。
     #[test]
     fn the_page_itself_is_painted_once() {
-        use super::page_color_is_drawn_by_reader;
+        use super::decor::page_color_is_drawn_by_reader;
         // 纯图页的根块：整页底色交给读者那一层。
         assert!(page_color_is_drawn_by_reader(0, &seed(0.0, 853.0), true));
         // 有正文的章：根块照样画（正文盒没铺到纸底）。

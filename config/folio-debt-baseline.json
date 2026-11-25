@@ -28,7 +28,7 @@
     "crates/folio-app/src/ui/features/reader/view/body/tests/turn.rs": 1404,
     "crates/folio-app/src/ui/features/reader/view/paint.rs": 1036,
     "crates/folio-app/src/ui/features/reader/view/reading_page.rs": 3150,
-    "crates/folio-app/src/ui/features/reader/view/scene.rs": 1169,
+    "crates/folio-app/src/ui/features/reader/view/scene.rs": 1170,
     "crates/folio-app/src/ui/features/settings/view/compact.rs": 1807,
     "crates/folio-app/src/ui/features/settings/view/pages/appearance.rs": 1210,
     "crates/folio-app/src/ui/features/settings/view/pages/storage.rs": 950,
