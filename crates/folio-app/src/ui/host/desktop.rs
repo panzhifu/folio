@@ -4,9 +4,12 @@
 //! DejaVu…），要不到偏好家族时交给它自己退，而不是挑一个 `all_font_names()` 报出来的名字
 //! —— 那个名单里第一个可能是符号字体。
 
-use gpui_kit::{App, Window};
+use gpui_kit::{App, Window, WindowBackgroundAppearance};
 
-use super::{BackAtRoot, Host, Insets, find_family, log_no_family};
+use super::{
+    BackAtRoot, Host, Insets, StealthCapabilities, StealthError, StealthHost, find_family,
+    log_no_family,
+};
 
 pub(super) struct DesktopHost;
 
@@ -63,6 +66,46 @@ impl Host for DesktopHost {
                 wanted.to_string()
             }
         }
+    }
+}
+
+/// 桌面低干扰窗口能力。只做当前 GPUI fork 已经提供的调用；
+/// always-on-top 与跨应用全局热键尚无可证实接口，明确报不支持。
+pub(super) struct DesktopStealthHost;
+
+impl StealthHost for DesktopStealthHost {
+    fn capabilities(&self) -> StealthCapabilities {
+        StealthCapabilities {
+            transparent_background: true,
+            minimize: true,
+            activate: true,
+            always_on_top: false,
+            global_hotkey: false,
+        }
+    }
+
+    fn set_transparent(
+        &self,
+        transparent: bool,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Result<(), StealthError> {
+        window.set_background_appearance(if transparent {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        });
+        Ok(())
+    }
+
+    fn hide(&self, window: &mut Window, _cx: &mut App) -> Result<(), StealthError> {
+        window.minimize_window();
+        Ok(())
+    }
+
+    fn restore(&self, window: &mut Window, _cx: &mut App) -> Result<(), StealthError> {
+        window.activate_window();
+        Ok(())
     }
 }
 

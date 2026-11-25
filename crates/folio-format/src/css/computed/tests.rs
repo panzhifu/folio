@@ -979,14 +979,14 @@ fn opentype_font_properties_report_inert_not_unknown() {
             16.0,
         )
     };
-    // `font-stretch` / `font-kerning` / `font-feature-settings` 仍是整条「认得、不生效」：
-    // 值写什么都不改变这件事。
-    assert_eq!(status("font-stretch", "condensed"), DeclStatus::Inert);
-    assert_eq!(status("font-kerning", "none"), DeclStatus::Inert);
+    // `font-stretch` 已接进字面宽度档；`font-kerning` / `font-feature-settings` 已接进 shaping 表。
+    assert_eq!(status("font-stretch", "condensed"), DeclStatus::Applied);
+    assert_eq!(status("font-kerning", "none"), DeclStatus::Applied);
     assert_eq!(
         status("font-feature-settings", "\"liga\" 0"),
-        DeclStatus::Inert
+        DeclStatus::Applied
     );
+    assert_eq!(status("font-kerning", "眨眼"), DeclStatus::Unparsed);
     // `font-variant` / `font-variant-caps`：2026-10-29 只收初值，2026-11-04 起也收
     // `small-caps`（排版层把小写换成大写、字号乘 0.8）。其余值仍判不认识。
     assert_eq!(status("font-variant", "normal"), DeclStatus::Applied);
@@ -1315,11 +1315,9 @@ fn declaration_status_agrees_with_the_cascade() {
         declaration_status(&decl("font-size", "20px"), &base, 16.0),
         DeclStatus::Applied
     );
-    assert_eq!(
-        declaration_status(&decl("cursor", "pointer"), &base, 16.0),
-        DeclStatus::Inert,
-        "名单里的属性该报 Inert，而不是不认识"
-    );
+    // `-webkit-font-smoothing` 仍在名单里，作 Inert 样例。
+    let inert = declaration_status(&decl("-webkit-font-smoothing", "antialiased"), &base, 16.0);
+    assert_eq!(inert, DeclStatus::Inert);
     assert_eq!(
         declaration_status(&decl("font-size", "huge"), &base, 16.0),
         DeclStatus::Unparsed
@@ -3379,9 +3377,9 @@ fn current_color_is_accepted_wherever_a_border_color_can_go() {
     assert_eq!(page.styled.ignored, 0, "三条都该接住");
 }
 
-/// `cursor` 是界面提示，不是排版属性 —— 记「认得、不生效」，不再报成「不认识」。
+/// `cursor` 的关键字进枚举（界面层按命中到的元素读）；没有对应形状的判不认识。
 #[test]
-fn cursor_is_known_but_inert() {
+fn cursor_keywords_apply_and_unknown_ones_are_counted() {
     let base = ComputedStyle::default();
     let decl = |property: &str, value: &str| Declaration {
         property: property.into(),
@@ -3390,12 +3388,12 @@ fn cursor_is_known_but_inert() {
     };
     assert_eq!(
         declaration_status(&decl("cursor", "pointer"), &base, 16.0),
-        DeclStatus::Inert
+        DeclStatus::Applied
     );
     assert_eq!(
         declaration_status(&decl("cursor", "眨眼"), &base, 16.0),
-        DeclStatus::Inert,
-        "名单里的属性不看值 —— 值怎么写在屏上都不生效，这是名单的语义"
+        DeclStatus::Unparsed,
+        "gpui 没有这个形状，判不认识而不是悄悄当 auto"
     );
 }
 
@@ -3729,5 +3727,5 @@ fn ruby_alignment_inherits_and_the_prefixed_aliases_fold_into_it() {
     );
     assert_eq!(bad.styled.ignored, 1, "`justify` 仍要计不认识");
 }
-
+mod new_styles;
 mod ruby;

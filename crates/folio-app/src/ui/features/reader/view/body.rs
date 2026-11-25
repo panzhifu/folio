@@ -861,15 +861,13 @@ impl Render for ReaderSession {
         // `order < CAPTURE_ORDER_BASE`，层里的东西不上屏。
         let capture_front = capture_needed;
 
-        // 正文调色板：这一帧纸/墨/链接/淡墨的**唯一来源**。选了正文主题（按书差量
-        // 可覆盖）走内置表的日夜配对；「跟随软件」那一档回落壳主题的同四格 —— 消费点
-        // 自己再摸 `cx.theme()` 等于把「纸色跟着壳」从后门接回来。
-        //
-        // 外观在这里取一次，水墨判断与调色板共用；折叠（书内浅深盖软件浅深）本身在
-        // `effective_mode` 一处，外壳那句 `themed_appearance` 也调它 —— 三处各写一份
-        // 就会漂。
+        // 正文调色板唯一来源；低干扰只淡纸，字与版式不动。
         let appearance = ConfigHolder::appearance(cx);
-        let reading = reading_theme::resolve(&appearance, cx);
+        let mut reading = reading_theme::resolve(&appearance, cx);
+        let alpha = crate::ui::services::stealth::content_opacity(cx);
+        if alpha < 1.0 {
+            reading.bg = reading.bg.opacity(alpha);
+        }
         // 批注划线只有那五种（`ANNOTATION_COLORS`），一次取好，逐条画时查表。
         let palette = Palette::of(cx.theme());
         let family = self.family.clone();
@@ -1696,6 +1694,7 @@ mod truth_tables {
                     ascent: 14.0,
                     descent: 4.0,
                     x_offset: 0.0,
+                    cross_offset: 0.0,
                 }),
             ],
             x: 0.0,
@@ -1738,6 +1737,7 @@ mod truth_tables {
                 ascent: 24.4,
                 descent: 6.9,
                 x_offset: 0.0,
+                cross_offset: 0.0,
             })],
             x: 0.0,
             y,

@@ -22,7 +22,6 @@ use gpui_kit::TextSystem;
 pub use folio_core::text::load::note_external_registration;
 pub use folio_core::text::load::{BookFonts, FontLoadJob, FontRequest};
 
-// `for_document` / `for_texts` 是测试与探针的同步入口；生产走 `FontLoadJob`。
 #[cfg(test)]
 use folio_core::content::document::Document;
 #[cfg(test)]

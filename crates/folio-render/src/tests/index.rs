@@ -344,6 +344,7 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
         if style.background_color.is_none()
             && drawn.iter().all(|w| *w <= 0.0)
             && pictures.is_empty()
+            && style.backdrop_blur.is_none()
         {
             continue;
         }
@@ -413,6 +414,7 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
             pictures,
             box_shadows: style.box_shadows.clone(),
             outline: style.outline.filter(|(w, _, _, _)| *w > 0.0),
+            backdrop_blur: style.backdrop_blur,
         });
     }
     out
@@ -591,4 +593,18 @@ fn the_flow_accessors_are_the_horizontal_fields() {
     );
     let only = &flat.lines[0];
     assert_eq!(flat.flow_end(only), flat.flow_start(only));
+}
+
+/// 只写 `backdrop-filter`、没有底色与边框的块也必须进装饰表，否则毛玻璃永远画不出来。
+#[test]
+fn a_backdrop_filter_alone_puts_the_block_in_the_table() {
+    let glassy = ComputedStyle {
+        backdrop_blur: Some(8.0),
+        ..ComputedStyle::default()
+    };
+    let sheet = decorated(&[(1, glassy)]);
+    let one = |b: BlockBox| assemble(vec![b], Vec::new(), 336.0, 600.0);
+    let seeds = one(box_at(1, 0.0, 60.0, true)).decor_seeds(&sheet);
+    assert_eq!(seeds.len(), 1, "只有毛玻璃也要进表");
+    assert_eq!(seeds[0].backdrop_blur, Some(8.0));
 }

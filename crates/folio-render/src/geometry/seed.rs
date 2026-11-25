@@ -61,6 +61,9 @@ pub struct DecorSeed {
     pub box_shadows: Arc<[ShadowLayer]>,
     /// `outline`：`(宽, 色, 画法, 偏移)`，画在边框盒**外侧**。`None` = 没有或宽 0。
     pub outline: Option<(f32, Option<Color>, BorderStyle, f32)>,
+    /// `backdrop-filter: blur(<px>)` 的半径。`None` = 没有这条声明。
+    /// 绘制侧只把它转成 gpui 的毛玻璃 primitive；底下压着什么由绘制顺序决定。
+    pub backdrop_blur: Option<f32>,
     /// 这是**章节根**的一块 `background-attachment: fixed` 底图：书要的是一整页的画。
     ///
     /// 阅读器把它当整窗背板画（贴在窗口上、不进版心），并把这条种子从常规块装饰里
@@ -78,4 +81,23 @@ pub struct DecorPicture {
     pub size: BackgroundSize,
     pub position: BackgroundPosition,
     pub repeat: BackgroundRepeat,
+}
+
+/// 一条栏间分隔线：多栏容器在栏缝正中画的一条竖带子。
+///
+/// 与 `DecorSeed` 分开成表：它不是某个块自己的边框，而是块级多栏容器的**附加产物**
+/// （一条多栏可能画 n−1 条），挂在 `Layout::column_rules` 上随整章排版结果走。
+/// 三要素复用 `BorderStyle` 的画法，色在层叠期已折好；`None` 落本块字色那一刀
+/// 由 `decor_seeds` emit 时当场做（`color.or(style.color)`），与边框同一条规矩。
+///
+/// 坐标是**章内坐标**，横排下 x 是竖带子左缘、y 是顶缘、w 是线宽、h 是内容高；
+/// 竖排下由 `transposed` 一并投影成横线（块轴转置）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnRule {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: Option<Color>,
+    pub style: BorderStyle,
 }

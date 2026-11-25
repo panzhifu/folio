@@ -7,6 +7,7 @@
 //! 因为真实出版书里总有些用不上的声明，为一两个 `transform` 让整本书排版失败
 //! 是最糟的失败方式。
 mod cascade;
+mod derived;
 mod known;
 mod types;
 mod types2;
@@ -17,16 +18,17 @@ pub use types::{
     BackgroundRepeat, BackgroundSize, BackgroundTile, BoxSizing, Clear, Float,
 };
 pub use types2::{
-    BackgroundClip, BreakWhen, CellVAlign, Color, Hyphens, InlineVAlign, Positioning, RubyAlign,
-    RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextShadow, TextTransform, WordBreak,
+    BackgroundClip, BreakWhen, CellVAlign, Color, ColumnFill, ColumnSpan, Cursor, FontKerning,
+    FontStretch, Hyphens, InlineVAlign, Length, Positioning, RubyAlign, RubyPosition, SvgLineCap,
+    SvgLineJoin, SvgPaint, TextCombine, TextRendering, TextShadow, TextTransform, WordBreak,
 };
 
 use crate::dom::NodeId;
 use std::sync::Arc;
 
 use super::{Declaration, RuleSet};
-
-mod apply;
+pub(super) mod apply;
+pub(super) use apply::boxes::{apply_column_rule_parts, apply_column_span};
 
 // `inherit_from` 原本就是 `pub(crate)`，`css::ua` 从这条路径取它，所以这里必须是再导出而非私有导入。
 pub(crate) use apply::inherit_from;
@@ -564,61 +566,6 @@ impl ComputedStyle {
     }
 }
 
-/// 一个尺寸值。`none` 用 `Option::None` 表示。百分比不在此刻折算 —— 它要按**包含块
-/// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。带百分比的字段都存
-/// 这个类型（外边距、内边距与 `text-indent` 在 CSS 里同样折算自包含块宽，真书上是大头），
-/// 层叠期折成 px 等于拿窗口宽猜。
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Length {
-    Px(f32),
-    /// 比例，`50%` 存成 `0.5`。
-    Percent(f32),
-    /// `auto`。**只有外边距会走到这一档**：CSS 里 `padding: auto` 与 `text-indent: auto`
-    /// 是非法值（层叠期就判不认识），`width: auto` 那一族用 `Option::None` 表示。
-    ///
-    /// 层叠期不折成 0：`margin-left/right: auto` 是「横向剩余宽度均分」（CSS 2.1
-    /// §10.3.3），剩余宽取决于作者 `width` 折出来多少，那是排版期的一对数。折成 0
-    /// 等于宣布「本书没有块级居中」，写着 `margin: 0 auto` 的定宽插图一律贴左缘。
-    /// 求解在 `layout::collect::solve_block_width`；[`Length::resolve`] 给 `auto` 回 0。
-    Auto,
-}
-
-impl Length {
-    /// 每个长度字段的初值。`Px(0.0)` 而不是 `None`：`None` 在这一族里表示
-    /// 「作者写了 `auto` / `none`」，与「没写过」是两件事。
-    pub const ZERO: Length = Length::Px(0.0);
-
-    /// 按包含块基准长度折算成 px。`Auto` 给 0 —— 它真正的用处由排版层拿去均分
-    /// （见 [`Length::Auto`]），单看这一格就是「不占位」。
-    pub fn resolve(self, basis: f32) -> f32 {
-        match self {
-            Length::Px(v) => v,
-            Length::Percent(p) => p * basis,
-            Length::Auto => 0.0,
-        }
-    }
-
-    /// 这一格是不是 `auto`。横向求解要靠它分辨「作者写的 0」与「作者要均分」。
-    pub fn is_auto(self) -> bool {
-        matches!(self, Length::Auto)
-    }
-}
-
-impl ComputedStyle {
-    /// 这一块的背景里**真带图**的那些层，按 CSS 书写顺序（先写的在屏幕上更靠上）。
-    ///
-    /// 只留一个出口而不是让各处直接读 `background_layers`：图层表里允许存在「有摆法、
-    /// 没有图」的惰性层（`background: #fff` 这条简写就会留一层，而 `background-repeat`
-    /// 写在 `background-image` 之前时也必须先有一层才能挂上值 —— 去掉它们会让配对关系
-    /// 看声明次序而定）。排版与绘制要的从来只是「有哪几张图、各怎么摆」，
-    /// 这一格就是那句话唯一的说法。
-    pub fn background_pictures(&self) -> impl Iterator<Item = &BackgroundLayer> {
-        self.background_layers
-            .iter()
-            .filter(|layer| layer.image.is_some())
-    }
-}
-
 /// `position`：只收 `static`（初值）与 `absolute` / `fixed`。
 ///
 /// 排版层需要的计算后样式。除 `margin` / `padding` / `text-indent` / 替换元素的
@@ -630,6 +577,10 @@ pub struct ComputedStyle {
     pub line_height: f32,
     pub font_weight: u16,
     pub font_italic: bool,
+    /// `font-stretch`：可继承；百分比按 CSS 关键字区间就近折档。
+    ///
+    /// 连续 `wdth` 轴不在这里，折档后选面。
+    pub font_stretch: FontStretch,
     /// `font-variant: small-caps`（可继承）。
     ///
     /// 排版层把小写字母换成等字节长度的 uppercase，并把这一段字号乘 0.8；
@@ -642,6 +593,12 @@ pub struct ComputedStyle {
     /// 时，设备上没装 `MyFont` 就直接落回读者的字体，作者排在第二位的那一份明明装着。
     /// 逐个试的工作在平台层做（只有它知道这台设备注册了哪些家族，见 `ui::reader::measure`）。
     pub font_families: Vec<String>,
+    /// `font-kerning`（可继承）。三档见 [`FontKerning`]；落在 shaping 的特性表里。
+    pub font_kerning: FontKerning,
+    /// `font-feature-settings` 的 OpenType 特性表（可继承）；同名标签后者胜，不改原文。
+    pub font_features: Arc<[(String, u32)]>,
+    /// `text-rendering`（可继承）。只用来关掉连字/字偶距的那一档有行为差别。
+    pub text_rendering: TextRendering,
     /// 书写方向。CSS 的 `direction`，**可继承**；来源有三处：作者样式表、元素的
     /// `dir` 属性（HTML 的 presentational hint，优先级在作者样式之下），以及继承。
     /// 见 [`Direction`] 那一段「做到哪一层」的说明。
@@ -694,6 +651,11 @@ pub struct ComputedStyle {
     /// 不继承。降级口径（贪心配平、不跨栏拆单元）记在 `collect::columns_layout`。
     pub column_count: Option<u16>,
     pub column_width: Option<Length>,
+    /// `column-fill`：`balance`（初值，二分配平）或 `auto`（按序装满）。不继承。
+    pub column_fill: ColumnFill,
+    /// `column-rule`：栏间分隔线三要素（同 [`BorderEdge`]）；画在栏缝正中。不继承。
+    pub column_rule: BorderEdge,
+    pub column_span: ColumnSpan,
     // ---- Flex 子项属性（只被 Flex 容器的直接子项消费）----
     /// `flex-grow` / `flex-shrink` 因子与 `flex-basis`。不继承。
     pub flex_grow: f32,
@@ -738,6 +700,8 @@ pub struct ComputedStyle {
     /// `text-transform`：可继承。只在**字节长度不变**时真的换字符 —— 锚点是源文本字节
     /// 偏移，改长度会让选区/进度漂（见 `wrap::transform_text`）。
     pub text_transform: TextTransform,
+    /// 竖排数字并格（可继承）；横排里不生效。
+    pub text_combine: TextCombine,
     /// `text-size-adjust` / `-webkit-text-size-adjust`：阅读器字号提示（100% = 不缩放）。
     pub text_size_adjust: Option<f32>,
     /// `grid-template-columns` 的轨道定义与 `quotes`（均可继承 quotes、grid 轨道不继承）。
@@ -784,6 +748,9 @@ pub struct ComputedStyle {
     ///
     /// 与 `background_color` 同一条规矩：**不继承**，所以 `inherit_from` 不带它。
     pub background_layers: Vec<BackgroundLayer>,
+    /// `backdrop-filter: blur(<长度>)` 的模糊半径（px），不继承。只收单个 `blur()`；
+    /// 改像素颜色的滤镜与连写整条判不认识。绘制侧落成 gpui `BackdropGlass`。
+    pub backdrop_blur: Option<f32>,
     /// 四边边框，顺序 `[上, 右, 下, 左]`（与 `box_sides` 同一套展开规则）。
     /// 布局拿它算盒宽与盒高，绘制拿它画线；不继承。
     pub border: [BorderEdge; 4],
@@ -874,6 +841,9 @@ pub struct ComputedStyle {
     /// 走继承传播（`inherit_from` 里那一行）：子元素与其中的文本都算在链接里，与 CSS 装饰线
     /// 向后代传播同理。作者写了 `color` 时它照旧赢 —— 这一格只在 `color == None` 时才有话语权。
     pub link: bool,
+    /// `cursor`：指针形状（可继承）。只被界面层消费 —— 它不改版面，也不改绘制，
+    /// 只改「指针停在字上时该长什么样」。
+    pub cursor: Cursor,
     pub white_space_pre: bool,
     /// 尺寸六件套。作者写的数**含不含**边框与内边距由 [`ComputedStyle::box_sizing`] 定，
     /// 折算只走 [`ComputedStyle::content_size`]（四个落点共用）。落点分两条：
@@ -966,9 +936,13 @@ impl Default for ComputedStyle {
             line_height: 1.75,
             font_weight: 400,
             font_italic: false,
+            font_stretch: FontStretch::Normal,
             small_caps: false,
             font_family: String::new(),
             font_families: Vec::new(),
+            font_kerning: FontKerning::Auto,
+            font_features: Arc::from(Vec::new()),
+            text_rendering: TextRendering::Auto,
             direction: Direction::Ltr,
             writing_mode: WritingMode::HorizontalTb,
             text_align: TextAlign::Start,
@@ -993,6 +967,9 @@ impl Default for ComputedStyle {
             column_gap: None,
             column_count: None,
             column_width: None,
+            column_fill: ColumnFill::Balance,
+            column_rule: BorderEdge::default(),
+            column_span: ColumnSpan::default(),
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: None,
@@ -1018,6 +995,7 @@ impl Default for ComputedStyle {
             svg_stroke_linecap: SvgLineCap::default(),
             svg_stroke_linejoin: SvgLineJoin::default(),
             text_transform: TextTransform::None,
+            text_combine: TextCombine::None,
             text_size_adjust: None,
             grid_template_columns: Arc::from(Vec::new()),
             background_clip: BackgroundClip::BorderBox,
@@ -1034,6 +1012,7 @@ impl Default for ComputedStyle {
             color: None,
             background_color: None,
             background_layers: Vec::new(),
+            backdrop_blur: None,
             border: [BorderEdge::default(); 4],
             border_collapse: false,
             border_spacing: [0.0; 2],
@@ -1055,6 +1034,7 @@ impl Default for ComputedStyle {
             underline: false,
             line_through: false,
             link: false,
+            cursor: Cursor::Auto,
             white_space_pre: false,
             width: None,
             min_width: None,
@@ -1144,9 +1124,17 @@ impl std::hash::Hash for ComputedStyle {
         f(self.line_height, h);
         self.font_weight.hash(h);
         self.font_italic.hash(h);
+        (self.font_stretch as u8).hash(h);
         self.small_caps.hash(h);
         self.font_family.hash(h);
         self.font_families.hash(h);
+        (self.font_kerning as u8).hash(h);
+        self.font_features.len().hash(h);
+        for (tag, value) in self.font_features.iter() {
+            tag.hash(h);
+            value.hash(h);
+        }
+        (self.text_rendering as u8).hash(h);
         (self.direction as u8).hash(h);
         (self.writing_mode as u8).hash(h);
         (self.text_align as u8).hash(h);
@@ -1171,6 +1159,9 @@ impl std::hash::Hash for ComputedStyle {
         opt_len(&self.column_gap, h);
         self.column_count.hash(h);
         opt_len(&self.column_width, h);
+        (self.column_fill as u8, self.column_span as u8).hash(h);
+        self.column_rule.width.to_bits().hash(h);
+        (self.column_rule.style as u8, self.column_rule.color).hash(h);
         f(self.flex_grow, h);
         f(self.flex_shrink, h);
         opt_len(&self.flex_basis, h);
@@ -1225,9 +1216,11 @@ impl std::hash::Hash for ComputedStyle {
         (self.svg_stroke_linecap as u8).hash(h);
         (self.svg_stroke_linejoin as u8).hash(h);
         (self.text_transform as u8).hash(h);
+        self.text_combine.hash(h);
         self.text_size_adjust.map(f32::to_bits).hash(h);
         self.grid_template_columns.len().hash(h);
         (self.background_clip as u8).hash(h);
+        self.backdrop_blur.map(f32::to_bits).hash(h);
         (self.background_origin as u8).hash(h);
         self.grid_column_start.hash(h);
         self.grid_column_span.hash(h);
@@ -1299,6 +1292,7 @@ impl std::hash::Hash for ComputedStyle {
         // 「在一条链接里」这一格 2026-11-04 之前漏在清单外。漏掉的不是「画错」而是「画旧」：
         // 它决定绘制层要不要换成主题的链接色，而块级缓存按这份哈希判命中。
         self.link.hash(h);
+        (self.cursor as u8).hash(h);
         // 「在一条链接里」这一格 2026-11-04 之前漏在清单外。漏掉的不是「画错」而是「画旧」：
         // 它决定绘制层要不要换成主题的链接色，而块级缓存按这份哈希判命中。
         self.white_space_pre.hash(h);

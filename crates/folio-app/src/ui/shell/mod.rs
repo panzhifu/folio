@@ -12,6 +12,7 @@
 //! 而变，进出的动画里再没有东西可跳（取舍见 [`ReadingLayer`]）。
 
 pub mod navigation;
+pub mod stealth;
 
 use std::time::Duration;
 
@@ -38,6 +39,7 @@ use crate::ui::features::welcome::WelcomeView;
 use crate::ui::foundation::theme;
 use crate::ui::host;
 use crate::ui::services::config::ConfigHolder;
+use crate::ui::services::stealth as stealth_service;
 use crate::ui::services::storage;
 use navigation::{Destination, FoldTracker, SizeClass, navigation};
 
@@ -316,12 +318,8 @@ pub struct AppShell {
     notes: gpui_kit::Entity<NotesView>,
     /// 首次启动的欢迎页。书库位置没确认前，外壳画的是它而不是主界面。
     welcome: gpui_kit::Entity<WelcomeView>,
-    /// 现在是不是停在欢迎页。启动时由「书库位置确认过没有」决定（见 [`AppShell::boot`]），
-    /// 读者挑完位置、配置一变，就翻掉（见 `_config_watch`）。
     onboarding: bool,
-    /// 配置观察者：改偏好即落盘并重画。drop 掉就失效，所以必须活着。
     _config_watch: Subscription,
-    /// 书架「打开一本书」的订阅。
     _shelf_watch: Subscription,
     _remote_watch: Option<Subscription>,
     /// 「笔记」那一屏「点开某一条」的订阅：开书并把落点递进去。
@@ -332,6 +330,8 @@ pub struct AppShell {
     /// 而一屏静止的文字自己不会要求重画 —— 不接这一条，「跟随系统」就只有改偏好或重启
     /// 才看得见。这里只要一次 `notify`：该不该重涂、涂成哪一档，判据都在渲染那一处。
     _appearance_watch: Subscription,
+    /// 窗口重新激活的订阅：最小化隐藏后从系统恢复时把低干扰状态收回可见态。
+    _stealth_activation_watch: Subscription,
     /// 移动端应用生命周期（桌面平台不发）：后台结账、前台续段。
     _lifecycle_watch: Subscription,
     /// 系统内存告警（Android `onTrimMemory`）：丢掉可重建的图像缓存。
@@ -396,21 +396,14 @@ impl AppShell {
         window.on_next_frame(|window, _| {
             window.on_next_frame(|_, cx| crate::ui::services::speech::prewarm(cx));
         });
-        // 系统返回 → `Back`，由本视图的 `on_action` 处理。
         cx.bind_keys([KeyBinding::new("escape", Back, None)]);
-        // 音量键 → 这两个动作。归谁管在 `volume_key` 里判（阅读页翻页，别处调系统音量），
-        // 所以这里两条都无上下文地绑上：Android 的音量键不经过任何输入框，不存在和打字
-        // 抢键的问题。
+        self::stealth::bind_keys(cx);
         cx.bind_keys([
             KeyBinding::new("volumeup", VolumeUp, None),
             KeyBinding::new("volumedown", VolumeDown, None),
         ]);
-        // 方向键（PC）→ 翻页。四条同样无上下文地绑：焦点是文字输入时 gpui **根本不派发
-        // 键绑定**（`InputPreference::CharacterInput`，见 `Window::dispatch_key_event`），
-        // 所以搜索框、设置页里的输入框不必另设一条 key context；其余看书的翻页方向、
-        // 子栈上有没有压着别的屏、图片查看器开没开，判据在
-        // [`ReadingPage::arrow_turn`]。那边不接时这里的处理者 `propagate`，这一键就
-        // 落回焦点元素自己（滑条、列表、下拉都拿得到）。
+        // 方向键（PC）→ 翻页。四条都无上下文绑定：输入焦点时 gpui 不派发键绑定，
+        // 其余翻页/跨屏/图片查看器的判据在 [`ReadingPage::arrow_turn`]。
         cx.bind_keys([
             KeyBinding::new("left", ArrowLeft, None),
             KeyBinding::new("right", ArrowRight, None),
@@ -420,6 +413,7 @@ impl AppShell {
 
         // 系统外观变化使当前窗口刷新。
         let _appearance_watch = cx.observe_window_appearance(window, |_, _, cx| cx.notify());
+        let _stealth_activation_watch = self::stealth::observe_activation(window, cx);
 
         // 移动端生命周期与内存告警：事件只有移动平台会发（桌面平台是空实现，永远不会响）。
         // 只转给当前打开着的那本书；没在读书时什么都不做。
@@ -666,6 +660,8 @@ impl AppShell {
             }
         });
 
+        self::stealth::register_actions(cx);
+
         Self {
             destination: Destination::Shelf,
             stacks,
@@ -682,13 +678,13 @@ impl AppShell {
             _notes_watch,
             _stack_watch,
             _appearance_watch,
+            _stealth_activation_watch,
             _lifecycle_watch,
             _memory_watch,
             applied: None,
             watched_library: ConfigHolder::library(cx),
             _save_debounce: None,
             fullscreen_asked: None,
-            // 建起来就算「在前台」：启动那一帧不是「回到前台」，意愿由上面那条
             // `fullscreen_asked != Some(..)` 第一次递出去，不必这里再递一遍。
             was_active: true,
             // 背光同理：第一次递由 `brightness_asked != Some(..)` 那条判出来。
@@ -1164,6 +1160,7 @@ impl AppShell {
     ) -> AnyElement {
         let width = f32::from(window.viewport_size().width).max(1.0);
         let (shift, alpha) = layer_offset(sample.phase, sample.progress, width);
+        let alpha = if stealth_service::is_quiet(cx) { 0.0 } else { alpha };
         // 捕获层要按最终位置烘页：把外壳这一帧的横移交给正文，正文用 `-shift` 抵消。
         //
         // 只在**进场**那一段交：退场那一段整层同时在淡出（`alpha` 从 1 走到 0，见
@@ -1185,7 +1182,7 @@ impl AppShell {
         div()
             .absolute()
             .inset_0()
-            .bg(cx.theme().background)
+            .bg(cx.theme().background.opacity(alpha))
             .left(px(shift))
             .right(px(-shift))
             .opacity(alpha)
@@ -1199,8 +1196,7 @@ impl AppShell {
             .into_any_element()
     }
 
-    /// 音量键按下：翻页还是把这一按还给系统，分流判据在 [`VolumeKey::of`]。
-    ///
+    /// 音量键按下：翻页还是还给系统，判据在 [`VolumeKey::of`]。
     /// 翻页走阅读页自己那条路（与点屏幕左右两边同一个入口），所以分页 / 连续滚动 /
     /// 章末跨章的行为全都跟着正文。调音量那一路只有 Android 有实现，见
     /// [`crate::ui::platform::adjust_system_volume`]。
@@ -1215,12 +1211,8 @@ impl AppShell {
         }
     }
 
-    /// 方向键按下（PC）：翻页，或者把这一键放回焦点元素。
-    ///
-    /// 没有书挂着、子栈上压着别的屏、图片查看器开着这三档都不接 —— 前两档是「这一键
-    /// 属于别人」，最后一档是「那一层自己的 `on_key_down` 在键绑定之后跑」。判据在
-    /// [`ReadingPage::arrow_turn`]，这里只负责在它说不接时 `propagate`：不 `propagate`
-    /// 的话，这一键就被外壳吃掉了，下面的滑条 / 列表永远拿不到。
+    /// 方向键（PC）：翻页或把这一键放回焦点元素；不接时 `propagate`，判据见
+    /// [`ReadingPage::arrow_turn`]。
     fn arrow_key(&mut self, arrow: Arrow, cx: &mut Context<Self>) {
         let Some(layer) = self.reading.as_ref() else {
             cx.propagate();
@@ -1233,8 +1225,7 @@ impl AppShell {
     }
 
     /// 当前目的地这条栈上是不是压着页（栈底之外还有东西）。
-    ///
-    /// 判据只看栈的形状，不看压上来的是谁：阅读页、「信息」那一页、阅读里压进去的设置屏
+    /// 判据只看栈的形状，不看压上来的是谁：阅读页、信息页、阅读里压进去的设置屏
     /// 要的都是整屏，而它们各自到外壳报一次「我开着呢」迟早会漏报一个。
     /// 问的是**当前目的地**那一条栈：切去别的目的地时，那边的导航栏不该跟着消失。
     fn page_pushed(&self, cx: &App) -> bool {
@@ -1570,8 +1561,10 @@ impl Render for AppShell {
             ),
             _ => None,
         };
+        // 低干扰书盖满窗口时不画架面，免得透明阅读层透出书架；没书或进退场时照旧。
+        let quiet_reading = stealth_service::is_quiet(cx) && overlay.is_some();
 
-        div()
+        let mut root = div()
             .id("folio-shell")
             .size_full()
             // 阅读层是 `absolute`，要有个定位基准：根不给 `relative`，它就以窗口为基准 ——
@@ -1596,10 +1589,11 @@ impl Render for AppShell {
             // `on_scroll`（gpui 只把它交给被指定的那一个滚动容器），所以要走
             // `window.on_mouse_event` 这条窗口级的路 —— 与阅读层记原始触摸的 `touch_follow`
             // 同一套路。而监听表按绘制顺序排，画在前面才轮得到它第一个收。
-            .child(nav_watch(cx.weak_entity()))
-            .child(body)
-            .children(overlay)
-            .into_any_element()
+            .child(nav_watch(cx.weak_entity()));
+        if !quiet_reading {
+            root = root.child(body);
+        }
+        root.children(overlay).into_any_element()
     }
 }
 

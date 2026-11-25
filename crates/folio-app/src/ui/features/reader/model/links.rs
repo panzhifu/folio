@@ -13,6 +13,7 @@
 //! 读者按那一格就沿同一批函数落回去。
 
 use folio_core::Locator;
+use folio_core::content::format::css::computed::Cursor;
 use gpui_kit::{App, Context, Pixels, Point, Window};
 
 use crate::ui::features::reader::model::book::Link;
@@ -104,5 +105,24 @@ impl ReaderSession {
         let (chapter, offset) = self.offset_at(window, cx, at)?;
         let href = self.book()?.span_doc(chapter)?.link_href_at(offset)?;
         Some((chapter, href))
+    }
+
+    /// 指针停在 `at` 上该用的形状。链接上没写 `cursor` 时补手形（浏览器同）。
+    ///
+    /// 与点击共用同一套命中（`offset_at` → 章内偏移 → 元素样式），所以「能点的字」
+    /// 与「显示手形的字」永远是同一批。空白区域给 `None`，界面保持平台默认。
+    pub(in crate::ui::features::reader) fn cursor_at(
+        &self,
+        window: &Window,
+        cx: &App,
+        at: Point<Pixels>,
+    ) -> Option<Cursor> {
+        let (chapter, offset) = self.offset_at(window, cx, at)?;
+        let doc = self.book()?.span_doc(chapter)?;
+        let cursor = doc.cursor_at(offset)?;
+        if cursor != Cursor::Auto {
+            return Some(cursor);
+        }
+        doc.link_href_at(offset).map(|_| Cursor::Pointer)
     }
 }

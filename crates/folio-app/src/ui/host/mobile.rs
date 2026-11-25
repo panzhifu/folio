@@ -11,7 +11,9 @@ use gpui_kit::{App, Window};
 #[cfg(target_os = "android")]
 use gpui_mobile::android::jni;
 
-use super::{BackAtRoot, Host, Insets, find_family, log_no_family};
+use super::{
+    BackAtRoot, Host, Insets, StealthCapabilities, StealthHost, find_family, log_no_family,
+};
 
 pub(super) struct MobileHost;
 
@@ -78,6 +80,32 @@ impl Host for MobileHost {
 
 // ────────────────────────────────────────────────────────────────────
 // 内部辅助
+
+/// 移动端没有桌面窗口属性可改，低干扰能力全关。
+pub(super) struct MobileStealthHost;
+
+impl StealthHost for MobileStealthHost {
+    fn capabilities(&self) -> StealthCapabilities {
+        StealthCapabilities::default()
+    }
+
+    fn set_transparent(
+        &self,
+        _transparent: bool,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Result<(), super::StealthError> {
+        Ok(())
+    }
+
+    fn hide(&self, _window: &mut Window, _cx: &mut App) -> Result<(), super::StealthError> {
+        Ok(())
+    }
+
+    fn restore(&self, _window: &mut Window, _cx: &mut App) -> Result<(), super::StealthError> {
+        Ok(())
+    }
+}
 // ────────────────────────────────────────────────────────────────────
 
 /// 要读哪一类 inset。

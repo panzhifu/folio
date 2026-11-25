@@ -5,11 +5,11 @@
 
 // 这一屏压出来的两页与它共用同一个实体：信息页（压导航栈的整屏）与整机扫描的候选清单。
 pub(in crate::ui::features::shelf) mod book_info;
+mod covers;
 pub(in crate::ui::features::shelf) mod grid;
 pub(in crate::ui::features::shelf) mod network_import;
 pub(in crate::ui::features::shelf) mod scan;
 pub(in crate::ui::features::shelf) mod sheets;
-mod covers;
 mod source_details;
 pub(in crate::ui::features::shelf) mod status;
 pub(in crate::ui::features::shelf) mod toolbar;

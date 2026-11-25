@@ -33,7 +33,7 @@
 /// sprite atlas 的经验值，这里保持同一个数，免得同一张 SVG 在两条路上得到两种尺寸。
 const MAX_EDGE: u32 = 2048;
 
-use crate::css::computed::{ComputedStyle, SvgLineCap, SvgLineJoin, SvgPaint, StyledDom};
+use crate::css::computed::{ComputedStyle, StyledDom, SvgLineCap, SvgLineJoin, SvgPaint};
 use crate::dom::{Dom, NodeId};
 
 /// 把一段内联 `<svg>` 子树序列化成 `data:image/svg+xml;base64,…` URI。
@@ -51,7 +51,10 @@ pub fn inline_svg_data_uri(dom: &Dom, node: NodeId, styles: &StyledDom) -> Optio
         return None;
     }
     // `<image>` 是位图封面：留给 picture_src 那条路。
-    if dom.element_children(node).any(|c| dom.is_element(c, "image")) {
+    if dom
+        .element_children(node)
+        .any(|c| dom.is_element(c, "image"))
+    {
         return None;
     }
     let mut body = String::new();
@@ -110,8 +113,22 @@ fn walk_svg(
         out.push_str(tag);
         // 几何属性：只抄形状真正用的那几个，避免把 class/id 这类无关属性带过去。
         const GEOMETRY: &[&str] = &[
-            "d", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry", "width",
-            "height", "points", "transform",
+            "d",
+            "x",
+            "y",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
+            "cx",
+            "cy",
+            "r",
+            "rx",
+            "ry",
+            "width",
+            "height",
+            "points",
+            "transform",
         ];
         for name in GEOMETRY {
             if let Some(value) = dom.attr(node, name) {
@@ -205,18 +222,26 @@ mod inline_tests {
             Origin::Author,
         );
         let styles = cascade(&dom, &rules, &ComputedStyle::default(), "");
-        let svg = dom.elements()
+        let svg = dom
+            .elements()
             .find(|(id, _)| dom.is_element(*id, "svg"))
             .map(|(id, _)| id)
             .expect("应有内联 svg");
         let uri = inline_svg_data_uri(&dom, svg, &styles).expect("应序列出 data URI");
         assert!(uri.starts_with("data:image/svg+xml;base64,"));
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(uri.strip_prefix("data:image/svg+xml;base64,").unwrap().as_bytes())
+            .decode(
+                uri.strip_prefix("data:image/svg+xml;base64,")
+                    .unwrap()
+                    .as_bytes(),
+            )
             .unwrap();
         let xml = String::from_utf8(bytes.clone()).unwrap();
         assert!(xml.contains("fill=\"none\""), "fill:none 要进字节：{xml}");
-        assert!(xml.contains("stroke=\"#4f4539\""), "stroke 颜色要进字节：{xml}");
+        assert!(
+            xml.contains("stroke=\"#4f4539\""),
+            "stroke 颜色要进字节：{xml}"
+        );
         assert!(xml.contains("stroke-width=\"1.8\""), "第一行的线宽：{xml}");
         assert!(xml.contains("stroke-width=\"1.15\""), "第二行的线宽：{xml}");
         assert!(xml.contains("stroke-linecap=\"round\""), "线端形状：{xml}");
@@ -228,11 +253,21 @@ mod inline_tests {
     #[test]
     fn inline_svg_with_only_bitmap_image_is_not_claimed() {
         let dom = Dom::parse(b"<svg><image href='cover.jpg'/></svg>");
-        let styles = cascade(&dom, &RuleSet::parse("", Origin::Author), &ComputedStyle::default(), "");
-        let svg = dom.elements()
+        let styles = cascade(
+            &dom,
+            &RuleSet::parse("", Origin::Author),
+            &ComputedStyle::default(),
+            "",
+        );
+        let svg = dom
+            .elements()
             .find(|(id, _)| dom.is_element(*id, "svg"))
-            .map(|(id, _)| id).unwrap();
-        assert!(inline_svg_data_uri(&dom, svg, &styles).is_none(), "位图封面不冒充矢量");
+            .map(|(id, _)| id)
+            .unwrap();
+        assert!(
+            inline_svg_data_uri(&dom, svg, &styles).is_none(),
+            "位图封面不冒充矢量"
+        );
     }
 }
 

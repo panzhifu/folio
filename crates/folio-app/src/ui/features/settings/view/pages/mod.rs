@@ -17,6 +17,7 @@ pub(in crate::ui::features::settings) mod layout;
 pub(in crate::ui::features::settings) mod library;
 pub(in crate::ui::features::settings) mod membership;
 pub(in crate::ui::features::settings) mod speech;
+pub(in crate::ui::features::settings) mod stealth;
 pub(in crate::ui::features::settings) mod storage;
 pub(in crate::ui::features::settings) mod sync;
 pub(in crate::ui::features::settings) mod toc;

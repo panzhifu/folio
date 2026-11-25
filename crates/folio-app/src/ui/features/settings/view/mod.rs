@@ -68,6 +68,7 @@ use pages::layout::layout_page;
 use pages::library::library_page;
 use pages::membership::membership_page;
 use pages::speech::speech_page;
+use pages::stealth::stealth_page;
 use pages::storage::storage_page;
 use pages::sync::sync_page;
 use pages::toc::toc_page;
@@ -159,6 +160,7 @@ pub enum SettingsPage {
     Fonts,
     Speech,
     Dictionary,
+    Stealth,
     Translation,
     Ai,
     Sync,
@@ -201,6 +203,7 @@ impl SettingsPage {
         SettingsPage::Fonts,
         SettingsPage::Speech,
         SettingsPage::Dictionary,
+        SettingsPage::Stealth,
         SettingsPage::Translation,
         SettingsPage::Ai,
         SettingsPage::Sync,
@@ -240,6 +243,7 @@ pub(in crate::ui::features::settings) fn spec_pages(
         fonts_page(cx),
         speech_page(cx),
         dictionary_page(cx),
+        stealth_page(cx),
         translation_page(cx),
         ai_page(cx),
         sync_page(cx),

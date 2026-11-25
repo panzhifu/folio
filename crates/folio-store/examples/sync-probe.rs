@@ -87,7 +87,13 @@ fn seed(store: &Store, books: usize) -> folio_store::Result<()> {
                 offset: 100,
             },
         )?;
-        store.add_annotation(book, &anchor(0, 0, 4), "一", "amber", AnnotationStyle::Highlight)?;
+        store.add_annotation(
+            book,
+            &anchor(0, 0, 4),
+            "一",
+            "amber",
+            AnnotationStyle::Highlight,
+        )?;
         store.add_bookmark(book, &anchor(0, 10, 10))?;
     }
     Ok(())

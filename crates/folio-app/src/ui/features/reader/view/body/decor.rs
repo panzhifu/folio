@@ -399,6 +399,26 @@ pub(super) fn decoration_child(
     cx: &mut App,
 ) -> Vec<AnyElement> {
     let mut parts = Vec::new();
+    // 毛玻璃必须**先于**底色：它糊的是刻下这一笔时底下已经画过的东西，若排在底色之后，
+    // 自己的 tint 也会被糊进去。圆角与底色同一份，否则方角处会露出一圈没裁掉的糊边。
+    if let Some(blur) = decor.backdrop_blur {
+        parts.push(
+            div()
+                .absolute()
+                .left(px(decor.x))
+                .top(px(decor.top))
+                .w(px(decor.width))
+                .h(px(decor.height))
+                .corner_radii(Corners {
+                    top_left: px(decor.radius[0]),
+                    top_right: px(decor.radius[1]),
+                    bottom_right: px(decor.radius[2]),
+                    bottom_left: px(decor.radius[3]),
+                })
+                .backdrop_blur(px(blur))
+                .into_any_element(),
+        );
+    }
     // 外阴影在底色之前：CSS 的 `box-shadow` 画在盒子后面；内阴影在底色之后、边框之前。
     let drop: Vec<BlockShadow> = decor
         .box_shadows

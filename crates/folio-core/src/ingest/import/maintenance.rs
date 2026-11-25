@@ -604,7 +604,11 @@ mod tests {
         assert_eq!(ledger.due(100, 8), vec![3, 5], "先到点的先来；同一刻按书号");
         assert_eq!(ledger.due(100, 1), vec![3], "一趟只给有界条数");
         assert_eq!(ledger.due(299, 8), vec![3, 5], "300 那条要等到 300 之后");
-        assert_eq!(ledger.due(400, 8), vec![3, 5, 7], "到点的都排上，仍按时刻与书号");
+        assert_eq!(
+            ledger.due(400, 8),
+            vec![3, 5, 7],
+            "到点的都排上，仍按时刻与书号"
+        );
     }
 
     #[test]
@@ -615,7 +619,11 @@ mod tests {
         }
         assert_eq!(ledger.failures.len(), COVER_BACKFILL_LEDGER_CAP);
         ledger.note_failure(9_999, 5_000);
-        assert_eq!(ledger.failures.len(), COVER_BACKFILL_LEDGER_CAP, "账本不该无界长");
+        assert_eq!(
+            ledger.failures.len(),
+            COVER_BACKFILL_LEDGER_CAP,
+            "账本不该无界长"
+        );
         assert!(
             ledger.failures.iter().all(|failure| failure.id != 0),
             "丢的是最早该重试的那条"

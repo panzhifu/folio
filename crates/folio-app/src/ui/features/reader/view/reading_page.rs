@@ -21,9 +21,9 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AbsoluteLength, Anchor, AnyElement, App, AppContext as _, AppLifecyclePhase, ClickEvent,
-    Context, DefiniteLength, Entity, EventEmitter, FocusHandle, Font, FontWeight, HighlightStyle,
-    Hsla, Image, InteractiveElement, InteractiveText, IntoElement, ObjectFit, ParentElement,
-    Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Context, CursorStyle, DefiniteLength, Entity, EventEmitter, FocusHandle, Font, FontWeight,
+    HighlightStyle, Hsla, Image, InteractiveElement, InteractiveText, IntoElement, ObjectFit,
+    ParentElement, Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
     StyledImage as _, StyledText, Subscription, TestSupportExt as _, TextRun, TextStyle,
     WeakEntity, Window, WrappedLine, div, img, point, px,
 };
@@ -242,6 +242,7 @@ pub struct ReadingPage {
     listen_script: Option<std::rc::Rc<ListenScript>>,
     /// 书头三样。`None` = 还没查；`Some(None)` = 这本书没有可查的那一行。
     listen_book: Option<Option<ListenBook>>,
+    pub(super) body_cursor: Option<CursorStyle>,
     pub(in crate::ui::features::reader) _watches: Vec<Subscription>,
 }
 
@@ -364,6 +365,7 @@ impl ReadingPage {
             listen_manual_at: None,
             listen_script: None,
             listen_book: None,
+            body_cursor: None,
             _watches: watches,
         }
     }
@@ -2044,7 +2046,10 @@ impl Render for ReadingPage {
         // 遮罩会先把那一击收掉。
         let toc_open = self.toc.read(cx).is_open(cx);
         let settings_open = self.settings.read(cx).is_open(cx);
-        let layers_up = self.chrome.is_open()
+        // 低干扰形态只收起浮层那一圈辅助界面；正文、选字与翻页手势不动。
+        let quiet = crate::ui::services::stealth::is_quiet(cx);
+        let chrome_open = self.chrome.is_open() && !quiet;
+        let layers_up = chrome_open
             || toc_open
             || settings_open
             || self.toc.read(cx).menu_open()
@@ -2088,7 +2093,7 @@ impl Render for ReadingPage {
         // 底栏**不**跟着抬：那几颗（字号、进度、翻页模式）在目录里没有对应物，压在遮罩下
         // 才是「这一层是临时抬起来的」的正确读法，而当初那句「让那 172 像素反而让人以为
         // 还能点」的担心对顶栏不成立 —— 抬上来之后它是真能点。
-        let toc_up = toc_open && self.chrome.is_open();
+        let toc_up = toc_open && chrome_open;
         // 自动跑着时，浮层里摆的是自动那条工具栏（速度 + 退出），普通底栏整个让位 ——
         // 不是底栏之上再叠一张小卡。自动被别处停掉（滚了一下 / 听书起念 / 读到书末）
         // 时这一格当场变 false，下一帧底栏自己回来，不必逐个停自动的入口补一句。
@@ -2100,47 +2105,38 @@ impl Render for ReadingPage {
             .left_0()
             .right_0()
             .child(
-                // 正文的点击落在这层而不是 `ReaderSession` 自己身上。它的 hitbox 是整屏的，
-                // 而 gpui 的一击会发给**每一个**「自己的 hitbox 含有按下点」的 handler
-                // （`Window::dispatch_mouse_event` 倒序遍历帧内的监听列表，不是沿祖先链冒泡），
-                // 所以顶栏、底栏与目录那一层各自声明挡住身后的 hitbox，
-                // 否则浮层的按钮点下去会连着触发这里，把刚切过去的面板当场收掉。
-                div()
-                    .id("reader-body")
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .on_click(tap)
-                    .child(self.reader.clone()),
+                // 正文点击落这层：gpui 一击发给每个 hitbox 含按下点的 handler，浮层需挡住身后。
+                super::body_cursor::layer(
+                    tap,
+                    cx.listener(|this: &mut Self, event, window, cx| {
+                        this.track_cursor(event, window, cx)
+                    }),
+                    self.reader.clone().into_any_element(),
+                    self.body_cursor,
+                ),
             )
-            // 干净态那两条读数带在会话里画（折页时它们是纸的一部分），这里只管浮层那两条。
-            //
-            // 顶栏在目录那一层开着时不在这里画 —— 抬到遮罩之上去了（见下面
-            // `toc_up` 那一段）。底栏照旧压在遮罩下。
-            .when(self.chrome.is_open() && !toc_up, |this| {
+            // 干净态读数带在会话里画；这里只管浮层。目录开着时顶栏已抬到遮罩之上（`toc_up`）。
+            .when(self.chrome.is_open() && !quiet && !toc_up, |this| {
                 this.child(self.top_bar(cx)).child(if auto_on {
                     self.auto_bar(cx)
                 } else {
                     self.bottom_bar(cx)
                 })
             })
-            .when(self.chrome.is_open() && toc_up, |this| {
+            .when(self.chrome.is_open() && !quiet && toc_up, |this| {
                 this.child(if auto_on {
                     self.auto_bar(cx)
                 } else {
                     self.bottom_bar(cx)
                 })
             });
-        // 阅读页的根底色是**正文纸**：跟随正文主题（选了哪套就是哪张纸），不再
-        // 跟壳主题走 —— 设置页弹到纸上面时，白壳配羊皮纸正是分离想要的样子。
         let paper = reading_palette(cx);
+        // 低干扰时纸由正文底承担；根层须全透，避免两层半透明叠回不透明。
         let mut root = div()
             .id("reader-page")
             .size_full()
             .relative()
-            .bg(paper.bg)
+            .bg(if quiet { paper.bg.opacity(0.0) } else { paper.bg })
             .text_color(paper.fg)
             .child(column);
         // 目录那一屏最后挂：`anchored` 层按登记的先后决定谁在上面，它盖的是整块窗口，

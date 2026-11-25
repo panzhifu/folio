@@ -58,6 +58,14 @@ struct Chapter {
 }
 
 fn typeset(html: &str, css: &str, width: f32) -> Chapter {
+    typeset_with(html, css, width, false)
+}
+
+fn typeset_vertical(html: &str, css: &str, width: f32) -> Chapter {
+    typeset_with(html, css, width, true)
+}
+
+fn typeset_with(html: &str, css: &str, width: f32, allow_vertical: bool) -> Chapter {
     let dom = Dom::parse(html.as_bytes());
     let styles = cascade(
         &dom,
@@ -74,7 +82,7 @@ fn typeset(html: &str, css: &str, width: f32) -> Chapter {
         LayoutOptions {
             width,
             light: false,
-            allow_vertical: false,
+            allow_vertical,
             page_height: None,
             screen_width: None,
             screen_height: None,
@@ -755,5 +763,42 @@ fn a_hit_between_han_and_latin_respects_the_quarter_em_gap() {
         (rects[0].width - 12.0).abs() < 0.01,
         "A 的前进量 8 + 间隙 4，实际 {}",
         rects[0].width
+    );
+}
+
+/// 竖排并格数字：命中只给「格前 / 格后」，选区任一位都整格上色。
+#[test]
+fn text_combine_hits_and_highlights_as_one_cell() {
+    let css = "body { writing-mode: vertical-rl } \
+               p { text-indent: 0; margin: 0; font-size: 20px; font-family: monospace; \
+                   white-space: nowrap; -webkit-text-combine: horizontal }";
+    let chapter = typeset_vertical("<body><p>12</p></body>", css, 400.0);
+    assert_eq!(chapter.map.chars(), 2, "两位数字都还在文本映射里");
+    let line = &chapter.layout.lines[0];
+    let start = chapter.layout.inline_start(line);
+    let x = chapter.layout.cross_baseline(line);
+    let hit = |dy: f32| {
+        hit_test(
+            &chapter.layout,
+            &chapter.dom,
+            &chapter.map,
+            &Mono,
+            x,
+            start + dy,
+        )
+        .unwrap_or_else(|| panic!("y = 行首 + {dy} 应命中"))
+        .offset
+    };
+    assert_eq!(hit(5.0), 0, "格前半落在整对之前");
+    assert_eq!(hit(15.0), 2, "格后半落在整对之后，不在两位之间");
+
+    let first = rects_for_range(&chapter.layout, &chapter.dom, &chapter.map, &Mono, 0..1);
+    let second = rects_for_range(&chapter.layout, &chapter.dom, &chapter.map, &Mono, 1..2);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first, second, "选中任一位都是同一整格");
+    assert!(
+        (first[0].y - start).abs() < 0.01 && (first[0].height - 20.0).abs() < 0.01,
+        "整格从行首起、占一格：{:?}",
+        first[0]
     );
 }

@@ -58,8 +58,8 @@ use folio_format::dom::{Dom, NodeId};
 pub use cache::BlockCache;
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap, has_cjk_latin_boundary};
 pub use geometry::{
-    BlockBox, DecorPicture, DecorSeed, ImageRun, Justify, JustifyMode, Layout, LayoutOptions,
-    LineBox, LineFragment, LineRun, MarkerRun, StackMark,
+    BlockBox, ColumnRule, DecorPicture, DecorSeed, ImageRun, Justify, JustifyMode, Layout,
+    LayoutOptions, LineBox, LineFragment, LineRun, MarkerRun, StackMark,
 };
 pub use key::{LayoutInputs, LayoutKey, METRICS_REV, content_hash, quantize_px};
 pub use page::{Page, PageList};
@@ -133,6 +133,7 @@ fn layout_inner(
         page_height: options.page_height,
         blocks: Vec::new(),
         lines: Vec::new(),
+        column_rules: Vec::new(),
         cache,
         style_hash: hashes.as_deref(),
         floats: Vec::new(),
@@ -263,6 +264,20 @@ fn layout_inner(
         WritingMode::HorizontalTb
     };
     let mut out = Layout::assemble(ctx.blocks, ctx.lines, content_width, height, flow);
+    // 栏线按与 `transposed` 同一个 map 投影：横排的竖带子在竖排里转成横线。
+    // 两处若不一起改，竖排的栏线会落在块表里没投影的旧坐标上（静默错位）。
+    if flow != WritingMode::HorizontalTb {
+        let strip = height;
+        let flip = flow == WritingMode::VerticalRl;
+        for rule in &mut ctx.column_rules {
+            let (x, y, w, h) = (rule.x, rule.y, rule.width, rule.height);
+            rule.x = if flip { strip - (y + h) } else { y };
+            rule.y = x;
+            rule.width = h;
+            rule.height = w;
+        }
+    }
+    out.column_rules = ctx.column_rules;
     // 层叠序：每条行沿 owner 的祖先链找最近的层叠上下文，取 z。绘制侧按它重排谁盖住谁；
     // 正文源序、命中与分页一律不变。全部为 0 时零回归。
     out.line_z = stacking::compute_line_z(dom, styles, &out);

@@ -22,7 +22,9 @@ use crate::content::anchor::{
 };
 use crate::content::dom::{Dom, NodeId};
 use crate::infra::metrics::Metric;
-use crate::layout::{Layout, LineFragment, Measure, cjk_latin_gap, has_cjk_latin_boundary};
+use crate::layout::{
+    Layout, LineFragment, LineRun, Measure, cjk_latin_gap, has_cjk_latin_boundary,
+};
 pub(crate) use folio_format::char_class::CharClass;
 
 /// 命中结果：行盒下标 + 覆盖该位置的字符偏移。
@@ -45,10 +47,28 @@ pub struct SelectionRect {
     pub height: f32,
 }
 
+/// 并格数字对里的第二位：前一片零宽、带交叉轴偏移、原文与第一位相邻。
+///
+/// 并格是**一个视觉格**：命中只给「格前 / 格后」两个落点，选区也整格上色。
+/// 两位数字在竖排里左右并排，推进轴上的中点分不出它们，分开给落点只会选出半个字。
+fn combine_second(fragments: &[LineFragment], index: usize) -> Option<&LineRun> {
+    let LineFragment::Text(first) = fragments.get(index)? else {
+        return None;
+    };
+    let LineFragment::Text(second) = fragments.get(index + 1)? else {
+        return None;
+    };
+    (first.cross_offset == 0.0
+        && second.cross_offset != 0.0
+        && second.width == 0.0
+        && first.node == second.node
+        && first.orig.end == second.orig.start)
+        .then_some(second)
+}
+
 /// 屏幕位置 → 字符偏移。
 ///
-/// 纵向夹到最近的行（`line_at_y` 语义：点在两行之间、章首之前、章尾之后都停最近一行），
-/// 横向按字符**前进量的中点**判归属 —— 点在字的右半边算下一个字之前，与文本编辑器一致。
+/// 纵向夹到最近的行，横向按字符**前进量的中点**判归属 —— 点在字的右半边算下一个字之前。
 ///
 /// 返回 `None` 的情形只有一种：命中行没有任何可见文本（纯图片行）。
 /// 点在行尾之外给「最后一个字之后」的插入点，点在行首之外给行首 —— 拖动扩展靠它们收边。
@@ -77,10 +97,8 @@ pub fn hit_test(
     let line_range = line_chars(layout, dom, map, line_index)?;
     let block = layout.block_of_line(line_index)?;
 
-    // 横向夹进这一行的墨迹范围内再逐段走。用 `ink_width`（两端对齐把行撑满，
-    // 字真铺到了右边）而不是 `width`（未撑开的片段宽之和）。
-    // 起点取**内联轴**上那一格的起点：横排是行带左缘 `line.x`，竖排是列顶 `line.y` ——
-    // 下面一整趟走的都是「沿字走了多少」这一个纯量，只有落地时才分轴。
+    // 夹进这一行的墨迹范围（`ink_width`，不是未撑开的 `width`）再逐段走。
+    // 起点取内联轴起点：横排是 `line.x`，竖排是 `line.y`；下面只走内联纯量。
     let start = layout.inline_start(line);
     let inline = inline.clamp(start, start + line.ink_width());
     let mut cursor = start;
@@ -90,13 +108,9 @@ pub fn hit_test(
     // 「最后一个字之后」的落点：走到行尾也没命中时就停在这里。
     let mut end_offset = line_range.end;
 
-    // run 的**起点**按排版的 run.width 累加，再加这一格自己的横向落点（`x_offset`，
-    // ruby 注音用；正文恒为 0）—— 绘制（`chapter_layout.rs::build_row` 把同一个数折进
-    // `RowUnit::x`）就是这么摆的；run **内部**的字位优先问 shaping（`byte_at_x`，kerning /
-    // 字体回退都在里面），做不了 shaping 才退回 char_width 累加。三层同源，命中
-    // 才贴得住画出来的字。**字距与两端对齐都会把字推开，而 shaping 的位置里没有它们** ——
-    // 有任一时就不走 shaping 那条，落回逐字累加（advance 已含字距，间隙按同一句摊）。
-    for fragment in &line.fragments {
+    // run 起点 = 累计 run.width + `x_offset`（ruby 注音；正文恒 0），run 内字位优先问
+    // shaping；字距与两端对齐不在 shaping 结果里，有任一时退回逐字累加。绘制同读这组数。
+    for (index, fragment) in line.fragments.iter().enumerate() {
         let LineFragment::Text(run) = fragment else {
             // 图片不产出字符，但**占横向位置**：游标必须推进它，后面的字才量得准。
             if let LineFragment::Image(image) = fragment {
@@ -106,6 +120,26 @@ pub fn hit_test(
         };
         let text = block.text.get(run.norm.clone()).unwrap_or("");
         let run_x = cursor + run.x_offset;
+        // 并格数字对整格命中：格内只分前后，不在两位数字之间落插入点。
+        if let Some(second) = combine_second(&line.fragments, index)
+            && inline >= run_x
+            && inline < run_x + run.width
+        {
+            let after = inline > run_x + run.width * 0.5;
+            let offset = if after {
+                map.chars_of_bytes(dom, second.node, second.orig.clone())
+                    .map(|range| range.end)
+            } else {
+                map.chars_of_bytes(dom, run.node, run.orig.clone())
+                    .map(|range| range.start)
+            };
+            if let Some(offset) = offset {
+                return Some(Hit {
+                    line: line_index,
+                    offset,
+                });
+            }
+        }
         // shaping 同源的 run 内定位（没有字距、没有两端对齐、也没有中西文间隙时才成立
         // —— 后三者的字位偏移 shaping 的结果里都没有）。
         if run.style.letter_spacing == 0.0
@@ -131,10 +165,8 @@ pub fn hit_test(
         let mut gap = gap_cursor;
         let mut byte_at = 0usize;
         for ch in text.chars() {
-            // 中西文边界间隙记在宽度表里**本字符**的项上（它是本字符与下一字符之间
-            // 的那段），游标与 `run.width` 都从那张表来 —— 这里逐字加回同一份，向前
-            // 看一个字符。本 run 末字符与下一 run 之间的那份已由游标跨 run 的
-            // `run.width` 结清，末字符不再补（后面没有要摆的字了）。
+            // 中西文间隙记在本字符项上（与下一字符之间那段），向前看一个字符加回；
+            // run 末那份已由跨 run 的 `run.width` 结清。
             let next_ch = text[byte_at + ch.len_utf8()..].chars().next();
             byte_at += ch.len_utf8();
             let mut advance = run.style.advance(measure, ch);
@@ -288,9 +320,7 @@ pub fn rects_for_range_in(
     }
 
     let mut out = Vec::new();
-    // 数的是**实际走了几行**，不是递进来的区间长度：越界或没字的行由 `line_chars` 的
-    // `get` 丢掉，那一行没走过，不该记进账。这一格的代价就是「行数 × 每行的度量」，
-    // 窄化生效时它是个位数，退回整章扫时它是「章行数 × 每条批注」。
+    // 数实际走了几行：越界或没字的行由 `line_chars` 丢掉，不该记进账。
     let mut walked = 0u64;
     for line_index in lines {
         walked += 1;
@@ -315,7 +345,7 @@ pub fn rects_for_range_in(
         let mut gap_cursor = 0u32;
         let mut rect: Option<(f32, f32)> = None; // (x0, x1)
 
-        for fragment in &line.fragments {
+        for (index, fragment) in line.fragments.iter().enumerate() {
             let LineFragment::Text(run) = fragment else {
                 // 图片占横向位置但不产出字符：推进游标，不产出矩形。
                 if let LineFragment::Image(image) = fragment {
@@ -327,16 +357,26 @@ pub fn rects_for_range_in(
             let run_start = map
                 .chars_of_bytes(dom, run.node, run.orig.clone())
                 .map(|r| r.start);
-            // 与 hit_test 同一套三层：起点按 run.width 再加 run.x_offset，字缘优先 shaping
-            // （char_edges），退路才用 char_width 累加 —— 矩形的边才贴得住画出来的字。
+            // 与 hit_test 同套：起点按 run.width + x_offset，字缘优先 shaping。
             let run_x = cursor + run.x_offset;
+            // 并格数字对是一个视觉格：选中任一位都给整格上色，不画半个字。
+            if let Some(second) = combine_second(&line.fragments, index)
+                && let Some(first_at) = run_start
+                && let Some(second_at) = map
+                    .chars_of_bytes(dom, second.node, second.orig.clone())
+                    .map(|r| r.start)
+                && ((first_at >= from && first_at < to) || (second_at >= from && second_at < to))
+            {
+                let (cx0, cx1) = (run_x, run_x + run.width);
+                let (x0, x1) = rect.unwrap_or((cx0, cx0));
+                rect = Some((x0.min(cx0), x1.max(cx1)));
+            }
             let edges = measure
                 .char_edges(text, &run.style.font, run.style.font_size)
                 .filter(|edges| edges.len() == text.chars().count() + 1);
             if let (Some(base), Some(edges)) = (run_start, edges) {
-                // `character_spacing`（字距）与两端对齐都不在 shaping 的结果里，得自己加：
-                // 边界 k 的字距偏移是 `ls × k`（RTL 反向，按边表升/降判，与
-                // `edges_from_glyphs` 同一判据）；两端对齐的偏移按隙游标逐字摊。
+                // 字距与两端对齐不在 shaping 里：边界 k 偏移 `ls × k`（RTL 反向），
+                // 两端对齐按隙游标逐字摊。
                 let sign = if edges.len() >= 2 && edges[1] < edges[0] {
                     -1.0
                 } else {
@@ -344,9 +384,7 @@ pub fn rects_for_range_in(
                 };
                 let ls = run.style.letter_spacing;
                 let mut gap = gap_cursor;
-                // 中西文边界间隙：shaping 的边表里没有它们，逐边加回。`script_px` 是
-                // 当前字符**左缘**的累计间隙（k-1→k 的边界进入这一轮前已加进）；右缘
-                // 再多算一份「k→k+1 的边界」，向前看一个字符现算。
+                // 中西文间隙逐边加回：`script_px` 是当前字符左缘累计，右缘向前看一字符。
                 let mut script_px = 0.0f32;
                 let mut byte_at = 0usize;
                 for (k, ch) in text.chars().enumerate() {
@@ -356,10 +394,7 @@ pub fn rects_for_range_in(
                     let next_gap =
                         next_ch.map_or(0.0, |nc| cjk_latin_gap(ch, nc, run.style.font_size));
                     if at >= from && at < to {
-                        // 一条边界表在 RTL 那一段上是**递减**的（`edges[k]` 的含义是
-                        // 「这个字符在阅读方向上的起点」，见 `Measure::char_edges`），
-                        // 所以取矩形要 min/max 两个都要 —— 只 `max` 那一头是以前默认
-                        // 表递增留下的写法，方向一反就塌成零宽的一条。
+                        // RTL 边表递减，取矩形要 min/max 两头；只取 max 会塌成零宽。
                         let shift = justify.map_or(0.0, |j| j.shift(gap));
                         let a = run_x + edges[k] + sign * (ls * k as f32 + script_px) + shift;
                         let b = run_x
@@ -379,9 +414,7 @@ pub fn rects_for_range_in(
                 let mut gap = gap_cursor;
                 let mut byte_at = 0usize;
                 for ch in text.chars() {
-                    // `advance` 已含字距；中西文间隙记在本字符项上（与下一字符之间的
-                    // 那段），同 `hit_test` 的退路向前看一个字符加回；两端对齐再按隙
-                    // 游标推一笔。
+                    // `advance` 已含字距；中西文间隙向前看一字符加回，再按隙游标推对齐。
                     let next_ch = text[byte_at + ch.len_utf8()..].chars().next();
                     byte_at += ch.len_utf8();
                     let mut advance = run.style.advance(measure, ch);

@@ -28,6 +28,7 @@ pub mod motion;
 pub mod resident;
 pub mod source_updates;
 pub mod speech;
+pub mod stealth;
 pub mod storage;
 pub mod sync;
 pub mod transfer;

@@ -69,9 +69,8 @@ impl Store {
         }
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let marks = vec!["?"; ids.len()].join(",");
-        let sql = format!(
-            "SELECT id, path, cover_hash, cover_mime FROM books WHERE id IN ({marks})"
-        );
+        let sql =
+            format!("SELECT id, path, cover_hash, cover_mime FROM books WHERE id IN ({marks})");
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt
             .query_map(rusqlite::params_from_iter(ids), |r| {

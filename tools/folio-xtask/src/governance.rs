@@ -484,7 +484,11 @@ mod tests {
         let tick = '\u{60}';
         std::fs::write(&source, format!("//! 见 {tick}doc/实存.md{tick}。\n")).unwrap();
         check_doc_paths(root.path()).unwrap();
-        std::fs::write(&source, format!("//! 见 {tick}doc/已删.md{tick} 那一节。\n")).unwrap();
+        std::fs::write(
+            &source,
+            format!("//! 见 {tick}doc/已删.md{tick} 那一节。\n"),
+        )
+        .unwrap();
         let error = check_doc_paths(root.path()).unwrap_err().to_string();
         assert!(error.contains("FOLIO-GOV-005"), "{error}");
         assert!(error.contains("doc/已删.md"), "{error}");

@@ -18,6 +18,119 @@ pub enum Hyphens {
     Auto,
 }
 
+/// `font-stretch`：在一族里选更宽/更窄的字面（可继承）。
+///
+/// CSS 关键字与百分比都按字面宽度档收；百分比按 CSS 的关键字边界就近折档。
+/// 这一层只记作者要哪一类字面，真正选面发生在测量/绘制共用的 gpui `Font`。
+/// 可变字体上的连续 `wdth` 轴不在这一档里，写百分比不表示精确可变轴坐标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontStretch {
+    UltraCondensed,
+    ExtraCondensed,
+    Condensed,
+    SemiCondensed,
+    #[default]
+    Normal,
+    SemiExpanded,
+    Expanded,
+    ExtraExpanded,
+    UltraExpanded,
+}
+
+/// `-webkit-text-combine` / `text-combine-upright`：竖排里把数字并进一格。
+///
+/// 一期只把「连续两位 ASCII 数字」并成一格（`all` 与 `digits 2` 同解）；
+/// `digits 3/4` 保留枚举值，但排版层暂按两位处理。横排里整条不生效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextCombine {
+    #[default]
+    None,
+    /// `all` / 旧 WebKit 的 `horizontal`：数字成对并格。
+    All,
+    /// `digits <2-4>`；一期只兑现 2。
+    Digits(u8),
+}
+
+/// `font-kerning`：OpenType `kern` 特性的三档。
+///
+/// `Auto` 是初值，交给塑造器与字体的默认（通常开）；`Normal` 明确要求开、`None` 明确关。
+/// 三档都只改特性表，不改字形内容；`font-feature-settings` 里的 `kern` 后写覆盖它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontKerning {
+    #[default]
+    Auto,
+    Normal,
+    None,
+}
+
+/// `text-rendering`：塑造器的质量/速度提示。
+///
+/// 只有 `OptimizeSpeed` 会改行为（关掉 `kern` / `liga` / `calt`），其余三档按塑造器默认。
+/// 断行宽度仍取自同一份 shaping，所以它不会让「量出来的宽」与「画出来的宽」分叉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextRendering {
+    #[default]
+    Auto,
+    OptimizeSpeed,
+    OptimizeLegibility,
+    GeometricPrecision,
+}
+
+/// `cursor`：指针移到元素上时的形状（可继承）。
+///
+/// 只收 gpui 的 `CursorStyle` 真能兑现的那批关键字。`wait` / `help` / `zoom-in` 这类
+/// 没有对应物，判不认识而不是悄悄当 `auto` —— 后者会让作者以为那条声明生效了。
+/// 阅读器里看得见它的地方主要是链接与图片页；命中不到文字的空白区仍走平台默认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cursor {
+    /// CSS 初值：交给平台（链接由引擎补手形）。
+    #[default]
+    Auto,
+    Default,
+    Pointer,
+    Text,
+    Crosshair,
+    Grab,
+    Grabbing,
+    NotAllowed,
+    ContextMenu,
+    Copy,
+    Alias,
+    ColResize,
+    RowResize,
+    VerticalText,
+    EResize,
+    WResize,
+    NResize,
+    SResize,
+    EwResize,
+    NsResize,
+    NeswResize,
+    NwseResize,
+}
+
+/// `column-fill`：多栏容器怎么把内容分到各栏。
+///
+/// `balance`（初值）让各栏尽量等高；`auto` 只按文档序装满一栏再换。两者都
+/// 不跨栏拆单元 —— 那一条比「哪一种配平」影响大得多，记在 `columns::balance` 上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColumnFill {
+    #[default]
+    Balance,
+    Auto,
+}
+
+/// `column-span`：子元素是否跨过所有栏。
+///
+/// 只有 `all`（跨整容器宽，把前后内容分成两段各自配平）与 `none`（初值，留在栏里）
+/// 两个值。多栏外的元素写 `all` 无对应物，按初值处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColumnSpan {
+    #[default]
+    None,
+    All,
+}
+
 /// 分片（分页 / 分栏）时的断点意图。
 ///
 /// `Left` / `Right` 会补出空片占位，「双页对开」的左右页才不会错位；
@@ -274,5 +387,45 @@ impl std::hash::Hash for TextShadow {
         self.dy.to_bits().hash(h);
         self.blur.to_bits().hash(h);
         self.color.hash(h);
+    }
+}
+
+/// 一个尺寸值。`none` 用 `Option::None` 表示。百分比不在此刻折算 —— 它要按**包含块
+/// 的宽度**来算，那是排版期才知道的数，见 [`Length::resolve`]。带百分比的字段都存
+/// 这个类型（外边距、内边距与 `text-indent` 在 CSS 里同样折算自包含块宽，真书上是大头），
+/// 层叠期折成 px 等于拿窗口宽猜。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Length {
+    Px(f32),
+    /// 比例，`50%` 存成 `0.5`。
+    Percent(f32),
+    /// `auto`。**只有外边距会走到这一档**：CSS 里 `padding: auto` 与 `text-indent: auto`
+    /// 是非法值（层叠期就判不认识），`width: auto` 那一族用 `Option::None` 表示。
+    ///
+    /// 层叠期不折成 0：`margin-left/right: auto` 是「横向剩余宽度均分」（CSS 2.1
+    /// §10.3.3），剩余宽取决于作者 `width` 折出来多少，那是排版期的一对数。折成 0
+    /// 等于宣布「本书没有块级居中」，写着 `margin: 0 auto` 的定宽插图一律贴左缘。
+    /// 求解在 `layout::collect::solve_block_width`；[`Length::resolve`] 给 `auto` 回 0。
+    Auto,
+}
+
+impl Length {
+    /// 每个长度字段的初值。`Px(0.0)` 而不是 `None`：`None` 在这一族里表示
+    /// 「作者写了 `auto` / `none`」，与「没写过」是两件事。
+    pub const ZERO: Length = Length::Px(0.0);
+
+    /// 按包含块基准长度折算成 px。`Auto` 给 0 —— 它真正的用处由排版层拿去均分
+    /// （见 [`Length::Auto`]），单看这一格就是「不占位」。
+    pub fn resolve(self, basis: f32) -> f32 {
+        match self {
+            Length::Px(v) => v,
+            Length::Percent(p) => p * basis,
+            Length::Auto => 0.0,
+        }
+    }
+
+    /// 这一格是不是 `auto`。横向求解要靠它分辨「作者写的 0」与「作者要均分」。
+    pub fn is_auto(self) -> bool {
+        matches!(self, Length::Auto)
     }
 }

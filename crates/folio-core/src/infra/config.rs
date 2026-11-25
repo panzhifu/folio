@@ -8,6 +8,7 @@ mod environment;
 mod library;
 mod reading;
 mod speech;
+mod stealth;
 
 pub use account::{Account, Claim, Membership, MembershipTier, Sync, SyncProvider};
 pub use appearance::{Appearance, Mode, PageTurn, ThemeBackground};
@@ -23,6 +24,7 @@ pub use folio_model::reading::ImageScale;
 pub use library::{Backup, Language, Library, Novel, WatchDir};
 pub use reading::{Reader, TextDirection, TocDensity};
 pub use speech::{Speech, SpeechRole};
+pub use stealth::{Stealth, StealthMode};
 
 use crate::error::IoResultExt as _;
 use crate::infra::paths;
@@ -61,6 +63,8 @@ pub struct Config {
     pub novel: Novel,
     pub membership: Membership,
     pub logging: Logging,
+    /// 低干扰 / 摸鱼阅读的全局偏好。它不是某一本书的排版差量，单独成节。
+    pub stealth: Stealth,
     /// 正文主题的背景图，按**主题名**索引（见 [`ThemeBackground`]）。
     ///
     /// 存在根节而不在 [`Appearance`] 里：Appearance 整节是按书差量的底表，图配置
@@ -92,6 +96,7 @@ impl Default for Config {
             novel: Novel::default(),
             membership: Membership::default(),
             logging: Logging::default(),
+            stealth: Stealth::default(),
             reading_backgrounds: BTreeMap::new(),
         }
     }
@@ -130,6 +135,7 @@ impl Config {
             }
         }
         self.logging = self.logging.normalized();
+        self.stealth = self.stealth.normalized();
         // 背景图配置：不透明度归一（坏值不当成选择），空文件名按「没配」处理 ——
         // 与 Appearance 里主题名那两条同一口径。
         for background in self.reading_backgrounds.values_mut() {
@@ -329,13 +335,14 @@ fn warn_missing_sections(value: &serde_json::Value) {
     let Some(object) = value.as_object() else {
         return;
     };
-    const SECTIONS: [&str; 6] = [
+    const SECTIONS: [&str; 7] = [
         "reader",
         "appearance",
         "library",
         "language",
         "speech",
         "logging",
+        "stealth",
     ];
     let missing: Vec<&str> = SECTIONS
         .into_iter()

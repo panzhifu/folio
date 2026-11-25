@@ -15,10 +15,16 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         line_height: parent.line_height,
         font_weight: parent.font_weight,
         font_italic: parent.font_italic,
+        font_stretch: parent.font_stretch,
         // `font-variant` 在 CSS 里可继承：书里常在 `<body>` 或整段上写一次。
         small_caps: parent.small_caps,
         font_family: parent.font_family.clone(),
         font_families: parent.font_families.clone(),
+        // 字体的三个 OpenType 开关在 CSS 里都**可继承**：书里通常在 `<body>` 上写一次
+        // `font-kerning: none` 或 `font-feature-settings: "palt" 1` 就管全书。
+        font_kerning: parent.font_kerning,
+        font_features: parent.font_features.clone(),
+        text_rendering: parent.text_rendering,
         text_align: parent.text_align,
         // `text-justify` 在 CSS 里可继承：书里在 `<body>` 上写一次 `inter-ideograph`
         // 就管全书，靠的正是这一行。
@@ -35,6 +41,8 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         // 「在一条链接里」按继承传播：链接里的 `<span>`、`<b>` 与其中的文本都算链接的一部分，
         // 与下面装饰线那一格同一个理由。它不是 CSS 属性，判据见 `ComputedStyle::link`。
         link: parent.link,
+        // `cursor` 在 CSS 里可继承：写在 `<body>` 或链接规则上一次就管一片。
+        cursor: parent.cursor,
         text_indent: parent.text_indent,
         word_spacing: parent.word_spacing,
         // 字距在 CSS 里可继承（`letter-spacing` 是 inheritable），书里常在 `<body>` 上写一次。
@@ -69,6 +77,8 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         visibility: parent.visibility,
         // `text-transform` 在 CSS 里可继承：写在 `<body>` 上一次就管全书。
         text_transform: parent.text_transform,
+        // `text-combine-upright` / `-webkit-text-combine` 同样可继承。
+        text_combine: parent.text_combine,
         quotes: parent.quotes,
         // SVG 呈现属性按 CSS/SVG 规定可继承：写在 `<svg>` 根上的 stroke 要落到每个 `<path>`。
         svg_fill: parent.svg_fill,

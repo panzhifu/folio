@@ -31,7 +31,7 @@ use folio_core::BookSettingsExt;
 use folio_core::infra::config::ThemeBackground;
 use folio_core::{
     Account, Appearance, BookSettings, Cloud, Config, Env, Language, Layer, Library, Membership,
-    Mode, Novel, Opds, Provenance, Reader, Resolved, Speech, Sync, Translation,
+    Mode, Novel, Opds, Provenance, Reader, Resolved, Speech, Stealth, Sync, Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
@@ -509,6 +509,15 @@ impl ConfigHolder {
 
     pub fn edit_speech(cx: &mut App, f: impl FnOnce(&mut Speech)) {
         Self::edit(cx, |config| f(&mut config.speech));
+    }
+
+    /// 低干扰阅读偏好。与亮度一样是全局项，不能写进某一本书的差量。
+    pub fn stealth(cx: &App) -> Stealth {
+        Self::snapshot(cx).stealth.clone()
+    }
+
+    pub fn edit_stealth(cx: &mut App, f: impl FnOnce(&mut Stealth)) {
+        Self::edit(cx, |config| f(&mut config.stealth));
     }
 
     /// 落盘。`path` 为 `None`（测试）时跳过；写失败只打日志，不让 UI 崩。

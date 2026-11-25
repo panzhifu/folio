@@ -33,6 +33,7 @@ pub(super) const ROOT_BLOCKS: &[(&str, &[SettingsPage])] = &[
             SettingsPage::Fonts,
             SettingsPage::Speech,
             SettingsPage::Dictionary,
+            SettingsPage::Stealth,
         ],
     ),
     (

@@ -10,6 +10,7 @@
 mod budget;
 pub mod color;
 pub mod computed;
+mod features;
 mod font_face;
 mod media;
 pub mod selector;

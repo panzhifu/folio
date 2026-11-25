@@ -17,12 +17,14 @@ use crate::ui::features::reader::model::session::StackMotionView;
 use crate::ui::features::reader::view::paint::GlyphRun;
 
 mod decor;
+mod decor_pipeline;
 mod tiles;
 use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::{desaturate, desaturate_author, run_color, run_color_link};
 pub(in crate::ui::features::reader) use decor::full_page_picture;
 pub use decor::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
 use decor::{overscan_backdrop, page_color_is_drawn_by_reader};
+use decor_pipeline::place_decorations;
 use tiles::background_tiles;
 pub(in crate::ui::features::reader) use tiles::picture_fills_width;
 
@@ -144,8 +146,7 @@ impl Scene {
         let mut upcoming = Vec::new();
         // 块级装饰与行一样按可见区间裁：只在 cull 覆盖到的盒子上花钱。
         let __t = crate::ui::features::reader::model::perf::Timer::start();
-        // 「哪些块带装饰」已经在排版结果换代的同一批里折好了（`Layout::decor_seeds`），
-        // 每帧在这里只做三件**必须**每帧做的事：按可见带裁、加两个平移、落主题前景。
+        // 装饰表随排版换代折好；每帧只裁可见带、加平移、落主题前景。
         let decorations = place_decorations(
             document.decor_seeds(),
             if vertical {
@@ -161,10 +162,9 @@ impl Scene {
             foreground,
             document.images(),
             taken_over,
-            // 「这一章有没有可读正文」只在根块那一格用得上（整页底色要收口，见
-            // [`page_color_is_drawn_by_reader`]）。按章问一次，而不是逐块问 —— 那一条
-            // 要扫全文的行片段。
+            // 只在根块收整页底图时问一次，不逐块扫全文行片段。
             !document.has_text(),
+            &layout.column_rules,
         );
         let __decor = __t.ns();
         crate::ui::features::reader::model::perf::add(|frame| frame.decor_ns += __decor);
@@ -242,21 +242,19 @@ impl Scene {
                             // 行号与槽位都只在**这一份排版**里作数，而排版一换
                             // `Document::drop_fragments` 就把两张表一起清掉。
                             .keyed((ix as u32, unit.slot))
-                            // 每条 run 自己的基线：`vertical-align` 折出来的偏移在这里减掉，
-                            // 正数（往上抬）在横排就是基线 y 变小；竖排那一档「抬」是朝列的
-                            // 起点边（`vertical-rl` 的起点边在右）—— 那个符号取自同一处投影，
-                            // 不在这里另立一条。行盒高与行基线已由排版层算过。
+                            // 每条 run 自己的基线：`vertical-align` 的偏移在这里减掉，
+                            // 符号取自同一处投影，不在这里另立一条。行盒高与基线已由排版层算过。
                             .at(
                                 inline + unit.x,
                                 cross + {
-                                    let (dx, dy) = flow.project_delta(0.0, -unit.baseline_shift);
+                                    let (dx, dy) =
+                                        flow.project_delta(unit.cross_offset, -unit.baseline_shift);
                                     if vertical { dx } else { dy }
                                 },
                             )
                             .on_flow(flow)
                             .color(run_color_link(unit.color, foreground, link, unit.link))
-                            // 装饰线要这个 run 的 inline box 高才能定纵向落点
-                            // （见 `paint::decoration_y`），它是样式给的数，shaping 里没有。
+                            // 装饰线要这个 inline box 高定纵向落点（见 `paint::decoration_y`）。
                             .in_box(unit.box_height)
                             .decorate(unit.underline, unit.line_through)
                             .decoration(
@@ -264,8 +262,7 @@ impl Scene {
                                 unit.decoration_color
                                     .map(|color| run_color(Some(color), foreground)),
                             )
-                            // 影子与装饰线同一条来路：`RunStyle` → `RowUnit` → 这里。
-                            // 绘制层在影子非空时先铺一趟影子再画字（见 `paint::paint_run`）。
+                            // 影子与装饰线同一条来路：`RunStyle` → `RowUnit` → 绘制层。
                             .shadowed(unit.text_shadows.clone())
                             // 着重号：颜色缺省跟字色，绘制层在每个非空白字形旁画点。
                             .emphasis(
@@ -406,158 +403,8 @@ impl Scene {
     }
 }
 
-/// 把 `Layout::decor_seeds` 折好的装饰短表按可见带裁一刀，落平移数与主题前景。
-/// 不再走整章块表（那会每帧每章扫 160~600+ 块）；每帧只剩四件带「此刻」的事：
-/// 可见区间、滚动、主题色、随图片索引变的背景图固有尺寸（故不烘进表）。
-///
-/// 判据逐字沿用原式，且**只能整表扫**：块是嵌套的，父盒 `y+height` 远大于子盒，
-/// 「相交块是连续下标」这个前提在块上不成立（`Layout::stacked` 是为行盒量的）。
-/// 表短（只有真带装饰的块）是代价低，不是被二分 —— 高盒测试就是这条前提的活证据。
-#[allow(clippy::too_many_arguments)] // 九个都是「这一帧」的输入，包成结构体只是换个地方摆
-fn place_decorations(
-    seeds: &[DecorSeed],
-    // 可见带，已经折到**盒子自己那一条被裁的轴**上：横排是 y 的一段，竖排是物理 x 的一段
-    // （`Scene::build` 里从推进轴翻回来一次，这里不再各折一遍）。
-    band: (f32, f32),
-    origin_y: f32,
-    vertical: bool,
-    slide: f32,
-    x: f32,
-    top: f32,
-    foreground: Hsla,
-    // 背景图的固有尺寸与字节都从这里现问（与 `<img>` 那条同一个来路）。
-    images: &ChapterImages,
-    // 阅读器已经拿去当**整窗背板**画的那一条根底图，在 `seeds` 里的下标（`None` = 这一章
-    // 没有整页底图）。版心里那一份必须跳过 —— 位置还差着一个页眉与安全区。
-    taken_over: Option<usize>,
-    // 这一章**没有可读正文**（纯图页 / 卷首那一类）。见 [`page_color_is_drawn_by_reader`]。
-    picture_only_chapter: bool,
-) -> Vec<BlockDecor> {
-    let mut out = Vec::new();
-    for (index, seed) in seeds.iter().enumerate() {
-        // 被背板接管的那一条自己不算；其余 `full_bleed` 的也跟着跳过是既有口径 ——
-        // 那种章的根底图整窗铺，块里再画一遍就是「图多出来一截」。
-        if taken_over == Some(index) || (taken_over.is_some() && seed.full_bleed) {
-            continue;
-        }
-        let (start, thick) = if vertical {
-            (seed.x, seed.width)
-        } else {
-            (seed.y, seed.height)
-        };
-        if start + thick < band.0 || start > band.1 {
-            continue;
-        }
-        // 边框色在表里已经把 `currentColor`（本块自己的 `color`）折完了，
-        // 这里只剩「没色就落主题前景」那一步。
-        // 表里的宽已经是 `BorderEdge::drawn()` 的结果（「有 width 但 style 是 none」
-        // 那种不存在的边在折表时就折成 0 了），这里只落色，画法原样带过去。
-        let edge = |(width, color, style): (f32, Option<Color>, BorderStyle)| {
-            (width, run_color(color, foreground), style)
-        };
-        // 背景图：一张都取不到字节就整条跳过 —— 「这一块没有底」与「底还在解」在
-        // 屏幕上与从前一样，都是空着，但别拿着一个假的 `DecodeRequest` 去登记图集，
-        // 那会让回收那一账记在一张根本不存在的图上。
-        // 裁剪盒与定位盒同一套平移：裁剪盒管裁、定位盒管量。
-        let fold = |rect: (f32, f32, f32, f32)| {
-            if vertical {
-                (x + rect.0 + slide, top + rect.1, rect.2, rect.3)
-            } else {
-                (x + rect.0, rect.1 - origin_y + top, rect.2, rect.3)
-            }
-        };
-        let background_rect = fold(seed.background_rect);
-        let origin_rect = fold(seed.origin_rect);
-        let mut pictures = Vec::new();
-        for picture in &seed.pictures {
-            let Some(request) = images.decode_request(&picture.href) else {
-                continue;
-            };
-            // 格子按**定位盒**算相位与尺寸，铺到**裁剪盒**的边为止：裁剪盒折进
-            // 定位盒坐标系传下去（两盒各管各的，见 `background_tiles`）。
-            let tiles = background_tiles(
-                origin_rect.2,
-                origin_rect.3,
-                (
-                    background_rect.0 - origin_rect.0,
-                    background_rect.1 - origin_rect.1,
-                    background_rect.2,
-                    background_rect.3,
-                ),
-                images.natural_size(&picture.href),
-                &picture.size,
-                &picture.position,
-                &picture.repeat,
-            );
-            if tiles.is_empty() {
-                continue;
-            }
-            pictures.push(BlockPicture {
-                image: request,
-                tiles,
-            });
-        }
-        out.push(BlockDecor {
-            x: if vertical {
-                x + seed.x + slide
-            } else {
-                x + seed.x
-            },
-            top: if vertical {
-                top + seed.y
-            } else {
-                seed.y - origin_y + top
-            },
-            width: seed.width,
-            height: seed.height,
-            background_rect,
-            origin_rect,
-            background: if page_color_is_drawn_by_reader(index, seed, picture_only_chapter) {
-                // 整页底色只由 `reading_theme::resolve` 画一次（`column.bg(reading.bg)`），
-                // 这里再画一遍就是同一件事的第二个真相 —— 见判据那一条的文档。
-                None
-            } else {
-                seed.background
-                    .map(|color| run_color(Some(color), foreground))
-            },
-            radius: seed.radius,
-            border: [
-                edge(seed.border[0]),
-                edge(seed.border[1]),
-                edge(seed.border[2]),
-                edge(seed.border[3]),
-            ],
-            pictures,
-            box_shadows: seed
-                .box_shadows
-                .iter()
-                .map(|shadow| BlockShadow {
-                    dx: shadow.dx,
-                    dy: shadow.dy,
-                    blur: shadow.blur,
-                    inset: shadow.inset,
-                    color: run_color(shadow.color, foreground),
-                })
-                .collect(),
-            outline: seed
-                .outline
-                .map(|(width, color, style, offset)| BlockOutline {
-                    width,
-                    color: run_color(color, foreground),
-                    style,
-                    offset,
-                }),
-        });
-    }
-    out
-}
-
-/// 一整窗的背板：一层（或多层）背景图按**窗口尺寸**摆好，坐标就是阅读会话坐标。
-///
-/// 整页画章（`background-attachment: fixed` 底图 / 单图页）由阅读器把这张画贴在窗口上，
-/// 而不是画在版心里：画布是整扇窗，读数带浮在它上面。摆法仍走 CSS 的
-/// `background-size` / `-position` / `-repeat`（与块装饰同一个 [`background_tiles`]），
-/// 所以作者写的 `cover` + `bottom center` 在这里逐字生效。
+/// 一整窗的背板（整页画章 / 单图页）：按**窗口尺寸**摆背景图，坐标就是阅读会话
+/// 坐标；摆法仍走 CSS 的 `background-size` / `-position` / `-repeat`。
 pub(in crate::ui::features::reader) fn backdrop_decor(
     pictures: &[DecorPicture],
     x: f32,
@@ -604,6 +451,7 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
         pictures: out,
         box_shadows: Vec::new(),
         outline: None,
+        backdrop_blur: None,
     })
 }
 
@@ -693,6 +541,7 @@ mod tests {
                 (2.0, Some(Color(12, 34, 56, 255)), BorderStyle::Solid),
             ],
             pictures: Vec::new(),
+            backdrop_blur: None,
             box_shadows: Arc::from([ShadowLayer {
                 dx: 1.0,
                 dy: 2.0,
@@ -720,6 +569,7 @@ mod tests {
             &images(),
             None,
             false,
+            &[],
         );
         assert_eq!(decor.len(), 1);
         let decor = &decor[0];
@@ -783,6 +633,7 @@ mod tests {
             &images(),
             None,
             false,
+            &[],
         );
         assert_eq!(decor.len(), 1, "900 那条在窗外：{decor:?}");
     }
@@ -806,6 +657,7 @@ mod tests {
             &images(),
             Some(0),
             false,
+            &[],
         );
         assert_eq!(decor.len(), 1, "背板接管的那一条不再进版心：{decor:?}");
         assert_eq!(decor[0].top, 120.0, "跳的是第 0 条，其余照画：{decor:?}");
@@ -830,6 +682,7 @@ mod tests {
             &images(),
             None,
             false,
+            &[],
         );
         assert_eq!(decor.len(), 1, "父盒跨着整条带，必须画：{decor:?}");
         assert_eq!(decor[0].height, 5000.0);
@@ -1142,6 +995,7 @@ mod tests {
                 &images(),
                 None,
                 false,
+                &[],
             )
             .is_empty()
         );
@@ -1262,6 +1116,7 @@ mod tests {
                     style: BorderStyle::Solid,
                     offset: 1.0,
                 }),
+                backdrop_blur: None,
             }],
             ..Default::default()
         };

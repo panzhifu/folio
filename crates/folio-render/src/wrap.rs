@@ -1,5 +1,4 @@
-//! 断行：硬行方案、逐字符与逐词扫描、UAX #14 断点与禁则、行尾空白，产出 `LinePlan`。
-//! 从 `layout` 切出来只为一个文件能一次读完；条目 `pub(super)` 只对 `layout` 内部开放。
+//! 断行：硬行方案、逐字符/逐词扫描、UAX #14 断点与禁则、行尾空白，产出 `LinePlan`。
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -9,10 +8,11 @@ use super::font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
 use folio_format::css::computed::{
-    ComputedStyle, GeneratedContent, Hyphens, InlineVAlign, RubyPosition, StyledDom,
+    ComputedStyle, GeneratedContent, Hyphens, InlineVAlign, RubyPosition, StyledDom, TextCombine,
 };
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
+mod combine;
 mod text_ops;
 use text_ops::{small_caps_upper, transform_text};
 
@@ -24,20 +24,10 @@ use text_ops::{small_caps_upper, transform_text};
 /// 代价是收集、断行、命中三处都要多一套区间 —— 书名与人物名上不值得。
 const SMALL_CAPS_SCALE: f32 = 0.8;
 
-/// 注音与基字之间的缝，按容器自己的字号折算。
-///
-/// 这是**我们定的常数**，不是规范给的数：CSS 把 ruby 的注音间距留给实现，浏览器给的是
-/// 一两个 px 级别的空隙。0.08 em 在 16 px 正文 + 半号注音那一档是 1.3 px —— 再小就会让
-/// 注音的下沿咬到基字的上沿，再大就变成两行之间凭空多一条缝。列表标记与正文之间那道缝
-/// （`collect.rs` 的 `MARKER_GAP_EM`）是同一个立场：留白由实现定，取「贴字」那一档。
+/// 注音与基字之间的缝，按容器字号折算；0.08 em 是「贴字」那一档。
 const RUBY_GAP_EM: f32 = 0.08;
 
-/// 一行在版心里的落位：行带左缘 `x`、行顶 `y`、整幅宽 `width`，加上这一行让出去的
-/// 四段宽（[`RowInsets`]，四段各是什么、为什么要分成四段写在那一条上）。
-///
-/// 折行那一趟只决定「这一行从哪起、占多高的一档」与这四段，剩下的宽度与对齐都在
-/// [`crate::collect::Ctx::emit_line`] 里按它算 —— 两趟吃的是同一份 `RowInsets`，
-/// 所以「按多少宽断的行」与「按多少宽摆的字」不可能对不上。
+/// 一行在版心里的落位与让宽的四段（[`RowInsets`]）；折行与摆位共用同一份。
 #[derive(Clone, Copy)]
 pub(super) struct LinePlace {
     pub(super) x: f32,
@@ -48,24 +38,17 @@ pub(super) struct LinePlace {
     pub(super) hard_end: bool,
 }
 
-/// 一个行盒的方案：正文的字节区间（首字符那一段已摘出去），加上落位要让开的那几段。
+/// 一个行盒的方案：字节区间与落位要让开的几段。
 #[derive(Clone)]
 pub(super) struct LinePlan {
     pub(super) range: Range<usize>,
     /// 让宽的四段，摆位与折行共用同一份。
     pub(super) insets: RowInsets,
-    /// 这一行以**硬换行**收尾（`<br>`，或它就是本段的最后一行）。CSS 规定这类行
-    /// **不做**两端对齐 —— 段末行与强制断行处让余量留在右边，是排版惯例也是规范。
+    /// 以**硬换行**收尾（`<br>` 或段末），按 CSS 不做两端对齐，余量留在右边。
     pub(super) hard_end: bool,
 }
 
-/// 这一行让出去的四段宽。分四段是因为它们的**几何作用不同**，混成一个数就会在 RTL 里错：
-///
-/// - `start` 是逻辑起始边的位移（首行 `text-indent`、被下沉首字符压着的那几行让开的宽）。
-///   RTL 时它落在右边，由对齐那一路从右缘往回算。
-/// - `left` / `right` 是两侧浮动盒吃掉的宽，是**物理边**：左边的图在 RTL 里也站在左边，
-///   所以它只能从行带的左缘扣，不能跟 `start` 加在一起。
-/// - `reserved` 是首字符自己站的那一格：推不开正文（正文排在它右边），但写不了字。
+/// 让宽的四段：`start` 逻辑起始（RTL 落右）、`left`/`right` 物理浮动、`reserved` 首字格。
 #[derive(Clone, Copy, Default)]
 pub(super) struct RowInsets {
     pub(super) start: f32,
@@ -222,6 +205,7 @@ impl LineAcc {
                 descent,
                 // ruby 注音那一族 piece 带的横向落点；正文恒为 0。
                 x_offset: piece.x_offset,
+                cross_offset: piece.cross_offset,
             }));
         }
     }
@@ -830,12 +814,18 @@ impl<'a> Collector<'a> {
             self.widths[base + offset] = w;
             prev = Some((base + offset, ch));
         }
+        if run.text_combine != TextCombine::None && !self.in_note {
+            combine::fold_pairs(
+                &mut self.widths,
+                self.text[start..].as_bytes(),
+                base,
+                run.font_size,
+            );
+        }
     }
 
-    /// 把一段文本按收尾标点切成几个 `Piece`。`LineRun` 起点是**片段累计宽**：逗号若留在长
-    /// run 里，宽度表把前进量减半了、但 run 内字形仍按 shaping 的 1em 摆，下一段不跟着前移。
-    /// 切成「标点单独一段 + 后文另起一段」，绘制与命中才吃同一个累计宽。
-    /// 折叠过空白的文本（`norm.len() != orig.len()`）不切：`orig` 无法逐段映射，切了锚点会漂。
+    /// 按收尾标点切成几个 `Piece`，让宽度表与 run 内 shaping 的累计宽一致。
+    /// 折叠空白不切（`orig` 无法逐段映射）。
     fn push_text_pieces(
         &mut self,
         node: NodeId,
@@ -843,6 +833,13 @@ impl<'a> Collector<'a> {
         orig: Range<usize>,
         style: StyleRef,
     ) {
+        // 并格把每对第二字折进第一字：宽度已在 `push_widths` 并好，这里锚回原字。
+        let run = self.arena.get(style);
+        if run.is_some_and(|run| run.text_combine != TextCombine::None) && norm.len() == orig.len()
+        {
+            combine::push_pieces(self, node, norm, orig, style);
+            return;
+        }
         if norm.len() != orig.len() {
             self.pieces.push(Piece {
                 node,
@@ -850,6 +847,7 @@ impl<'a> Collector<'a> {
                 orig,
                 style,
                 x_offset: 0.0,
+                cross_offset: 0.0,
             });
             return;
         }
@@ -878,6 +876,7 @@ impl<'a> Collector<'a> {
                 orig: base..base + segment.len(),
                 style,
                 x_offset: 0.0,
+                cross_offset: 0.0,
             });
         }
     }
@@ -1028,6 +1027,7 @@ impl<'a> Collector<'a> {
             orig: 0..0,
             style: style_ref,
             x_offset: 0.0,
+            cross_offset: 0.0,
         });
     }
 

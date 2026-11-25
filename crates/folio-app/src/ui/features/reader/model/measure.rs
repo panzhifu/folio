@@ -278,12 +278,11 @@ pub fn gpui_font(
         family,
         fallbacks,
         weight: FontWeight(key.weight as f32),
-        style: if key.italic {
-            FontStyle::Italic
-        } else {
-            FontStyle::Normal
-        },
-        ..Default::default()
+        style: key
+            .italic
+            .then_some(FontStyle::Italic)
+            .unwrap_or(FontStyle::Normal),
+        features: FontFeatures(Arc::new(key.features.to_vec())),
     }
 }
 
@@ -769,9 +768,7 @@ mod tests {
     fn key(family: &str) -> FontKey {
         FontKey {
             family: family.to_string(),
-            families: Vec::new(),
-            weight: 400,
-            italic: false,
+            ..Default::default()
         }
     }
 
@@ -783,8 +780,7 @@ mod tests {
                 .chain(rest.iter().copied())
                 .map(String::from)
                 .collect(),
-            weight: 400,
-            italic: false,
+            ..Default::default()
         }
     }
 

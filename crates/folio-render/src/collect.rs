@@ -2,6 +2,7 @@
 //! 从 `layout` 切出来只为一个文件能一次读完；条目 `pub(super)` 只对 `layout` 内部开放。
 
 mod columns_layout;
+mod combine;
 mod grid_layout;
 mod table_layout;
 
@@ -24,7 +25,7 @@ use super::wrap::{
 };
 use folio_format::css::computed::{
     AlignItems, CellVAlign, Clear, ComputedStyle, Direction, Display, FlexDirection, Float, Length,
-    Positioning, StyledDom, TextAlign, TextJustify, WordBreak,
+    Positioning, StyledDom, TextAlign, TextCombine, TextJustify, WordBreak,
 };
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
@@ -84,6 +85,7 @@ pub(super) struct Ctx<'a> {
     pub(super) light: bool,
     pub(super) blocks: Vec<BlockBox>,
     pub(super) lines: Vec<LineBox>,
+    pub(super) column_rules: Vec<crate::geometry::ColumnRule>,
     /// 块级缓存；`None` = 不做块级复用（[`layout`] 的默认路径）。
     pub(super) cache: Option<&'a mut BlockCache>,
     /// 每节点的子树样式哈希，与 `cache` 同生共死（见 [`subtree_style_hash`]）。
@@ -354,6 +356,8 @@ pub(super) struct Piece {
     /// [`MarkerRun::offset`]: super::geometry::MarkerRun::offset
     /// [`LineRun`]: super::geometry::LineRun
     pub(super) x_offset: f32,
+    /// 交叉轴偏移（竖排数字并格），口径同 [`LineRun::cross_offset`]。
+    pub(super) cross_offset: f32,
 }
 
 /// 段落里一张图片：锚定在文本流某个位置，宽度已按 CSS 与内在尺寸算好。
@@ -409,12 +413,8 @@ impl Collected {
     }
 
     /// 断点 `at` 落在某个 ruby 容器**内部**吗。
-    ///
-    /// 容器不许拆开排到两行上：注音得跟着自己的基字，拆开了就是上一行留基字、下一行留注音。
-    /// 落在容器起止两边都算合法断点（`at == start` 是「容器整体挪到下一行」，
-    /// `at == end` 是容器之后的正常断行），只有夹在中间才否掉。
-    ///
-    /// 表按起点升序（收集器只会往后追加），所以二分找最后一个起点早于 `at` 的容器。
+    /// 容器不许拆到两行（注音要跟基字）；起止两边是合法断点，只有夹在中间才否掉。
+    /// 表按起点升序，二分找最后一个起点早于 `at` 的容器。
     pub(super) fn breaks_ruby(&self, at: usize) -> bool {
         let idx = self.rubies.partition_point(|span| span.start < at);
         idx > 0 && at < self.rubies[idx - 1].end
@@ -2384,16 +2384,13 @@ impl<'a> Ctx<'a> {
             // `word-break: break-all` 那一档同样要摘：它放开的是正文的断行机会，
             // 不是把注音与它的基字分家 —— 那样上一行只剩基字、下一行只剩注音。
             breaks.retain(|at| !collected.breaks_ruby(*at));
+            if style.text_combine != TextCombine::None {
+                combine::add_breaks(collected, &hard, &mut breaks);
+            }
             // `cap` 在整段里都不变，先把「有没有」问一次，别每字符问。
             let cap_norm = cap.as_ref().map(|dc| dc.norm.clone());
-            // 断点把硬行切成若干「词」（两个断点之间的连续段）：拉丁文里≈单词，
-            // CJK 里退化成单字。稀疏（平均每词 ≥ 4 字节 —— 拉丁那种词边界断行）走词级
-            // 扫描，每个词只做一次溢出判断；密集（CJK 几乎每字一个断点）或带下沉盒时走
-            // 逐字符。两条路径输出逐行一致，这个分类只影响性能。
-            //
-            // 含可悬挂标点的硬行一律走逐字符：悬挂要在一行末尾「越界一格」再接着判下一个
-            // 字，词级扫描是按整词判的，拆不出标点前后这两步。纯拉丁硬行没有这类标点，
-            // 所以稀疏这条快路不受影响。
+            // 断点是「词」界；稀疏走词级扫描、密集/下沉盒/悬挂标点走逐字符。
+            // 两条路径输出一致，这只影响性能；悬挂需要先越界一格判下一个字。
             let sparse = !breaks.is_empty()
                 && slice.len() >= 4 * (breaks.len() + 1)
                 && !slice.chars().any(hangs_at_end);
@@ -2570,6 +2567,7 @@ impl<'a> Ctx<'a> {
                     descent: dc.descent,
                     // 下沉的首字符就是它自己那一格，不额外挪。
                     x_offset: 0.0,
+                    cross_offset: 0.0,
                 }),
             );
         }

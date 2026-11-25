@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use super::ports::Measure;
 use folio_format::css::computed::{
-    Color, ComputedStyle, DecorationStyle, EmphasisPosition, EmphasisStyle, TextShadow,
-    TextTransform, Visibility,
+    Color, ComputedStyle, DecorationStyle, EmphasisPosition, EmphasisStyle, FontStretch,
+    TextCombine, TextShadow, TextTransform, Visibility, WritingMode,
 };
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
@@ -25,6 +25,12 @@ pub struct FontKey {
     pub families: Vec<String>,
     pub weight: u16,
     pub italic: bool,
+    /// `font-stretch` 字面宽度档；进键保证量宽与绘制同源。
+    pub stretch: FontStretch,
+    /// `font-kerning` / `font-feature-settings` / `text-rendering` 折成的 OpenType
+    /// 特性表。进键是因为它会改 shaping 的**前进量**：量宽与绘制必须拿同一份，
+    /// 否则断行按 A 算、屏上按 B 画。
+    pub features: Arc<[(String, u32)]>,
 }
 
 impl FontKey {
@@ -34,6 +40,8 @@ impl FontKey {
             families: style.font_families.clone(),
             weight: style.font_weight,
             italic: style.font_italic,
+            stretch: style.font_stretch,
+            features: style.shaping_features().into(),
         }
     }
 
@@ -103,6 +111,9 @@ pub struct RunStyle {
     pub hidden: bool,
     /// `text-transform`：收集文本时按它换字符（只换字节长度不变的）。
     pub text_transform: TextTransform,
+    /// 竖排数字并格（横排折成 `None`）。
+    pub text_combine: TextCombine,
+    pub vertical_lr: bool,
 }
 
 impl std::hash::Hash for RunStyle {
@@ -132,6 +143,8 @@ impl std::hash::Hash for RunStyle {
         (self.emphasis_position as u8).hash(state);
         self.hidden.hash(state);
         (self.text_transform as u8).hash(state);
+        self.text_combine.hash(state);
+        self.vertical_lr.hash(state);
     }
 }
 
@@ -218,6 +231,12 @@ impl RunStyle {
             emphasis_position: style.text_emphasis_position,
             hidden: matches!(style.visibility, Visibility::Hidden | Visibility::Collapse),
             text_transform: style.text_transform,
+            text_combine: if style.writing_mode.is_vertical() {
+                style.text_combine
+            } else {
+                TextCombine::None
+            },
+            vertical_lr: style.writing_mode == WritingMode::VerticalLr,
         }
     }
 

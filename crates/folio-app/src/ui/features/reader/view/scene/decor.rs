@@ -46,6 +46,9 @@ pub struct BlockDecor {
     pub box_shadows: Vec<BlockShadow>,
     /// `outline`：画在边框盒**外侧**的一圈轮廓，`offset` 是轮廓与边框盒之间的缝。
     pub outline: Option<BlockOutline>,
+    /// `backdrop-filter: blur(<px>)` 的半径。`None` = 没有这条声明。
+    /// 绘制侧先糊底下那一块、再画本块的底色（`body::decor::decoration_child`）。
+    pub backdrop_blur: Option<f32>,
 }
 
 /// 一块盒子的阴影：偏移、模糊、内阴影与最终颜色。

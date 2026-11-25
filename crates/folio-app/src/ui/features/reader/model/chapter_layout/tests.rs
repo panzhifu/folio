@@ -2098,7 +2098,7 @@ fn visibility_hidden_reaches_the_row_units_without_dropping_the_line(cx: &mut Te
         })
         .collect();
     let hidden = texts.iter().find(|(t, _)| t == "甲");
-    assert!(hidden.is_some_and(|(_, h)| *h), "hide 段的 RowUnit 标 hidden");
+    assert!(hidden.is_some_and(|(_, h)| *h), "hide 段 RowUnit 标 hidden");
     let shown = texts.iter().find(|(t, _)| t == "乙");
     assert!(shown.is_some_and(|(_, h)| !*h), "可见段不标 hidden");
 }

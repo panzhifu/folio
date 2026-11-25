@@ -37,13 +37,11 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 真会把后面的行带折窄，见 `layout::collect` 的 `PlacedFloat`。
     // `columns` 2026-11-24 移了出去：块级多栏容器在排版期真接了（`collect::columns_layout`，
     // 纯数在 `layout::columns`），`column-count` / `column-width` / 简写与 `column-gap`
-    // （Flex 那一档同格）都进层叠。这一族剩下的三条没有对应物或不在这一层，留在这里：
-    // `column-rule` 是栏间分隔线（绘制侧多一族线段）、`column-fill` 要在「配平」与
-    // 「填满」两档里做真实的分栏分片、`column-span` 要把跨栏元素从流里抽出来再拼回去 ——
-    // 三条都照实记「认得、不生效」，落差表不再把它们报成「听都没听过」。
-    "column-rule",
-    "column-fill",
-    "column-span",
+    // （Flex 那一档同格）都进层叠。`column-fill` 2026-11-25 也移了出去：`balance` 走
+    // 最小化最大栏高的二分配平，`auto` 仍按序装满。这一族剩下的两条没有对应物：
+    // `column-rule` 2026-11-25 移了出去：三要素解析后画在栏缝正中。
+    // `column-span` 2026-11-25 也移了出去：跨栏元素铺满容器宽，前后内容分段配平。
+    // 多栏一族至此全部落地。
     // 列表标记 2026-10-15 起真的画了，所以 `list-style` 与 `list-style-type` 从这份
     // 名单里移了出去 —— 它们现在会改屏上的东西（`layout::marker`）。
     // `list-style-image` 与 `list-style-position` 2026-10-29 也移了出去：它们不是
@@ -58,19 +56,14 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // （见开发方案 §3.2），那是接字体文件那一层的事，不是层叠期能折出来的数。
     // `font-variant` 与 `font-variant-caps` 2026-10-29 移了出去：它们的**初值** `normal`
     // 就是我们做的事，于是改成只收初值（见 `apply` 里那一条臂）。
-    "font-stretch",
-    "font-kerning",
-    "font-feature-settings",
+    // `font-kerning` / `font-feature-settings` / `text-rendering` 2026-11-25 移了出去：
+    // 它们折成 OpenType 特性表进 `FontKey`，量宽与绘制共用同一份。
+    // 2026-11-25 移出：`font-stretch` 关键字/百分比折字面宽度档，进 `FontKey` 与
+    // gpui `Font::stretch` 选面；连续可变轴 `wdth` 仍降级（见 `FontStretch`）。
     // 字距 2026-10-16 起真的生效了（`letter-spacing` 已从这份名单移除），所以这里不再列。
     //
-    // `cursor` 是**界面提示**，不是排版属性：它说的是「指针移到这儿该长什么样」。
-    // 阅读器里能兑现它的地方只有链接（桌面端本来就对链接给手形），而书里把它写在
-    // 5718 个元素上（《毛泽东选集》）只是转换器把网页样式原样带进来。所以记
-    // 「认得、不生效」：落差表不再把它报成「我们听都没听过」，而它也确实不该动版面。
-    "cursor",
-    // 竖排里把两个数字并成一格那一档：注音排在字上方要动的行内收集与行盒高，
-    // 它比那一格大得多，留在名单里（`-webkit-text-combine` 单独一条属性，没人消费）。
-    "-webkit-text-combine",
+    // `cursor` 2026-11-25 移了出去：界面层按命中到的元素读 `ComputedStyle::cursor`，
+    // 链接上的 `auto` 落成手形。它仍不改版面 —— 只是不再算「认得、不生效」。
     // `ruby-position` / `-epub-ruby-position` 与 `ruby-align` / `-epub-ruby-align`
     // 2026-10-31 一起移了出去：注音排在基字上方/下方（[`RubyPosition`]）与横向贴哪一段
     // （[`RubyAlign`]）都进了 `layout::wrap` 折 ruby 容器那一段，排版层真读这两格。
@@ -88,11 +81,10 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 「不认识」那一栏（两本书各几百到上千个元素，会把真正要关注的写法淹掉）。
     //
     // - `duokan-bleed` 2026-10-30 接上了（`ComputedStyle::bleed`），所以移了出去。
-    // - 栅格化与合成提示：前者归渲染后端，后两者要「把底下那一块糊掉」。
+    // - 栅格化提示归渲染后端：次像素那一档是**窗口级**开关，逐元素改不了。
     "-webkit-font-smoothing",
-    "text-rendering",
-    "backdrop-filter",
-    "-webkit-backdrop-filter",
+    // - `backdrop-filter` 2026-11-25 移了出去：单个 `blur()` 进 `backdrop_blur`，绘制侧
+    //   走 gpui 的 `BackdropGlass`（wgpu 真模糊，Metal/DirectX 只留 tint）。
     // - flex 一族：2026-11-23 接上了主轴/交叉轴的 Flex 子集（`layout::flex`）：
     //   `flex-direction` / `align-items` / `justify-content` / `flex-wrap` / `gap` 都移了出去。
     //   `align-self` 2026-11-24 接上了（逐项覆盖交叉轴对齐），所以移出了这一档。

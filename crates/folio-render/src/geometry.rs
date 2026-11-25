@@ -16,7 +16,7 @@ use folio_format::dom::NodeId;
 use folio_format::metrics::Metric;
 
 mod seed;
-pub use seed::{DecorPicture, DecorSeed};
+pub use seed::{ColumnRule, DecorPicture, DecorSeed};
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
 #[derive(Debug, Clone, PartialEq)]
@@ -32,14 +32,11 @@ pub struct LineRun {
     pub width: f32,
     pub ascent: f32,
     pub descent: f32,
-    /// 沿字轴额外挪的 px（物理左偏移，RTL 符号已折好，正文恒 0），口径同 [`MarkerRun::offset`]。
-    /// 唯一用户是 ruby 注音：它不吃前进量，流动排在容器末尾，而 `ruby-align` 要的在那一段里头 ——
-    /// 差的就是这一格。竖直那半走 [`RunStyle::baseline_shift`]。绘制与命中**各加一次同一个数**，
-    /// 漏一侧就是「画在那儿、点上去选中别处」。
-    ///
-    /// [`MarkerRun::offset`]: MarkerRun::offset
-    /// [`RunStyle::baseline_shift`]: crate::RunStyle::baseline_shift
+    /// 沿字轴额外挪的 px（物理左偏移，RTL 已折好，正文恒 0），ruby 注音用；竖直那半走
+    /// [`RunStyle::baseline_shift`](crate::RunStyle::baseline_shift)。绘制与命中同加。
     pub x_offset: f32,
+    /// 垂直于推进轴的额外偏移（正 = 横排上 / 竖排右）；竖排数字并格用，绘制与命中共读。
+    pub cross_offset: f32,
 }
 
 /// 行盒里的一段图片。`href` 是**解析后的容器绝对路径**，绘制层按它取字节解码。
@@ -262,16 +259,16 @@ pub struct Layout {
     /// `width` / `height` 说的也是物理那两条边，而竖排下他们对调过：`width` 是长条沿块轴的
     /// 总长（一整串列占多宽，切片就是按它切的），`height` 是一列能排多长。
     flow: WritingMode,
-    /// 第 `i` 行属于 `blocks` 哪条；与 `lines` 等长，`u32::MAX` = 无归属（手工拼表才有）。
-    /// 用 `u32` 而非 `usize`：一万多行一章省下几十 KB。
+    /// 第 `i` 行属于 `blocks` 哪条；与 `lines` 等长，`u32::MAX` = 无归属（手工拼表）。
     owner: Vec<u32>,
     /// 行盒是否**严格叠放**：沿推进轴上一条的底不超过下一条的顶（见 [`Self::flow_start`]）。
     /// 真排版满足，但那是假设；二分错了是**静默答错**（点这行选中别处）。所以为假时按推进轴
     /// 的查询退回线性扫 —— 慢一点但不会答错（接负外边距那天症状先出现在速度上）。
     stacked: bool,
-    /// 每一行的**层叠上下文 z 链**（根→owner），与 `lines` 等长；由 [`super::stacking`] 算好。
-    /// 绘制按链字典序重排行盒，正文/命中仍按 `lines` 源序。全 `None` = 无层叠需求，零回归。
+    /// 每一行的**层叠上下文 z 链**（根→owner），与 `lines` 等长；绘制按链字典序重排行盒。
     pub line_z: Vec<Option<Arc<[i32]>>>,
+    /// 多栏的栏间线（横排竖带/竖排横带）。
+    pub column_rules: Vec<ColumnRule>,
 }
 
 /// 把**逻辑横排**长条整体投影成竖排物理坐标。断行、基线、shaping、命中
@@ -387,6 +384,7 @@ impl Layout {
             stacked: false,
             root_full_bleed: false,
             line_z: Vec::new(),
+            column_rules: Vec::new(),
         };
         // 叠放性最后才折：那条判据问的是「沿推进轴的底边」，而那两个入口是 `Layout` 的
         // 方法（竖排的起点要按长条总长翻面，那份信息在 `self` 上）。
@@ -656,6 +654,7 @@ impl Layout {
             if style.background_color.is_none()
                 && drawn.iter().all(|w| *w <= 0.0)
                 && pictures.is_empty()
+                && style.backdrop_blur.is_none()
             {
                 continue;
             }
@@ -741,6 +740,7 @@ impl Layout {
                 pictures,
                 box_shadows: style.box_shadows.clone(),
                 outline: style.outline.filter(|(w, _, _, _)| *w > 0.0),
+                backdrop_blur: style.backdrop_blur,
             });
         }
         out

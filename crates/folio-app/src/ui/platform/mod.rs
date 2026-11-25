@@ -593,6 +593,8 @@ fn open_main_window(cx: &mut App) {
             // `open_window` → `refresh_appearance`），gpui 建这个窗口时又取一次缓存，
             // 所以第一帧就是系统那一档，不必等第一次配置变更。
             theme::apply(&ConfigHolder::appearance(cx), Some(window), cx);
+            host::install_stealth(cx);
+            crate::ui::services::stealth::install(window.window_handle(), cx);
             let shell = cx.new(|cx| AppShell::boot(window, cx));
             cx.new(|cx| Root::new(shell, window, cx))
         },

@@ -1,7 +1,7 @@
 //! 一条声明如何变成一个计算值：属性分发、简写展开、继承、边框。只对整个 `css` 内部开放。
 
 mod border;
-mod boxes;
+pub(super) mod boxes;
 mod inherit;
 mod values;
 use border::apply_border;
@@ -17,6 +17,7 @@ use super::{
     TextTransform, Visibility, WordBreak,
 };
 use crate::css::Declaration;
+use crate::css::features;
 use crate::css::value::{
     box_side_px, box_sides, edge_length, parse_baseline_shift, parse_bleed, parse_border_radius,
     parse_break_when, parse_clear, parse_color, parse_count, parse_decoration, parse_float,
@@ -472,8 +473,7 @@ pub(super) fn apply(
         },
         // 背景一族。`transparent` 是「有这条声明、但不画」，与「书里没写过」在层叠上
         // 是两件事（后者可能被更高 specificity 的一条颜色盖住），所以两条都要认。
-        // `background-clip` / `background-origin`：一档盒值一条，解析共用
-        // [`BackgroundClip::from_keyword`]；每层各写一个的列表判不认识（见枚举文档）。
+        // `background-clip` / `background-origin`：盒值一条，列表写法判不认识。
         "background-clip" => match BackgroundClip::from_keyword(&value.to_ascii_lowercase()) {
             Some(box_value) => {
                 style.background_clip = box_value;
@@ -541,9 +541,8 @@ pub(super) fn apply(
             }
             None => false,
         },
-        // `background-attachment: fixed` 只对章节根有排版含义（见 `layout::layout_inner`），
-        // 其余元素上与 `scroll` 同效；`local` 在流式块里没有对应物。照样收下：
-        // 记成「不生效」会把根上那条真生效的声明一起埋掉。
+        // `background-attachment: fixed` 只对章节根有排版含义，其余元素与 `scroll`
+        // 同效；`local` 没有对应物。照样收下，别把根上那条真生效的埋掉。
         "background-attachment" => match parse_background_attachment_list(value) {
             Some(list) => {
                 let count = list.len();
@@ -1294,6 +1293,6 @@ pub(super) fn apply(
             }
             None => false,
         },
-        _ => false,
+        name => features::apply(style, name, value, own, root_px).unwrap_or(false),
     }
 }

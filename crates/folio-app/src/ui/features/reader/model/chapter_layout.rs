@@ -12,7 +12,7 @@ use folio_core::content::anchor::{CharLines, TextMap};
 use folio_core::content::document::Document as OpenedDocument;
 use folio_core::content::dom::{Dom, NodeId};
 use folio_core::content::format::css::computed::{
-    ComputedStyle, Length, StyledDom, TextAlign, WritingMode, cascade,
+    ComputedStyle, Cursor, Length, StyledDom, TextAlign, WritingMode, cascade,
 };
 use folio_core::content::format::css::{Origin, PageMargins, RuleSet, chapter_style_rules};
 use folio_core::content::hit::{Hit, paragraph_range_indexed};
@@ -143,11 +143,8 @@ pub struct Document {
     ///
     /// `prefs` 那一格也在里面，所以 [`Self::set_prefs`] 是它唯一的重算时机。
     inputs: LayoutInputs,
-    /// 本章的解析产物（DOM + 可见文本坐标），按章内容跨代次复用。
-    ///
-    /// 为什么留着它有两层：① 锚点换算要用（`LineRun::orig` 是**节点内**的字节区间，
-    /// 没有节点文本就换不成可见文本坐标）；② 解析只做一次 —— 排版可以每帧重做
-    /// （宽度、字号变了），但 HTML 解析不该跟着重做，它比层叠贵。
+    /// 本章的解析产物（DOM + 可见文本坐标），按章内容跨代次复用：锚点换算要文本
+    /// （`LineRun::orig` 是节点内字节区间），而 HTML 解析比层叠贵，不该每帧重做。
     artifacts: Arc<ChapterArtifacts>,
     /// 作者层规则。**整本书共用这一份**（`Arc`），由 `Book` 解析一次递进来。
     rules: Arc<RuleSet>,
@@ -181,16 +178,10 @@ pub struct Document {
     /// （作业照跑完，结果没人收；队列单线程 FIFO，天然不会堆积）。
     pending: Option<(LayoutKey, TaskHandle<Typeset>)>,
     layout: Layout,
-    /// 这一章的 CSS 自己有没有声明竖排。**纯样式事实**，与读者用哪种阅读模式无关。
-    ///
-    /// 为什么只能在排版之后才知道：轴写在书的 CSS 里，而 CSS 要到后台作业里才层叠。
-    /// 于是第一遍按横排排（那一趟的折行宽就是栏宽），`apply_typeset` 读出问题、
-    /// 把这一格订正，下一帧 `ensure_viewport` 用**列长**当折行宽重排一次。
-    /// 横排的书一次就到位（这一格恒为 `false`，不会多派作业）；竖排的书每章多一次排版，
-    /// 换来的是「界面不需要预先知道这本书是什么轴」。
-    ///
-    /// 生效还多一个条件：只有**分页**那一档真按竖排排（`paged && wants_vertical`），
-    /// 理由记在 `folio_core::layout::LayoutOptions::allow_vertical` 上。
+    /// 这一章的 CSS 自己有没有声明竖排。**纯样式事实**，与阅读模式无关；CSS 在后台
+    /// 作业里层叠，所以第一遍按横排排、`apply_typeset` 订正后下一帧用**列长**重排一次。
+    /// 横排书不会多派作业。只有**分页**档真按竖排排（`paged && wants_vertical`），理由
+    /// 记在 `folio_core::layout::LayoutOptions::allow_vertical` 上。
     wants_vertical: bool,
     /// 层叠结果。分片要读块级的 `break-*` 与 orphans/widows，而这些只在层叠之后存在，
     /// 所以它跟排版结果同批算、同批存，不在分片时重来一遍。
@@ -976,10 +967,10 @@ impl Document {
                             text: SharedString::new(text),
                             font: run.style.font.clone(),
                             font_size: run.style.font_size,
-                            // `x_offset` 只有 ruby 注音带非零值（正文恒为 0）：注音不吃前进量，
-                            // 流动把它排在容器末尾，画之前要挪回 `ruby-align` 要的那一段。
-                            // 命中那一路（`content::hit` 的两条片段循环）加的是同一个数。
+                            // `x_offset` 是 ruby 注音的回挪量；`cross_offset` 是数字并格
+                            // 第二位的侧轴位移。命中那一路读的是同一组数。
                             x: x + run.x_offset,
+                            cross_offset: run.cross_offset,
                             baseline_shift: run.style.baseline_shift,
                             box_height: run.style.box_height(),
                             underline: run.style.underline,
@@ -1028,6 +1019,7 @@ impl Document {
                             font: marker.style.font.clone(),
                             font_size: marker.style.font_size,
                             x: x + marker.offset,
+                            cross_offset: 0.0,
                             baseline_shift: 0.0,
                             box_height: marker.style.box_height(),
                             underline: false,
@@ -1592,6 +1584,12 @@ impl Document {
             }
         }
         None
+    }
+
+    /// 章内偏移处元素的 `cursor`；层叠未回、定版式或落在页边距时给 `None`。
+    pub fn cursor_at(&self, offset: usize) -> Option<Cursor> {
+        let node = folio_core::content::hit::node_of(self.text_map(), offset)?;
+        self.styles.as_ref()?.get(node).map(|style| style.cursor)
     }
 
     // ---- 脚注：一条引用（`<a epub:type="noteref">`）→ 注文 ----

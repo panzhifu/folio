@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-11-19T12:21:22Z",
-  "updated_at": "2026-11-23T05:20:01Z",
+  "updated_at": "2026-11-25T04:41:52Z",
   "files": {
     ".agents/skills/animate/RECIPES.md": {
       "role": "index",
@@ -2651,9 +2651,9 @@
     },
     "AGENTS.md": {
       "role": "index",
-      "sha256": "af2fb7f5dec0c7f2e5af6a3d5312fe99208b40442d6d783b14d7946f72cb6ba1",
-      "size": 20513,
-      "normalized_sha256": "af2fb7f5dec0c7f2e5af6a3d5312fe99208b40442d6d783b14d7946f72cb6ba1"
+      "sha256": "0a62768d09cb1bcded03d0bd9b649f86290cf8ce720bcb44042df753633d667f",
+      "size": 20615,
+      "normalized_sha256": "0a62768d09cb1bcded03d0bd9b649f86290cf8ce720bcb44042df753633d667f"
     },
     "CHANGELOG.md": {
       "role": "index",

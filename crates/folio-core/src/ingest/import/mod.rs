@@ -39,10 +39,10 @@ pub use maintenance::BackfillReport;
 pub use maintenance::CoverBackfillReport;
 pub use maintenance::{COVER_BACKFILL_VERSION, backfill_copies, backfill_covers};
 // 测试要能抹掉记号来验「下一版升级再跑一趟」；生产编译里这一行不存在。
-#[cfg(test)]
-use maintenance::{COVER_BACKFILL_CURSOR_KEY, COVER_BACKFILL_KEY, COVER_BACKFILL_LEDGER_KEY};
 pub use maintenance::sweep_orphan_copies;
 pub use maintenance::sweep_partials;
+#[cfg(test)]
+use maintenance::{COVER_BACKFILL_CURSOR_KEY, COVER_BACKFILL_KEY, COVER_BACKFILL_LEDGER_KEY};
 pub use pipeline::import_from;
 pub use pipeline::reindex;
 pub use pipeline::schedule_reindex;

@@ -2,7 +2,7 @@
 
 use folio_core::Store;
 use gpui_kit::component::TitleBar;
-use gpui_kit::{App, AppContext as _, Font, TitlebarOptions, px, size};
+use gpui_kit::{App, AppContext as _, Font, TitlebarOptions, WindowBackgroundAppearance, px, size};
 
 use crate::ui::foundation::theme;
 use crate::ui::host;
@@ -132,8 +132,15 @@ pub fn run_desktop() {
             });
             options.app_id = Some("dev.folio.Reader".into());
             options.window_min_size = Some(size(px(520.), px(360.)));
+            // 低干扰偏好只对窗口背景做启动期设置；模式切换由服务在运行期改。
+            let stealth = ConfigHolder::stealth(cx);
+            if stealth.enabled && stealth.mode != folio_core::StealthMode::Off {
+                options.window_background = WindowBackgroundAppearance::Transparent;
+            }
 
             gpui_kit::open_window(options, cx, |window, cx| {
+                host::install_stealth(cx);
+                crate::ui::services::stealth::install(window.window_handle(), cx);
                 cx.new(|cx| AppShell::boot(window, cx))
             })
             .expect("failed to open Folio window");

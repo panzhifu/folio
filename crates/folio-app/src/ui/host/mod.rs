@@ -20,6 +20,8 @@
 //! - **这一端的滚轮是不是真鼠标滚轮**（[`has_mouse_wheel`]），决定图片查看器里滚轮是
 //!   缩放还是平移 / 切图 —— 触屏那一端的手指平移与真滚轮走的是同一个 `ScrollEvent`
 //!   通道（见 [`has_mouse_wheel`] 那一段）。
+//! - **低干扰阅读能不能改窗口**（[`stealth_capabilities`]）：透明背景、最小化、激活。
+//!   平台不支持时状态机照常运转，只是不改变窗口；相关调用都经这一层窄边界。
 //! - **选择器交回的路径是不是应用自己的临时副本**（[`picked_files_are_temporary`]），
 //!   决定导入读完后要不要把 `cache/gpui-import-*` 那份拷贝连同目录清掉。桌面选择器
 //!   给的是读者原文件，一动都不能动；Android / iOS 的桥会先落一份 sandbox / cache 拷贝，
@@ -28,10 +30,15 @@
 //! 桌面端前两者都是 0；Android 端读 fork 报上来的值（`gpui-pre-mobile` 的
 //! `AndroidWindow::safe_area_insets_logical()` / `ime_insets_logical()`）。
 
+use std::sync::Arc;
+
 use gpui_kit::{App, Global, Window};
 
 mod memory;
 pub use memory::physical_memory_bytes;
+
+mod stealth;
+pub use stealth::{StealthCapabilities, StealthError, StealthHost};
 
 /// 原生平台决定导航的输入形态，宽度规则共用一份纯函数。
 pub fn size_class(window: &Window) -> crate::ui::foundation::navigation::SizeClass {
@@ -144,7 +151,10 @@ mod mobile;
 /// 装好的平台服务。由入口在开窗前 [`install`] 一次。
 struct HostServices(Box<dyn Host>);
 
+struct StealthServices(Arc<dyn StealthHost>);
+
 impl Global for HostServices {}
+impl Global for StealthServices {}
 
 /// 装平台服务。每个入口（`super::platform`）在开窗前调一次。
 pub fn install(cx: &mut App) {
@@ -152,6 +162,57 @@ pub fn install(cx: &mut App) {
     cx.set_global(HostServices(Box::new(desktop::DesktopHost)));
     #[cfg(mobile)]
     cx.set_global(HostServices(Box::new(mobile::MobileHost)));
+}
+
+/// 装低干扰窗口服务。与 `install` 分开：它只在有真实窗口时安装，测试默认全不支持。
+pub fn install_stealth(cx: &mut App) {
+    #[cfg(not(mobile))]
+    cx.set_global(StealthServices(Arc::new(desktop::DesktopStealthHost)));
+    #[cfg(mobile)]
+    cx.set_global(StealthServices(Arc::new(mobile::MobileStealthHost)));
+}
+
+/// 低干扰窗口能力。测试里没装平台服务时给「全不支持」。
+pub fn stealth_capabilities(cx: &App) -> StealthCapabilities {
+    cx.try_global::<StealthServices>()
+        .map_or(StealthCapabilities::default(), |s| s.0.capabilities())
+}
+
+/// 换窗口背景的透明档。
+pub fn stealth_transparent(
+    transparent: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<(), StealthError> {
+    let global: Option<Arc<StealthServices>> = cx
+        .try_global::<StealthServices>()
+        .map(|services| Arc::new(StealthServices(services.0.clone())));
+    match global {
+        Some(services) => services.0.set_transparent(transparent, window, cx),
+        None => Ok(()),
+    }
+}
+
+/// 老板键隐藏。
+pub fn stealth_hide(window: &mut Window, cx: &mut App) -> Result<(), StealthError> {
+    let global: Option<Arc<StealthServices>> = cx
+        .try_global::<StealthServices>()
+        .map(|services| Arc::new(StealthServices(services.0.clone())));
+    match global {
+        Some(services) => services.0.hide(window, cx),
+        None => Ok(()),
+    }
+}
+
+/// 从隐藏恢复。
+pub fn stealth_restore(window: &mut Window, cx: &mut App) -> Result<(), StealthError> {
+    let global: Option<Arc<StealthServices>> = cx
+        .try_global::<StealthServices>()
+        .map(|services| Arc::new(StealthServices(services.0.clone())));
+    match global {
+        Some(services) => services.0.restore(window, cx),
+        None => Ok(()),
+    }
 }
 
 /// 安全区。没装（测试里）或读不到时是 0 —— 界面会贴边，但不会崩。

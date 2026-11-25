@@ -32,6 +32,9 @@ pub struct RowUnit {
     pub font_size: f32,
     /// 相对**行首**的 x（章内量）。
     pub x: f32,
+    /// 垂直于推进轴的额外偏移，px。竖排数字并格时每对第二位挪半格；
+    /// 由 `scene` 折成物理位移，命中那一路按同一个数走。
+    pub cross_offset: f32,
     /// 基线偏移，px，正数往上。来自 `vertical-align`，绘制层把它从行的基线里减掉。
     pub baseline_shift: f32,
     /// 这一片的 inline box 高。绘制层用它定装饰线的纵向落点，而 shaping 里没有这个数。

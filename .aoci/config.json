@@ -341,7 +341,8 @@
   },
   "installed_agents": [
     "qoder",
-    "codex"
+    "codex",
+    "claude"
   ],
   "automation": {
     "mode": "auto"
