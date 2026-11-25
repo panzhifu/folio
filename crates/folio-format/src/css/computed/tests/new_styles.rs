@@ -4,8 +4,8 @@
 
 use super::{author, style, tag};
 use crate::css::computed::{
-    BorderStyle, ColumnFill, ColumnSpan, Cursor, FontKerning, FontStretch, TextCombine,
-    TextRendering,
+    BorderStyle, ColumnFill, ColumnSpan, Cursor, FontKerning, FontSmoothing, FontStretch,
+    TextCombine, TextRendering,
 };
 
 /// `font-stretch` 九档关键字与百分比都按宽度档落字段；百分比按 CSS 边界就近折；
@@ -71,6 +71,50 @@ fn font_kerning_features_and_text_rendering_reach_the_shaping_table() {
 
     let bad = author("<p>x</p>", "p { font-feature-settings: 'toolong' 1 }");
     assert_eq!(bad.styled.ignored, 1, "五字符的标签不是 OpenType tag");
+}
+
+/// `-webkit-font-smoothing` 可继承，四档逐元素覆盖；写坏整条作废。
+#[test]
+fn font_smoothing_is_inherited_and_overridable() {
+    let page = author(
+        "<p>字</p><b>字</b><i>字</i>",
+        "body { -webkit-font-smoothing: antialiased } \
+         b { -webkit-font-smoothing: subpixel-antialiased } \
+         i { -webkit-font-smoothing: none }",
+    );
+    assert_eq!(
+        style(&page, tag(&page, "p")).font_smoothing,
+        FontSmoothing::Antialiased
+    );
+    assert_eq!(
+        style(&page, tag(&page, "b")).font_smoothing,
+        FontSmoothing::SubpixelAntialiased
+    );
+    assert_eq!(
+        style(&page, tag(&page, "i")).font_smoothing,
+        FontSmoothing::None
+    );
+    assert_eq!(page.styled.ignored, 0);
+
+    let bad = author("<p>x</p>", "p { -webkit-font-smoothing: smooth }");
+    assert_eq!(bad.styled.ignored, 1);
+    assert_eq!(
+        style(&bad, tag(&bad, "p")).font_smoothing,
+        FontSmoothing::Auto
+    );
+}
+
+/// `opacity` 的绘制值乘祖先：层叠仍看本元素自己的 `opacity`。
+#[test]
+fn nested_opacity_multiplies_for_painting_only() {
+    let page = author(
+        "<div><p>字</p></div>",
+        "div { opacity: 0.5 } p { opacity: 0.5 }",
+    );
+    let p = style(&page, tag(&page, "p"));
+    assert_eq!(p.opacity, 0.5, "层叠上下文只认本元素的声明");
+    assert_eq!(p.paint_opacity, 0.25, "绘制 alpha 要乘祖先");
+    assert_eq!(page.styled.ignored, 0);
 }
 
 /// 毛玻璃只收单个 `blur()`：连写别的滤镜整条作废，不偷偷只做一半。

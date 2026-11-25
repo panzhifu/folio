@@ -3,13 +3,39 @@
 //! 从 `paint.rs` 拆出来只为一件事：那一份已经贴着行数上限，而这些函数只吃
 //! [`GlyphRun`] 与 shaping 结果，不碰元素树，也不改绘制顺序。
 
-use folio_core::content::format::css::computed::{DecorationStyle, EmphasisPosition, TextShadow};
+use folio_core::content::format::css::computed::{
+    DecorationStyle, EmphasisPosition, FontSmoothing, TextShadow, Transform,
+};
 use gpui_kit::{
-    Bounds, Hsla, LineLayout, Pixels, Point, StrikethroughStyle, UnderlineStyle, Window, fill,
-    point, px, size,
+    Bounds, Hsla, LineLayout, Pixels, Point, StrikethroughStyle, TextRenderingMode, UnderlineStyle,
+    Window, fill, point, px, size,
 };
 
 use super::{GlyphRun, for_each_glyph, shape};
+
+/// `transform: translate(...)` 的绘制位移：只挪墨迹，不改断行与命中。
+/// 百分比按 run 自身的宽 / inline box 高折；`scale` 仍只建立层叠上下文，不缩放字形。
+pub(super) fn transformed_origin(
+    mut origin: Point<Pixels>,
+    run: &GlyphRun,
+    shaped: &LineLayout,
+) -> Point<Pixels> {
+    if let Some(Transform::Translate(dx, dy)) = run.transform {
+        origin.x += px(dx.resolve(f32::from(shaped.width)));
+        origin.y += px(dy.resolve(run.box_height));
+    }
+    origin
+}
+
+/// CSS 的字体平滑档 → gpui 的逐字形渲染模式。`Auto` 保留窗口级默认。
+pub(super) fn rendering_mode(smoothing: FontSmoothing) -> TextRenderingMode {
+    match smoothing {
+        FontSmoothing::Auto => TextRenderingMode::PlatformDefault,
+        FontSmoothing::Antialiased => TextRenderingMode::Grayscale,
+        FontSmoothing::SubpixelAntialiased => TextRenderingMode::Subpixel,
+        FontSmoothing::None => TextRenderingMode::Aliased,
+    }
+}
 
 /// 两条装饰线的 y，全按 gpui `paint_line` 的式子来，不自定比例。
 ///
@@ -71,20 +97,23 @@ pub(super) fn paint_shadows(window: &mut Window, origin: Point<Pixels>, run: &Gl
         Some(layout) => layout.clone(),
         None => shape(window, run),
     };
+    let origin = transformed_origin(origin, run, &shaped);
     for shadow in run.text_shadows.iter() {
-        let base = crate::ui::foundation::style::run_color(shadow.color, run.color);
+        let base =
+            crate::ui::foundation::style::run_color(shadow.color, run.color).opacity(run.opacity);
         for (dx, dy, alpha) in shadow_copies(*shadow) {
             let shade = Hsla {
                 a: base.a * alpha,
                 ..base
             };
             for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
-                let _ = window.paint_glyph(
+                let _ = window.paint_glyph_with_mode(
                     point(origin.x + px(x + dx), origin.y + px(y + dy)),
                     shaped_run.font_id,
                     glyph.id,
                     font_size,
                     shade,
+                    rendering_mode(run.font_smoothing),
                 );
             });
         }
@@ -189,7 +218,7 @@ pub(super) fn paint_emphasis(
     shaped: &LineLayout,
 ) {
     let fs = run.font_size;
-    let color = run.emphasis_color.unwrap_or(run.color);
+    let color = run.emphasis_color.unwrap_or(run.color).opacity(run.opacity);
     let dot = (fs * 0.16).max(1.0);
     let depth = match run.emphasis_position {
         EmphasisPosition::Over => -fs * 0.85,
@@ -225,4 +254,31 @@ pub(super) fn paint_rule(
     underline: bool,
 ) {
     paint_decor_line(window, at, width, color, style, underline);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rendering_mode;
+    use folio_core::content::format::css::computed::FontSmoothing;
+    use gpui_kit::TextRenderingMode;
+
+    #[test]
+    fn css_font_smoothing_maps_to_glyph_rendering_mode() {
+        assert_eq!(
+            rendering_mode(FontSmoothing::Auto),
+            TextRenderingMode::PlatformDefault
+        );
+        assert_eq!(
+            rendering_mode(FontSmoothing::Antialiased),
+            TextRenderingMode::Grayscale
+        );
+        assert_eq!(
+            rendering_mode(FontSmoothing::SubpixelAntialiased),
+            TextRenderingMode::Subpixel
+        );
+        assert_eq!(
+            rendering_mode(FontSmoothing::None),
+            TextRenderingMode::Aliased
+        );
+    }
 }

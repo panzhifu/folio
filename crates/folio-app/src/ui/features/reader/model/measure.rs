@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use folio_core::content::format::css::computed::FontStretch as CssFontStretch;
 use folio_core::layout::{FontKey, LineMetrics, Measure};
 use gpui_kit::*;
 
@@ -123,29 +124,17 @@ fn cjk_class(family: &str) -> Option<&'static [&'static str]> {
         .map(|(_, list)| *list)
 }
 
-/// `FontKey` → gpui `Font`。**度量与绘制必须走这一个函数**：
-/// 两边各自拼 Font 的话，一次字段改动就会让居中偏移与实际字宽对不上。
-///
-/// 三个输入各有各的回落，都不许把「解析不出来的名字」交出去 ——
-/// `TextSystem::resolve_font` 解析不到时是 **panic**，不是回退，而书的 `font-family`
-/// 在目标设备上几乎都不存在（实测《斗战狂潮》的 `easypub` 会让 Android 直接 SIGABRT）：
+/// `FontKey` → gpui `Font`；度量与绘制必须同走这里，否则居中偏移与字宽会分叉。
 ///
 /// 优先级从前往后是：**作者随书带的那一份** → 作者点名的、这台机器真装着的非泛族名 →
 /// 同一类的那一份 → 读者的等宽偏好 → 读者的正文偏好。
 ///
-/// - `faces` 是这本书注册成功的内嵌字体。作者的候选链里任何一个声明名在表里查得到，
-///   那份字节就是作者要的正文 —— `@font-face` 的 `src: url(...)` 指的是他随书交来的
-///   文件，比「这台机器上恰好也叫这个名字」更贴近作者的意思，所以它排第一，
-///   连设备上装着的同名家族也让它一档。**优先挑带拉丁 `m` 的那一张脸**，一张都没有
-///   时纯中文的也照当 primary：gpui 那侧的过滤器已删（`gpui-pre-wgpu` 的
-///   `pick_covering_slot` 对未覆盖字符——ASCII 在内——走补缺链），缺的字形由读者
-///   字体兜住，见 [`FaceName`](super::book_fonts::FaceName)；
-/// - primary 是书里那一份时，读者那一档（同类映射 + 等宽偏好 + 正文偏好）整体降到
-///   `fallbacks` 上补缺：书里的字体常常缺拉丁与生僻字，gpui 在 shaping 时逐字符
-///   挑覆盖得住的那一份（`cosmic_text_system.rs` 的 `pick_covering_slot`）。
-///   ASCII 与其余字符同一待遇——primary 覆盖得住就留在 primary，覆盖不住照样
-///   沿补缺链走（从前 gpui 把 ASCII 钉死在 primary 上，无拉丁的 primary 会把数字
-///   与英文画成方框，那记早退也一并删了）；
+/// 三个输入各有各的回落，都不许交出解析不出来的名字：`resolve_font` 解析不到是
+/// **panic**，而书的 `font-family` 在目标设备上几乎都不存在（实测会让 Android SIGABRT）：
+///
+/// - `faces` 是这本书注册成功的内嵌字体；候选链里查到的那份字节排第一。优先挑带拉丁
+///   `m` 的脸，没有时纯中文也照当 primary，缺字由 `pick_covering_slot` 逐字符补；
+/// - primary 是书里那一份时读者那档降到 `fallbacks` 补缺；ASCII 与其余字符同待遇；
 /// - 泛族名（`serif` 那一族）不许从设备注册表里当 primary（交出去就是一条断掉的回退链），
 ///   但作者给泛族名挂上随书那份字体时照认 —— 那是他写明的正文用字。
 pub fn gpui_font(
@@ -282,6 +271,17 @@ pub fn gpui_font(
             .italic
             .then_some(FontStyle::Italic)
             .unwrap_or(FontStyle::Normal),
+        stretch: match key.stretch {
+            CssFontStretch::UltraCondensed => gpui_kit::FontStretch::UltraCondensed,
+            CssFontStretch::ExtraCondensed => gpui_kit::FontStretch::ExtraCondensed,
+            CssFontStretch::Condensed => gpui_kit::FontStretch::Condensed,
+            CssFontStretch::SemiCondensed => gpui_kit::FontStretch::SemiCondensed,
+            CssFontStretch::Normal => gpui_kit::FontStretch::Normal,
+            CssFontStretch::SemiExpanded => gpui_kit::FontStretch::SemiExpanded,
+            CssFontStretch::Expanded => gpui_kit::FontStretch::Expanded,
+            CssFontStretch::ExtraExpanded => gpui_kit::FontStretch::ExtraExpanded,
+            CssFontStretch::UltraExpanded => gpui_kit::FontStretch::UltraExpanded,
+        },
         features: FontFeatures(Arc::new(key.features.to_vec())),
     }
 }

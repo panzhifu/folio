@@ -25,6 +25,8 @@ pub(crate) fn inherit_from(parent: &ComputedStyle) -> ComputedStyle {
         font_kerning: parent.font_kerning,
         font_features: parent.font_features.clone(),
         text_rendering: parent.text_rendering,
+        font_smoothing: parent.font_smoothing,
+        paint_opacity: parent.paint_opacity,
         text_align: parent.text_align,
         // `text-justify` 在 CSS 里可继承：书里在 `<body>` 上写一次 `inter-ideograph`
         // 就管全书，靠的正是这一行。

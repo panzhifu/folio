@@ -4,7 +4,8 @@
 //! 的几何，也不是层叠本身，单放一间更好读。
 
 use super::computed::{
-    ColumnFill, ComputedStyle, Cursor, FontKerning, FontStretch, TextCombine, TextRendering,
+    ColumnFill, ComputedStyle, Cursor, FontKerning, FontSmoothing, FontStretch, TextCombine,
+    TextRendering,
 };
 use super::value::edge_px;
 
@@ -39,6 +40,7 @@ pub(super) fn apply(
             set_features(&mut style.font_features, parse_font_features(value))
         }
         "text-rendering" => set(&mut style.text_rendering, parse_text_rendering(value)),
+        "-webkit-font-smoothing" => set(&mut style.font_smoothing, parse_font_smoothing(value)),
         "column-fill" => set(&mut style.column_fill, parse_column_fill(value)),
         "cursor" => set(&mut style.cursor, parse_cursor(value)),
         // 栏间分隔线：与边框三要素同构，解析在 `computed::apply::boxes`。
@@ -148,6 +150,17 @@ pub(super) fn parse_text_rendering(value: &str) -> Option<TextRendering> {
 }
 
 /// `column-fill: auto | balance`。
+/// `-webkit-font-smoothing`：四个 WebKit 关键字，大小写不敏感。
+pub(super) fn parse_font_smoothing(value: &str) -> Option<FontSmoothing> {
+    Some(match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => FontSmoothing::Auto,
+        "antialiased" => FontSmoothing::Antialiased,
+        "subpixel-antialiased" => FontSmoothing::SubpixelAntialiased,
+        "none" => FontSmoothing::None,
+        _ => return None,
+    })
+}
+
 pub(super) fn parse_column_fill(value: &str) -> Option<ColumnFill> {
     Some(match value.trim().to_ascii_lowercase().as_str() {
         "auto" => ColumnFill::Auto,

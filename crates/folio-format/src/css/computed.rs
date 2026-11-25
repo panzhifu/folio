@@ -19,8 +19,9 @@ pub use types::{
 };
 pub use types2::{
     BackgroundClip, BreakWhen, CellVAlign, Color, ColumnFill, ColumnSpan, Cursor, FontKerning,
-    FontStretch, Hyphens, InlineVAlign, Length, Positioning, RubyAlign, RubyPosition, SvgLineCap,
-    SvgLineJoin, SvgPaint, TextCombine, TextRendering, TextShadow, TextTransform, WordBreak,
+    FontSmoothing, FontStretch, Hyphens, InlineVAlign, Length, Positioning, RubyAlign,
+    RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextCombine, TextRendering, TextShadow,
+    TextTransform, WordBreak,
 };
 
 use crate::dom::NodeId;
@@ -599,24 +600,17 @@ pub struct ComputedStyle {
     pub font_features: Arc<[(String, u32)]>,
     /// `text-rendering`（可继承）。只用来关掉连字/字偶距的那一档有行为差别。
     pub text_rendering: TextRendering,
-    /// 书写方向。CSS 的 `direction`，**可继承**；来源有三处：作者样式表、元素的
-    /// `dir` 属性（HTML 的 presentational hint，优先级在作者样式之下），以及继承。
-    /// 见 [`Direction`] 那一段「做到哪一层」的说明。
+    pub font_smoothing: FontSmoothing,
+    /// 书写方向。CSS 的 `direction`，可继承：作者样式表、`dir` 属性与继承。
     pub direction: Direction,
-    /// 推进轴（CSS 的 `writing-mode`），**可继承**：竖排的本子在 `<html>` 或 `<body>` 上
-    /// 写一次就管全书，靠的是 `inherit_from` 里那一行，与 `direction` 同一条通路。
-    /// 排版层真按这一根轴排（落地程度见 [`WritingMode`]）。
+    /// 推进轴（`writing-mode`），可继承；落地程度见 [`WritingMode`]。
     pub writing_mode: WritingMode,
     pub text_align: TextAlign,
     /// `text-justify`：两端对齐时余量往哪种隙摊。见 [`TextJustify`]；CSS 里**可继承**。
     pub text_justify: TextJustify,
-    /// 读者那一档「图片按哪一块尺寸折」（见 [`crate::css::ImageScale]`]）。
-    /// 它**不是书里的 CSS**，由界面从读者偏好注入根样式，再靠 `inherit_from` 一路带到
-    /// 每个元素 —— 与 `text_align` / `font_size` 这些读者覆盖同一通路。排版层在
-    /// `layout::ports::image_size` 与两张图的位置上读它。
+    /// 读者选择的图片尺寸折法（[`crate::css::ImageScale`]），界面注入根样式后继承。
     pub image_scale: crate::css::ImageScale,
-    /// 首行缩进。百分比折算自**这一块的包含块宽**（父块的内容宽），与 `margin` 同一条
-    /// 口径。读者那条「首行缩进（em）」从 `ui::features::reader::document` 注入时已是 px。
+    /// 首行缩进。百分比折算自包含块宽；读者那条注入时已是 px。
     pub text_indent: Length,
     /// 四边外边距。百分比折算自包含块宽 —— 就是 `layout` 逐层递下来的那一个 `basis`。
     /// 左右两边可以是 [`Length::Auto`]（均分剩余宽度），那一步在排版期解，
@@ -665,6 +659,8 @@ pub struct ComputedStyle {
     pub z_index: i32,
     /// `opacity`：不透明度，`1.0` = 初值（不建立层叠上下文）。不继承。
     pub opacity: f32,
+    /// 祖先与本元素 `opacity` 的乘积（绘制 alpha；层叠仍看 `opacity`）。
+    pub paint_opacity: f32,
     /// `transform`：会建立层叠上下文的 2D 基本变换。不继承。
     pub transform: Option<Transform>,
     /// `white-space: nowrap`：合并空白但不换行。与 `white_space_pre`（保留空白）正交，
@@ -943,6 +939,7 @@ impl Default for ComputedStyle {
             font_kerning: FontKerning::Auto,
             font_features: Arc::from(Vec::new()),
             text_rendering: TextRendering::Auto,
+            font_smoothing: FontSmoothing::Auto,
             direction: Direction::Ltr,
             writing_mode: WritingMode::HorizontalTb,
             text_align: TextAlign::Start,
@@ -975,6 +972,7 @@ impl Default for ComputedStyle {
             flex_basis: None,
             z_index: 0,
             opacity: 1.0,
+            paint_opacity: 1.0,
             transform: None,
             white_space_nowrap: false,
             decoration_style: DecorationStyle::default(),
@@ -1135,6 +1133,7 @@ impl std::hash::Hash for ComputedStyle {
             value.hash(h);
         }
         (self.text_rendering as u8).hash(h);
+        (self.font_smoothing as u8).hash(h);
         (self.direction as u8).hash(h);
         (self.writing_mode as u8).hash(h);
         (self.text_align as u8).hash(h);
@@ -1167,6 +1166,7 @@ impl std::hash::Hash for ComputedStyle {
         opt_len(&self.flex_basis, h);
         self.z_index.hash(h);
         f(self.opacity, h);
+        f(self.paint_opacity, h);
         match &self.transform {
             None => 0u8.hash(h),
             Some(Transform::Translate(a, b)) => {

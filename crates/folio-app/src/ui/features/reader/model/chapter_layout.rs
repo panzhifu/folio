@@ -967,8 +967,7 @@ impl Document {
                             text: SharedString::new(text),
                             font: run.style.font.clone(),
                             font_size: run.style.font_size,
-                            // `x_offset` 是 ruby 注音的回挪量；`cross_offset` 是数字并格
-                            // 第二位的侧轴位移。命中那一路读的是同一组数。
+                            // `x_offset` 是 ruby 回挪量，`cross_offset` 是并格侧移；命中读同一组数。
                             x: x + run.x_offset,
                             cross_offset: run.cross_offset,
                             baseline_shift: run.style.baseline_shift,
@@ -987,13 +986,14 @@ impl Document {
                             emphasis_color: run.style.emphasis_color,
                             emphasis_position: run.style.emphasis_position,
                             hidden: run.style.hidden,
+                            font_smoothing: run.style.font_smoothing,
+                            opacity: run.style.opacity,
+                            transform: run.style.transform,
                         }));
                     }
-                    // 这一段点过的隙数（空格或字符，看摊法）；空片段也照数，与排版同源。
                     if let Some(j) = justify {
                         gap_cursor += text.chars().map(|ch| j.advance_cursor(ch)).sum::<u32>();
                     }
-                    // 空片段不画，但照样占宽，否则后面所有 x 一起偏。
                     x += run.width;
                 }
                 LineFragment::Image(placed) => {
@@ -1009,8 +1009,7 @@ impl Document {
                     }));
                     x += placed.advance;
                 }
-                // 列表标记：文字是它自己的（不在块文本里），位置在行首之外。
-                // **不**把宽度加进 `x` —— 它挂在流动之外，正文一个字都不该挪。
+                // 列表标记：文字独立、位置在行首外；宽度不进 `x`，正文不挪。
                 LineFragment::Marker(marker) => {
                     if !marker.text.is_empty() {
                         out.push(RowFragment::Text(RowUnit {
@@ -1028,10 +1027,8 @@ impl Document {
                             decoration_color: None,
                             text_shadows: marker.style.text_shadows.clone(),
                             color: marker.style.color,
-                            // 列表标记不是链接的一部分：`<li><a>…` 里那个点/数字不该跟着染蓝。
                             link: false,
                             letter_spacing: marker.style.letter_spacing,
-                            // 标记挂在流动之外，不参与两端对齐。
                             justify: None,
                             justify_shift: 0.0,
                             // 列表标记不带着重号（它本身是装饰）。
@@ -1039,6 +1036,9 @@ impl Document {
                             emphasis_color: marker.style.emphasis_color,
                             emphasis_position: marker.style.emphasis_position,
                             hidden: marker.style.hidden,
+                            font_smoothing: marker.style.font_smoothing,
+                            opacity: marker.style.opacity,
+                            transform: marker.style.transform,
                         }));
                     }
                 }

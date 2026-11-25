@@ -238,9 +238,7 @@ impl Scene {
                                 cache.resolve(&unit.font, family, &mono, faces),
                                 unit.font_size,
                             )
-                            // 章内身份：shaping 表按它查（`Document::shaped_line`）。
-                            // 行号与槽位都只在**这一份排版**里作数，而排版一换
-                            // `Document::drop_fragments` 就把两张表一起清掉。
+                            // 章内身份：shaping 表按它查；排版一换两张表一起清掉。
                             .keyed((ix as u32, unit.slot))
                             // 每条 run 自己的基线：`vertical-align` 的偏移在这里减掉，
                             // 符号取自同一处投影，不在这里另立一条。行盒高与基线已由排版层算过。
@@ -270,8 +268,10 @@ impl Scene {
                                 unit.emphasis_color.map(|c| run_color(Some(c), foreground)),
                                 unit.emphasis_position,
                             )
-                            // 字距与两端对齐：绘制在 run 内按字符序号 / 隙序号逐字右推，
-                            // 与 `hit`/选区同一句规则。
+                            // 字距与两端对齐：绘制在 run 内逐字右推。
+                            .smoothing(unit.font_smoothing)
+                            .opacity(unit.opacity)
+                            .transform(unit.transform)
                             .spacing(
                                 unit.letter_spacing,
                                 unit.justify,
@@ -465,9 +465,7 @@ mod tests {
     //! 以及背景图的固有尺寸与字节。
 
     use super::place_decorations;
-    use super::{
-        BlockDecor, BlockOutline, BlockShadow, Scene, decor, overscan_backdrop, stack_neighbor,
-    };
+    use super::{BlockDecor, BlockOutline, BlockShadow, Scene, overscan_backdrop, stack_neighbor};
     use crate::ui::features::reader::view::paint::GlyphRun;
     use crate::ui::foundation::images::ChapterImages;
     use folio_core::content::format::css::computed::TextShadow;

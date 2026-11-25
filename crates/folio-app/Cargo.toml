@@ -35,7 +35,7 @@ base64.workspace = true
 image.workspace = true
 qrcode.workspace = true
 # 纯 CPU 网格与 uniform；rev 须与根清单的五条 gpui-folio patch 一致。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "2df4612cf803395cc8dafbb76f62e8003fe2a70b" }
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ffeb02926064f89799caabf2fc5bcf29d619878" }
 # 统一通过 gpui_kit 门面使用 GPUI。
 gpui-kit.workspace = true
 tracing.workspace = true

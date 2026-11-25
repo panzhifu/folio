@@ -959,11 +959,10 @@ fn attribute_selectors_with_operators_match() {
     );
 }
 
-/// 名单里的字体 OpenType 属性报 `Inert`，不再算「不认识」——
-/// `examples/css-gap` 的表要是把认得的属性写成「听都没听过」，
-/// 看的人就会去补根本没有落差的地方。
+/// 字体 OpenType 属性不再算「不认识」——`examples/css-gap` 的表要是把认得的
+/// 属性写成「听都没听过」，看的人就会去补根本没有落差的地方。
 #[test]
-fn opentype_font_properties_report_inert_not_unknown() {
+fn opentype_font_properties_are_applied_not_unknown() {
     use crate::css::Declaration;
     use crate::css::computed::{DeclStatus, declaration_status};
 
@@ -1315,9 +1314,9 @@ fn declaration_status_agrees_with_the_cascade() {
         declaration_status(&decl("font-size", "20px"), &base, 16.0),
         DeclStatus::Applied
     );
-    // `-webkit-font-smoothing` 仍在名单里，作 Inert 样例。
-    let inert = declaration_status(&decl("-webkit-font-smoothing", "antialiased"), &base, 16.0);
-    assert_eq!(inert, DeclStatus::Inert);
+    // `list-style-image: none` 只收初值，仍应记成已接住而不是忽略。
+    let applied = declaration_status(&decl("list-style-image", "none"), &base, 16.0);
+    assert_eq!(applied, DeclStatus::Applied);
     assert_eq!(
         declaration_status(&decl("font-size", "huge"), &base, 16.0),
         DeclStatus::Unparsed

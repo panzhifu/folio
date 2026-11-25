@@ -76,6 +76,19 @@ pub enum TextRendering {
     GeometricPrecision,
 }
 
+/// `-webkit-font-smoothing`：每个元素自己的字形抗锯齿方式（可继承）。
+///
+/// 它不是 CSS 标准属性，但出版书里写得很多。四档分别落到平台默认、灰阶、
+/// 次像素与关闭抗锯齿；`Auto` 不覆盖窗口级设置，其余三档逐字形生效。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontSmoothing {
+    #[default]
+    Auto,
+    Antialiased,
+    SubpixelAntialiased,
+    None,
+}
+
 /// `cursor`：指针移到元素上时的形状（可继承）。
 ///
 /// 只收 gpui 的 `CursorStyle` 真能兑现的那批关键字。`wait` / `help` / `zoom-in` 这类

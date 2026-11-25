@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use folio_core::content::format::css::computed::{
-    Color, DecorationStyle, EmphasisPosition, EmphasisStyle, TextShadow,
+    Color, DecorationStyle, EmphasisPosition, EmphasisStyle, FontSmoothing, TextShadow, Transform,
 };
 use folio_core::layout::{FontKey, Justify};
 use gpui_kit::SharedString;
@@ -66,4 +66,10 @@ pub struct RowUnit {
     pub emphasis_position: EmphasisPosition,
     /// `visibility: hidden|collapse`：文字仍在行内占位，绘制时整片跳过。
     pub hidden: bool,
+    /// `-webkit-font-smoothing`：逐 run 的字形抗锯齿档。
+    pub font_smoothing: FontSmoothing,
+    /// `opacity`：逐 run 的字色 alpha 系数。
+    pub opacity: f32,
+    /// `transform`：只改墨迹位置，断行与命中仍按未变换的几何。
+    pub transform: Option<Transform>,
 }

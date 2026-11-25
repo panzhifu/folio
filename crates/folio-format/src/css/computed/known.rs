@@ -81,8 +81,8 @@ pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
     // 「不认识」那一栏（两本书各几百到上千个元素，会把真正要关注的写法淹掉）。
     //
     // - `duokan-bleed` 2026-10-30 接上了（`ComputedStyle::bleed`），所以移了出去。
-    // - 栅格化提示归渲染后端：次像素那一档是**窗口级**开关，逐元素改不了。
-    "-webkit-font-smoothing",
+    // - 栅格化提示 2026-11-26 移了出去：gpui fork 提供逐字形渲染模式，
+    //   `-webkit-font-smoothing` 四档进 `ComputedStyle::font_smoothing`。
     // - `backdrop-filter` 2026-11-25 移了出去：单个 `blur()` 进 `backdrop_blur`，绘制侧
     //   走 gpui 的 `BackdropGlass`（wgpu 真模糊，Metal/DirectX 只留 tint）。
     // - flex 一族：2026-11-23 接上了主轴/交叉轴的 Flex 子集（`layout::flex`）：

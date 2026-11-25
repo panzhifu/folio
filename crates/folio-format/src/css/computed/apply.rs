@@ -881,12 +881,12 @@ pub(super) fn apply(
         "opacity" => match value.trim().parse::<f32>() {
             Ok(v) if (0.0..=1.0).contains(&v) => {
                 style.opacity = v;
+                style.paint_opacity = parent.paint_opacity * v;
                 true
             }
             _ => false,
         },
         "transform" => apply_transform(style, own, root_px, value),
-        // ---- text-decoration-style / color（2026-11-23）----
         "text-decoration-style" | "-webkit-text-decoration-style" => {
             match value.to_ascii_lowercase().as_str() {
                 "solid" => {

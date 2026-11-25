@@ -1,21 +1,20 @@
 //! 字形级绘制元素：一条背景矩形 + 若干条「已定好基线」的 run。
 //!
-//! 正文需要字形级控制（选择高亮、ruby、竖排），而这份 GPUI 快照 **没有 `paint_text`**，
-//! 所以正文自己写 `Element`，逐字形 `paint_glyph`。两端同一份：以前只有移动走这条路，
-//! 桌面交给 `TextView` + 虚拟列表，于是同一本书在两台上可能各排各的行。
+//! 正文需要字形级控制（选择高亮、ruby、竖排），而这份 GPUI 快照没有 `paint_text`，
+//! 所以正文自己写 `Element`，逐字形 `paint_glyph`；桌面与移动共用同一份，
+//! 同一本书不会在两台上各排各的行。
 //!
-//! 落点算法照抄 gpui 自己的 `paint_line`（`text_system/line.rs:452` 起）：
-//! 它把字形画在「行框原点 + (0, padding_top + ascent) + glyph.position」，
-//! 前两项合起来就是这一行的**基线**，第三项是 shaping 自带的纵向偏移。
-//! 基线在这里由排版层直接给出（`LineBox::y + LineBox::baseline`），
-//! 于是偏移量与 `MobileMeasure::run_metrics` 量到的 ascent/descent 同源，
-//! 不会出现「按 A 算的行高、按 B 画的字形」。
+//! 落点算法照抄 gpui 的 `paint_line`（`text_system/line.rs:452` 起）：
+//! 行框原点 + (0, padding_top + ascent) + glyph.position，前两项合起来就是基线。
+//! 基线由排版层直接给出（`LineBox::y + LineBox::baseline`），于是偏移量与度量层
+//! 量到的 ascent/descent 同源，不会出现「按 A 算行高、按 B 画字形」。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use folio_core::content::format::css::computed::{
-    DecorationStyle, EmphasisPosition, EmphasisStyle, TextShadow, WritingMode,
+    DecorationStyle, EmphasisPosition, EmphasisStyle, FontSmoothing, TextShadow, Transform,
+    WritingMode,
 };
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode, cjk_latin_gap};
@@ -30,7 +29,9 @@ use crate::ui::features::reader::components::selection::{self, SelectionVisual};
 use crate::ui::features::reader::model::session::ReaderSession;
 
 mod decorations;
-use decorations::{decoration_y, paint_emphasis, paint_rule, paint_shadows};
+use decorations::{
+    decoration_y, paint_emphasis, paint_rule, paint_shadows, rendering_mode, transformed_origin,
+};
 
 /// 一条已经定好位置的 run，等于 `folio_core::layout::LineRun` 的绘制侧投影。
 /// `x` / `baseline` 相对本元素原点（行框左上角，未滚动时就是版心左上角）。
@@ -65,22 +66,17 @@ pub struct GlyphRun {
     /// 后一个字的影子会盖住前一个字的笔画（偏移只有一两 px，字形本身就互相压边）。
     /// 所以 [`paint_shadows`] 单独走一趟，而且走在字形那一层**之外**。
     pub text_shadows: Arc<[TextShadow]>,
-    /// 这个 run 的 inline box 高（`font_size × line-height`），只用来定装饰线的纵向落点。
-    ///
-    /// 为什么要单独带一份：gpui 的 `paint_line` 算基线在盒里的位置、算删除线的高度都要
-    /// 这个数（见 [`decoration_y`]），而 `ShapedLine` 里没有它 —— 它是**读者与样式**给的，
-    /// 不是 shaping 的结果。缺了它就只能自己猜一个比例，那正是「按 A 量、按 B 画」的起手式。
+    /// 这个 run 的 inline box 高（`font_size × line-height`），只用来定装饰线落点。
+    /// gpui 的 `paint_line` 算基线与删除线都要它（[`decoration_y`]），`ShapedLine` 里没有。
     pub box_height: f32,
-    /// 这一条 run 在**章内**的身份：`(行号, 行内片段槽位)`，由 `scene::Scene::build` 摊
-    /// run 时按 enumerate 盖上。`None` = 兜底那一行或测试里手搓的 run，不参与 shaping 表。
+    /// 这一条 run 在章内的身份 `(行号, 行内片段槽位)`，由 `Scene::build` 按
+    /// enumerate 盖上。`None` = 兜底那一行或测试里手搓的 run，不参与 shaping 表。
     pub key: Option<(u32, u32)>,
-    /// 已经 shape 好的那一份几何。视图层在 `Scene::build` 之后按 [`Self::key`] 查
-    /// [`Document::shaped_line`](crate::ui::features::reader::model::chapter_layout::Document::shaped_line) 填进来；
+    /// 已 shape 好的几何。视图层按 [`Self::key`] 查 shaping 表填进来；
     /// `None` 时 [`paint_run`] 当场 shape（走 gpui 那两帧缓存）。
     ///
-    /// 存 `Arc<LineLayout>` 而不是 `ShapedLine`：后者的 `decoration_runs` 里带主题色，
-    /// 而我们从不读它（装饰线是这一层自己画的）。`LineLayout` 里只有 `font_id`、字形与
-    /// 落点，**结构上就不可能把颜色烘进表**。
+    /// 存 `Arc<LineLayout>` 而不是 `ShapedLine`：后者带主题色的装饰段，而我们从不读它。
+    /// `LineLayout` 里只有 `font_id`、字形与落点，结构上不可能把颜色烘进表。
     pub shaped: Option<Arc<LineLayout>>,
     /// 字距（px）。绘制按字形所在字符序号右推 `letter_spacing × 序号`。
     pub letter_spacing: f32,
@@ -93,6 +89,9 @@ pub struct GlyphRun {
     pub emphasis: EmphasisStyle,
     pub emphasis_color: Option<Hsla>,
     pub emphasis_position: EmphasisPosition,
+    pub font_smoothing: FontSmoothing,
+    pub opacity: f32,
+    pub transform: Option<Transform>,
     /// 折页那一档给这条 run 的裁剪：这个字按它的**平面位置**判还在不在这一张纸上。
     ///
     /// 两张纸各带一个，而且两侧的判据严格互补（[`turn_animation::Cut::keeps`] 用的是带符号
@@ -111,9 +110,7 @@ impl GlyphRun {
         }
     }
 
-    /// 文本收 `SharedString` 而不是 `impl Into<SharedString>`：`From<&str>` 只覆盖
-    /// `&'static str`，而行文本借自 `BlockBox::text`（活不过一帧），
-    /// 在这里泛型化会把调用点逼成 `'static`。构造点自己 `SharedString::new(...)`。
+    /// 文本收 `SharedString`：`From<&str>` 只覆盖 `'static`，而行文本活不过一帧。
     pub fn new(text: SharedString, font: Font, font_size: f32) -> Self {
         Self {
             text,
@@ -139,8 +136,27 @@ impl GlyphRun {
             emphasis: EmphasisStyle::None,
             emphasis_color: None,
             emphasis_position: EmphasisPosition::Over,
+            font_smoothing: FontSmoothing::Auto,
+            opacity: 1.0,
+            transform: None,
             cut: None,
         }
+    }
+
+    /// 逐 run 的字体平滑档，场景层从 `RowUnit` 递过来。
+    pub fn smoothing(mut self, smoothing: FontSmoothing) -> Self {
+        self.font_smoothing = smoothing;
+        self
+    }
+
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
+    pub fn transform(mut self, transform: Option<Transform>) -> Self {
+        self.transform = transform;
+        self
     }
 
     /// 字距 + 两端对齐：`paint_run` 摊字形时要的那两笔偏移。场景层从 `RowUnit` 递过来。
@@ -253,13 +269,11 @@ pub(in crate::ui::features::reader) enum Mark {
     Note(Bounds<Pixels>, Hsla),
 }
 
-/// 画一条痕迹。`origin` 是承载它的那块元素在窗口里的原点 —— 矩形是元素局部坐标，
-/// 不加这一个偏移，阅读视图不在窗口原点（Android 的系统栏 inset、桌面的侧栏）时
-/// 痕迹就整片飘到文字上方（把手准、颜色偏，就是它）。
+/// 画一条痕迹。`origin` 是承载它的元素在窗口里的原点 —— 矩形是元素局部坐标，
+/// 漏加这一偏移，痕迹就整片飘到文字上方（把手准、颜色偏，就是它）。
 ///
-/// 这一条同时服务两个画法层：可重排那一族把它压在**字形之下**（高亮带不能吃掉笔画），
-/// 定版式那一族把它压在**页图之上**（那一族的字就在那张栅格出来的图里，压在图下等于
-/// 没画）。两层的几何各算各的矩形，画法只有这一份 —— 三档画法将来加一档时不必两处改。
+/// 可重排一族把它压在字形下（高亮带不能吃掉笔画），定版式一族把它压在页图上
+/// （那一族的字就在栅格图里，压在图下等于没画）。两层的几何各算各的矩形，画法共用这一份。
 pub(in crate::ui::features::reader) fn paint_mark(
     mark: &Mark,
     origin: Point<Pixels>,
@@ -303,17 +317,8 @@ fn paint_note(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
     }
 }
 
-/// 波浪线在这一段长度里排几个**半波**，永远是**偶数**（一整个波 = 两个半波）。
-///
-/// 只按整波取数：于是每一条划线的波浪都**起于中线、终于中线**，一排划线并眼看过去收尾
-/// 是齐的。按固定波长铺满再截断的话，右端会留下长短不一的残波，那是最扎眼的一种不齐。
-///
-/// 每一段等长（`宽度 ÷ 个数`），所以「整波」这一档是靠**轻微拉伸波长**达成的，不是靠截断：
-/// 一段 8 像素的字给一个波（波长 8 而不是 7），一段 15 像素的给两个（7.5）。偏离不超过
-/// 半个波，肉眼分不出与标准波长。
-///
-/// `0` = 这一段没有线可画（窄到一像素都不到）；短到一个波的段落也给**一整波**而不是半个，
-/// 于是划一个字的那条读起来是「一个小起伏」而不是半个起伏翘在中线上。
+/// 波浪线的半波数，永远是偶数：每条线起于中线、终于中线，一排并看收尾才齐。
+/// 段数按整波算，等宽分段即轻微拉伸波长，不截断；`0` 表示窄到无线可画。
 pub(in crate::ui::features::reader) fn wave_half_waves(width: f32) -> usize {
     if width < 1.0 {
         return 0;
@@ -451,10 +456,7 @@ impl Element for GlyphsElement {
         let __paint = crate::ui::features::reader::model::perf::Timer::start();
         // 绘制层级（自下而上）：块级装饰（更早入树的兄弟）→ 批注痕迹 → 选中高亮 →
         // 字形 → 把手。痕迹与高亮都在字形之前画，字形之后再补就把字盖住了。
-        // 传进来的矩形是元素局部坐标，跟字形与把手一样要加上元素在窗口里的原点：
-        // 阅读视图不在窗口原点（Android 的系统栏 inset、桌面的侧栏）时，漏加这一个
-        // 偏移，痕迹就会整条飘到文字上方 —— 把手是准的、颜色是偏的，就是它。
-        // 波浪那一条加的是同一个偏移：`paint_wave` 认的是窗口坐标。
+        // 传进来的矩形是元素局部坐标，要加元素在窗口里的原点；波浪那条同理。
         for mark in &self.marks {
             paint_mark(mark, bounds.origin, window);
         }
@@ -462,11 +464,8 @@ impl Element for GlyphsElement {
         if let Some(reader) = self.reader.clone() {
             selection::register(&self.selection, &reader, bounds, window, cx);
         }
-        // 字形整屏共用**一个 layer**：gpui 的 `Scene::insert_primitive` 在没有活动 layer 时，
-        // 每个 primitive 都要往 BoundsTree 里插一次（`scene.rs` 的 `push_layer` 分支），
-        // 一屏上千字形就是上千次 R 树插入 —— 这一笔与「画了多少字」同量级，是滚动帧里
-        // 最容易被忽略的固定开销。zed 自己的 `paint_line` 同样把整行字形包进一个 layer
-        // （`text_system/line.rs:547` 的 `window.paint_layer(line_bounds, …)`）。
+        // 字形整屏共用一个 layer：没有活动 layer 时每个 primitive 都要往 BoundsTree
+        // 插一次，一屏上千字形就是上千次 R 树插入。zed 的 `paint_line` 同样包一层。
         //
         // 层级不变：layer 只吃 order（入 scene 的顺序仍在），所以高亮仍压在字下、把手仍
         // 压在字上 —— 它们是在这个 layer 之外画的。
@@ -475,13 +474,10 @@ impl Element for GlyphsElement {
         // 同一帧里同一种 `Font` 只问一次「有没有真粗体面」：`resolve_font` 是
         // fontdb 的一次查询，不能每个字形都付。
         let mut synthetic_bold = HashMap::new();
-        // 影子铺在层**外**。层里所有 primitive 共用同一个 `order`（就是 `push_layer`
-        // 领到的那个），而场景按 `(order, 图集 tile 号)` 给精灵排序（`scene.rs:233`）——
-        // 同一层里，影子与字谁先画完全取决于它们各自落在图集的哪一块。`text-shadow`
-        // 的模糊拆解会给出 ±0.5px 的偏移，影子因此换到别的子像素档位、拿到另一个 tile：
-        // 只要那个 tile 的号大于字的，白影就排在字**之后**，把笔画内部冲淡（细笔画最
-        // 明显，看上去像那个字单独变了颜色）。层外的 primitive 各拿一个递增的 `order`，
-        // 天然落在这一层之下，与入队顺序一致。
+        // 影子铺在层外。层里所有 primitive 共用一个 `order`，场景按 `(order, 图集 tile 号)`
+        // 排序 —— 同层里影子与字谁先画取决于 tile 号。影子换到别的子像素档位后只要
+        // tile 号更大，就会排到字之后，把笔画内部冲淡（细笔画看上去像单独变了色）。
+        // 层外的 primitive 各自递增 `order`，天然落在这一层之下，与入队顺序一致。
         //
         // 只有带影子的 run 付这笔钱（真书里就是标题那几行），其余 run 一次都不多插。
         for run in &self.runs {
@@ -604,14 +600,15 @@ impl Default for GlyphsElement {
     }
 }
 
-/// shaping 的**唯一入口**：一条 run → 一份几何。
+/// shaping 的唯一入口：一条 run → 一份几何。
 ///
-/// 走 `layout_line` 而不是 `shape_line`：后者要多造一份 `decoration_runs`（颜色、下划线、
-/// 删除线各一格），而我们从不读它 —— 装饰线是 [`paint_run`] 自己画的（记的就是这件事）。`layout_line` 直接给回 `Arc<LineLayout>`，也正是
-/// [`Document::shaped_line`](crate::ui::features::reader::model::chapter_layout::Document::shaped_line) 那张表要存的值。
+/// 表未命中时才走这里，因此这一趟的开销与「屏幕上新出现的 run」成正比。
+/// 走 `layout_line` 而不是 `shape_line`：后者要多造一份 `decoration_runs`（颜色、
+/// 下划线、删除线各一格），而我们从不读它 —— 装饰线是 [`paint_run`] 自己画的。
+/// `layout_line` 直接给回 `Arc<LineLayout>`，也正是 shaping 表要存的值。
 ///
-/// `Metric::ShapeLineCalls` 数的是**这一趟**，所以它的口径是「shaping 表未命中一次」，
-/// 不再是「每条 run 一次」—— 表接上之后，滚回走过的地方这一格增量应当是 0。
+/// `Metric::ShapeLineCalls` 数的是「shaping 表未命中一次」；表接上之后，
+/// 滚回走过的地方这一格增量应当是 0。
 pub(in crate::ui::features::reader) fn shape(window: &Window, run: &GlyphRun) -> Arc<LineLayout> {
     // gpui 的 `LineLayoutCache` 命中时确实不重 shaping，但它的键含整段文本 ——
     // **命中也要把文本哈希一遍**，而且只保两帧。这一格数的是走到 gpui 那层的次数。
@@ -643,13 +640,12 @@ pub(in crate::ui::features::reader) fn shape(window: &Window, run: &GlyphRun) ->
     layout
 }
 
-/// 把一条 run 画出来：几何取自 shaping 表（没有就当场 shape 一次），再逐字形 `paint_glyph`。
-/// 这个 run 要不要叠一遍假粗体。
+/// 把一条 run 画出来：几何取自 shaping 表（没有就当场 shape 一次），再逐字形
+/// `paint_glyph`。
 ///
-/// CSS 的 700 已经一路传进了 `Font`；但 fontdb 只会挑同族里最接近的真实字体面。
-/// 如果这个家族只有 400，700 请求还是落回 400 —— 浏览器通常在这里做合成粗体，
-/// gpui 不做。判据是「700 与 400 resolve 到同一个 FontId」：同一个面就叠印一遍，
-/// 真的存在粗体面时那一格不同，绝不重复画。
+/// 假粗体：700 已传进 `Font`，但 fontdb 只挑同族最接近的真实面；家族只有 400 时
+/// 700 仍落回 400 —— 浏览器会做合成粗体，gpui 不做。判据是「700 与 400 resolve 到
+/// 同一个 FontId」：同一个面就叠印一遍，真有粗体面时那一格不同，绝不重复画。
 fn needs_synthetic_bold(window: &Window, font: &Font, cache: &mut HashMap<Font, bool>) -> bool {
     if font.weight.0 < 600.0 {
         return false;
@@ -773,6 +769,8 @@ fn paint_run(
         Some(layout) => layout.clone(),
         None => shape(window, run),
     };
+    let origin = transformed_origin(origin, run, &shaped);
+    let ink = run.color.opacity(run.opacity);
 
     let baseline_x = origin.x + px(run.x);
     let baseline_y = origin.y + px(run.baseline);
@@ -787,27 +785,27 @@ fn paint_run(
         let at = point(origin.x + px(x), origin.y + px(y));
         // 单个字形画不出去（缺字形、图集满）不该让整帧失败：与 gpui 自己的
         // `paint_line` 一致，忽略即可。
-        let _ = window.paint_glyph(at, shaped_run.font_id, glyph.id, font_size, run.color);
+        let mode = rendering_mode(run.font_smoothing);
+        let _ =
+            window.paint_glyph_with_mode(at, shaped_run.font_id, glyph.id, font_size, ink, mode);
         if embolden {
             // 没有粗体面时的假粗：同一字形再压一遍，水平错开 0.5px。
             // 只动绘制，不动 shaping / 行宽，所以不会因为「加粗」触发重排。
-            let _ = window.paint_glyph(
+            let _ = window.paint_glyph_with_mode(
                 point(at.x + px(0.5), at.y),
                 shaped_run.font_id,
                 glyph.id,
                 font_size,
-                run.color,
+                ink,
+                mode,
             );
         }
     });
     crate::ui::features::reader::model::perf::add(|frame| frame.glyph_ns += __t_glyph.ns());
-    // 装饰线。字形是我们自己一个个画的，gpui 的 `ShapedLine::paint` 里没有那一段，
-    // 所以线也得自己画 —— 少这一段就是「`text-decoration` 解析了、传进 shaping 了、
-    // 然后没人画」：`UnderlineStyle` 造出来只为了进 `TextRun`，画面的循环只读 glyphs。
+    // 装饰线自己画：glyph 循环只读字形，少这一段就是「解析了却没人画」。
+    // 整条 run 一种样式，宽度用 `shaped.width`（画出来的那份），不用布局给的 run 宽：
+    // 后者含 `word-spacing` 一类的富余，线会伸到字后面去。
     //
-    // 一条 run 一种样式（样式来自 `RunStyle`，整段一致），所以整条 run 就是一个装饰段，
-    // 不必照 gpui 那样按 `decoration_runs` 切字符区间。宽度用 `shaped.width`（**画出来的**
-    // 那份宽），不用布局给的 run 宽：后者含 `word-spacing` 一类的富余，线会伸到字后面去。
     // 被折线裁到的这一张这一帧不画装饰线：字按逐点判据收了，线的起止却没有对应的收法
     // （它是一整条 run 一个矩形，而折线是斜的），伸到折线外面会比缺一根线更难看。
     // 280ms 之内的事，且只影响带下划线/删除线的那些 run。
@@ -818,12 +816,12 @@ fn paint_run(
         // 「离基线多远」仍按横排那一份式子算：把基线喂 0，拿回来的就是纯深度；
         // 深度与长度都经同一处投影换成物理的 x / y —— `vertical-rl` 的正深度往**左**。
         //
-        // 竖排这一档只按**实线**画：波浪/点/虚线要在行的推进轴上切段或折线，而竖排的
-        // 轴是转置过的；本书语料里 `text-decoration-style` 与竖排没有同时出现，先保住
-        // 颜色，不在这里再发明一套斜向几何。
+        // 竖排只画实线：波浪/点/虚线的切段依赖横排推进轴，这里不另立斜向几何。
         let (u, s) = decoration_y(px(0.0), px(run.box_height), shaped.ascent, shaped.descent);
         let width = shaped.width;
-        let color = run.decoration_color.unwrap_or(run.color);
+        let color = run
+            .decoration_color
+            .map_or(ink, |color| color.opacity(run.opacity));
         for (on, depth) in [
             (run.underline, f32::from(u)),
             (run.line_through, f32::from(s)),
@@ -852,7 +850,9 @@ fn paint_run(
             shaped.descent,
         );
         let width = shaped.width;
-        let color = run.decoration_color.unwrap_or(run.color);
+        let color = run
+            .decoration_color
+            .map_or(ink, |color| color.opacity(run.opacity));
         if run.underline {
             paint_rule(
                 window,
@@ -874,7 +874,7 @@ fn paint_run(
             );
         }
     }
-    // 着重号（`text-emphasis`）：整条 run 一个字一个字画完字之后，再逐字点/圈。
+    // 着重号：画完字之后逐字点/圈。
     if run.emphasis != EmphasisStyle::None && run.cut.is_none() {
         paint_emphasis(window, origin, run, &shaped);
     }

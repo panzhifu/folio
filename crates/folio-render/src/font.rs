@@ -7,9 +7,24 @@ use std::sync::Arc;
 
 use super::ports::Measure;
 use folio_format::css::computed::{
-    Color, ComputedStyle, DecorationStyle, EmphasisPosition, EmphasisStyle, FontStretch,
-    TextCombine, TextShadow, TextTransform, Visibility, WritingMode,
+    Color, ComputedStyle, DecorationStyle, EmphasisPosition, EmphasisStyle, FontSmoothing,
+    FontStretch, TextCombine, TextShadow, TextTransform, Transform, Visibility, WritingMode,
 };
+
+fn hash_length<H: std::hash::Hasher>(length: folio_format::css::computed::Length, state: &mut H) {
+    use std::hash::Hash;
+    match length {
+        folio_format::css::computed::Length::Px(v) => {
+            0u8.hash(state);
+            v.to_bits().hash(state);
+        }
+        folio_format::css::computed::Length::Percent(v) => {
+            1u8.hash(state);
+            v.to_bits().hash(state);
+        }
+        folio_format::css::computed::Length::Auto => 2u8.hash(state),
+    }
+}
 
 /// 一次度量需要的最小字体描述。`family == "monospace"` 是泛族名，
 /// 由 `Measure` 的实现决定它对应哪个真实 family。
@@ -111,6 +126,12 @@ pub struct RunStyle {
     pub hidden: bool,
     /// `text-transform`：收集文本时按它换字符（只换字节长度不变的）。
     pub text_transform: TextTransform,
+    /// `-webkit-font-smoothing`：逐 run 的字形抗锯齿档。
+    pub font_smoothing: FontSmoothing,
+    /// `opacity`：逐 run 的字色 alpha 系数（组透明度按 run 近似）。
+    pub opacity: f32,
+    /// `transform`：只改绘制几何，不改断行与命中。
+    pub transform: Option<Transform>,
     /// 竖排数字并格（横排折成 `None`）。
     pub text_combine: TextCombine,
     pub vertical_lr: bool,
@@ -143,6 +164,22 @@ impl std::hash::Hash for RunStyle {
         (self.emphasis_position as u8).hash(state);
         self.hidden.hash(state);
         (self.text_transform as u8).hash(state);
+        (self.font_smoothing as u8).hash(state);
+        self.opacity.to_bits().hash(state);
+        // Transform 只有两个变体，逐项按位 hash。
+        match self.transform {
+            Some(Transform::Translate(x, y)) => {
+                0u8.hash(state);
+                hash_length(x, state);
+                hash_length(y, state);
+            }
+            Some(Transform::Scale(x, y)) => {
+                1u8.hash(state);
+                x.to_bits().hash(state);
+                y.to_bits().hash(state);
+            }
+            None => 2u8.hash(state),
+        }
         self.text_combine.hash(state);
         self.vertical_lr.hash(state);
     }
@@ -231,6 +268,9 @@ impl RunStyle {
             emphasis_position: style.text_emphasis_position,
             hidden: matches!(style.visibility, Visibility::Hidden | Visibility::Collapse),
             text_transform: style.text_transform,
+            font_smoothing: style.font_smoothing,
+            opacity: style.paint_opacity,
+            transform: style.transform,
             text_combine: if style.writing_mode.is_vertical() {
                 style.text_combine
             } else {
@@ -333,7 +373,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::RunStyle;
-    use folio_format::css::computed::{Color, ComputedStyle, DecorationStyle, TextShadow};
+    use folio_format::css::computed::{
+        Color, ComputedStyle, DecorationStyle, FontSmoothing, TextShadow,
+    };
 
     fn shadow(dy: f32) -> TextShadow {
         TextShadow {
@@ -365,6 +407,51 @@ mod tests {
         let plain = RunStyle::new(&ComputedStyle::default());
         assert!(plain.text_shadows.is_empty());
         assert_ne!(a, plain);
+    }
+
+    /// 平滑档进 run 样式并参与去重：绘制每一档拿不同的渲染模式。
+    #[test]
+    fn the_run_style_carries_font_smoothing() {
+        let antialiased = ComputedStyle {
+            font_smoothing: FontSmoothing::Antialiased,
+            ..Default::default()
+        };
+        let subpixel = ComputedStyle {
+            font_smoothing: FontSmoothing::SubpixelAntialiased,
+            ..Default::default()
+        };
+        assert_ne!(
+            RunStyle::new(&antialiased),
+            RunStyle::new(&subpixel),
+            "平滑档不同必须去重成两格"
+        );
+        assert_eq!(
+            RunStyle::new(&ComputedStyle::default()).font_smoothing,
+            FontSmoothing::Auto
+        );
+    }
+
+    /// 绘制 alpha 与平移变换都进 run 样式，并参与去重。
+    #[test]
+    fn the_run_style_carries_opacity_and_transform() {
+        let style = ComputedStyle {
+            paint_opacity: 0.5,
+            transform: Some(folio_format::css::computed::Transform::Translate(
+                folio_format::css::computed::Length::Px(2.0),
+                folio_format::css::computed::Length::Percent(0.5),
+            )),
+            ..Default::default()
+        };
+        let run = RunStyle::new(&style);
+        assert_eq!(run.opacity, 0.5);
+        assert_ne!(
+            run,
+            RunStyle::new(&ComputedStyle {
+                paint_opacity: 0.5,
+                ..Default::default()
+            }),
+            "有变换与无变换必须两格"
+        );
     }
 
     /// `text-decoration-style` / `-color` 也要进 run 样式：只带两个布尔的话，波浪线
