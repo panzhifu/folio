@@ -1,8 +1,9 @@
-//! `@media` 宽度条件：解析、判定、视口筛选。
+//! `@media` 宽度条件和 `@supports` 特性条件的判定、视口筛选。
 //!
 //! 从 `css::mod` 切出来只因为 mod.rs 贴着行数上限；对外路径经 `pub use` 保持不变。
 
-use crate::css::split_top_level;
+use crate::css::computed::{ComputedStyle, DeclStatus, declaration_status};
+use crate::css::{Declaration, split_top_level};
 
 /// 一条 `@media` 里**能判**的那部分：逗号列表任一成立即命中。
 ///
@@ -181,4 +182,97 @@ fn media_length_px(value: &str) -> Option<f32> {
         return v.trim().parse::<f32>().ok().map(|n| n * 16.0);
     }
     None
+}
+
+/// `@supports` 的条件能不能兑现：逗号列表任一命中，括号内按 `and` / `or` / `not` 组合。
+///
+/// 支持度直接问层叠那一份 `declaration_status` —— 与 `css-gap` 同一判据，不再维护
+/// 「我们支持哪些属性」的第二张表。取不了值（语法判不了）按成立处理：书里的兼容
+/// 分支宁可多收一块，也不要因为少认一个写法把整段正文藏掉。
+fn split_words(query: &str, keyword: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let bytes = query.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b'"' | b'\'' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+            }
+            _ if depth == 0 && query[i..].get(..keyword.len()) == Some(keyword) => {
+                parts.push(query[start..i].to_string());
+                i += keyword.len();
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(query[start..].to_string());
+    parts
+}
+
+/// 从 `@supports ...` 的整条 prelude 里剥出条件串。
+pub(crate) fn supports_query(prelude: &str) -> &str {
+    prelude
+        .strip_prefix('@')
+        .and_then(|s| s.split_once(char::is_whitespace))
+        .map_or("", |(_, q)| q.trim())
+}
+
+pub(crate) fn supports_condition(query: &str) -> bool {
+    split_top_level(query, ',')
+        .iter()
+        .any(|part| supports_or(part))
+}
+
+fn supports_or(query: &str) -> bool {
+    split_words(query, " or ")
+        .iter()
+        .any(|part| supports_and(part))
+}
+
+fn supports_and(query: &str) -> bool {
+    split_words(query, " and ")
+        .iter()
+        .all(|part| supports_atom(part))
+}
+
+fn supports_atom(atom: &str) -> bool {
+    let atom = atom.trim();
+    if atom.is_empty() {
+        return true;
+    }
+    if let Some(inner) = atom
+        .strip_prefix("not ")
+        .or_else(|| atom.strip_prefix("NOT "))
+    {
+        return !supports_atom(inner.trim());
+    }
+    let inner = atom.trim_start_matches('(').trim_end_matches(')').trim();
+    let Some((property, value)) = inner.split_once(':') else {
+        return true;
+    };
+    // `unknown(fn(value))` 这类函数值语法判不了；按支持处理，别把兼容分支整块藏掉。
+    if value.contains('(') {
+        return true;
+    }
+    let parent = ComputedStyle::default();
+    let decl = Declaration {
+        property: property.trim().to_ascii_lowercase(),
+        value: value.trim().to_string(),
+        important: false,
+    };
+    !matches!(
+        declaration_status(&decl, &parent, 16.0),
+        DeclStatus::Unparsed
+    )
 }

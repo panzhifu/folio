@@ -1,11 +1,8 @@
 //! CSS 子集：样式表装配 + 层叠出 `ComputedStyle`。
 //!
-//! 三个模块各管一段：`selector` 认「这条规则命中哪些元素」，`value` 认「一个值是什么」，
-//! `computed` 管「一条声明写进计算样式的哪里」并把结果沿 DOM 树展开；`ua` 是没命中时的初值表。
-//!
-//! 范围就是 `computed/apply.rs` 里那批 match 臂（属性名 → 计算样式的哪几个字段），
-//! 加上 `computed.rs` 里那份 `KNOWN_UNIMPLEMENTED`（认得、这一版不生效）。
-//! 清单外的声明**被忽略而不是报错**：为一两个 `transform` 让整本书排版失败是最糟的失败方式。
+//! 各模块分段：`selector` 认命中元素，`value` 认值，`computed` 把声明展开到 DOM，
+//! `media` 判条件，`ua` 给初值。范围即 `computed/apply.rs` 的 match 臂和 `KNOWN_UNIMPLEMENTED`。
+//! 清单外的声明**忽略而不报错**：为一两个 `transform` 让整本书排版失败太糟。
 
 mod budget;
 pub mod color;
@@ -21,7 +18,7 @@ pub(crate) mod value;
 pub use color::Rgba8;
 pub use font_face::{FontFaceRule, FontSrc};
 pub use media::MediaCondition;
-pub(crate) use media::{MediaDecision, media_decision};
+pub(crate) use media::{MediaDecision, media_decision, supports_condition, supports_query};
 pub use settings::ImageScale;
 
 use crate::dom::{Dom, NodeId};
@@ -281,8 +278,13 @@ impl RuleSet {
                             }
                         }
                     }
-                    // `@supports`：判不了特性支持，照旧把内容收进来（本机语料 0 处）。
-                    "supports" => self.consume(body, origin, media),
+                    // `@supports`：条件可判时按声明支持度决定收不收，与 css-gap 同一判据；
+                    // 判不了的句法按成立处理，宁可多收兼容分支。
+                    "supports" => {
+                        if supports_condition(supports_query(prelude)) {
+                            self.consume(body, origin, media);
+                        }
+                    }
                     // @font-face 不属于任何元素，但**要留下来**：它是「这本书带了自己的字体」
                     // 的唯一线索，落到 ignored 就等于对着一份 30MB 的内嵌字体装看不见。
                     "font-face" => {

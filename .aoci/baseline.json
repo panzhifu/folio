@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-11-19T12:21:22Z",
-  "updated_at": "2026-11-25T09:08:25Z",
+  "updated_at": "2026-11-25T09:55:29Z",
   "files": {
     ".agents/skills/animate/RECIPES.md": {
       "role": "index",
@@ -2663,9 +2663,9 @@
     },
     "Cargo.lock": {
       "role": "observe",
-      "sha256": "1bf6633936bdf5de6f40b8032fc6b33f3b222986d4008cc350088e8d0dd7da4e",
-      "size": 266455,
-      "normalized_sha256": "1bf6633936bdf5de6f40b8032fc6b33f3b222986d4008cc350088e8d0dd7da4e"
+      "sha256": "50e36d63eb14a918b79c307f884cea38ef637d351b6fe8236fbf060d48cdb50f",
+      "size": 266473,
+      "normalized_sha256": "50e36d63eb14a918b79c307f884cea38ef637d351b6fe8236fbf060d48cdb50f"
     },
     "Cargo.toml": {
       "role": "index",
@@ -2699,9 +2699,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "8a194cd7e0cd7ae5c387436e37c30202c64a20860a8d3d990bb381f721b8a4a0",
-      "size": 503277,
-      "normalized_sha256": "8a194cd7e0cd7ae5c387436e37c30202c64a20860a8d3d990bb381f721b8a4a0"
+      "sha256": "8155e442fc522e34c3fe4f0b933b2cc8130a44a4ca16dfc8fb2582400e5f4944",
+      "size": 532287,
+      "normalized_sha256": "8155e442fc522e34c3fe4f0b933b2cc8130a44a4ca16dfc8fb2582400e5f4944"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -2759,9 +2759,9 @@
     },
     "config/folio-debt-baseline.json": {
       "role": "index",
-      "sha256": "1595be0b19054e0d89461846553fbd7d5ad82e30c6822188b4c99a83656b0546",
+      "sha256": "e979b89ced5d2eb3bda426a3931b4e4a3d70a877a7b4cda5798d24d647edb6e6",
       "size": 4274,
-      "normalized_sha256": "1d0cea5a90ae4b29a3198fd9a626512fb0212022dc8dbe324bd1d572aa9a6cd6"
+      "normalized_sha256": "d2dba1f5227f22a874b65112b9a3ab9a11e46f98e0db2c727bd037575bf60f52"
     },
     "config/folio-governance.json": {
       "role": "index",
@@ -3843,15 +3843,15 @@
     },
     "crates/folio-app/src/ui/features/reader/view/body/tests/fixed.rs": {
       "role": "observe",
-      "sha256": "12f4d008688d33d5fc4662d3be79f9f11a5d4add435c73ea832554706ca732d4",
-      "size": 58214,
-      "normalized_sha256": "12f4d008688d33d5fc4662d3be79f9f11a5d4add435c73ea832554706ca732d4"
+      "sha256": "53e3f79113173399465d27c8c6d3d317a1747e03fa0306e963397019f8b296ab",
+      "size": 58205,
+      "normalized_sha256": "53e3f79113173399465d27c8c6d3d317a1747e03fa0306e963397019f8b296ab"
     },
     "crates/folio-app/src/ui/features/reader/view/body/tests/harness.rs": {
       "role": "observe",
-      "sha256": "37b43775f45f628fd30bbf525d6888b1f74c6c9d65bde44b1f684694da757be7",
-      "size": 23141,
-      "normalized_sha256": "37b43775f45f628fd30bbf525d6888b1f74c6c9d65bde44b1f684694da757be7"
+      "sha256": "47a121beca314cb6216034afbc3c94f1ecfa17b18b3e46904d799487fb2fde13",
+      "size": 23109,
+      "normalized_sha256": "47a121beca314cb6216034afbc3c94f1ecfa17b18b3e46904d799487fb2fde13"
     },
     "crates/folio-app/src/ui/features/reader/view/body/tests/jump_back.rs": {
       "role": "observe",
@@ -3897,9 +3897,9 @@
     },
     "crates/folio-app/src/ui/features/reader/view/body/tests/reflow.rs": {
       "role": "observe",
-      "sha256": "d284f5f78421427f0cd85c7100bee4fa30ec0b565fcdd273b7b605259101db2e",
-      "size": 11735,
-      "normalized_sha256": "d284f5f78421427f0cd85c7100bee4fa30ec0b565fcdd273b7b605259101db2e"
+      "sha256": "0b82865a88bd8ddea73ef25e14dbbc036ff9ebf201d81ec416ffa84578f2620a",
+      "size": 11679,
+      "normalized_sha256": "0b82865a88bd8ddea73ef25e14dbbc036ff9ebf201d81ec416ffa84578f2620a"
     },
     "crates/folio-app/src/ui/features/reader/view/body/tests/scroll.rs": {
       "role": "observe",
@@ -3949,6 +3949,12 @@
       "size": 37511,
       "normalized_sha256": "485ed23fa6ef1a34b291041642603beae495860b910280496580a19092abde48"
     },
+    "crates/folio-app/src/ui/features/reader/view/body_cursor.rs": {
+      "role": "index",
+      "sha256": "f59756c382ba6b9421730c4f74c002af9c5a75ed6b4a4979a90e1dc2dab5adc2",
+      "size": 3891,
+      "normalized_sha256": "f59756c382ba6b9421730c4f74c002af9c5a75ed6b4a4979a90e1dc2dab5adc2"
+    },
     "crates/folio-app/src/ui/features/reader/view/content_update.rs": {
       "role": "index",
       "sha256": "6c2df5e5958f5a1b98f5bba0dfc8974e1de7bfc33bdfdd70f318049b0472fa8f",
@@ -3957,21 +3963,27 @@
     },
     "crates/folio-app/src/ui/features/reader/view/mod.rs": {
       "role": "index",
-      "sha256": "55684a2091f8137bf99aef6e77cfddf778efca6805b97205d303ede3c85547a4",
-      "size": 711,
-      "normalized_sha256": "55684a2091f8137bf99aef6e77cfddf778efca6805b97205d303ede3c85547a4"
+      "sha256": "75aedef69907a31db1271a812731849279fa641aa42fa76ca17c1de71c58a71d",
+      "size": 728,
+      "normalized_sha256": "75aedef69907a31db1271a812731849279fa641aa42fa76ca17c1de71c58a71d"
     },
     "crates/folio-app/src/ui/features/reader/view/paint.rs": {
       "role": "index",
-      "sha256": "4508b6d341efd637377816c402eed52ab38da0a3ffedbf914e6d35015ef76a54",
-      "size": 51723,
-      "normalized_sha256": "4508b6d341efd637377816c402eed52ab38da0a3ffedbf914e6d35015ef76a54"
+      "sha256": "ce8ff61ab5c96aadd97f6cbc9890e86258e0e234d3de848528ac18d54fce1646",
+      "size": 50134,
+      "normalized_sha256": "ce8ff61ab5c96aadd97f6cbc9890e86258e0e234d3de848528ac18d54fce1646"
+    },
+    "crates/folio-app/src/ui/features/reader/view/paint/decorations.rs": {
+      "role": "index",
+      "sha256": "3ce8f99e4db574bf2d1e0b9396326b5705ccf170c51f7a1bb34f2d1c198a4433",
+      "size": 8968,
+      "normalized_sha256": "3ce8f99e4db574bf2d1e0b9396326b5705ccf170c51f7a1bb34f2d1c198a4433"
     },
     "crates/folio-app/src/ui/features/reader/view/reading_page.rs": {
       "role": "index",
-      "sha256": "bc573c90c129c53888d466e211b4ff967b51a949f49f3b9fc017590dafc882ec",
-      "size": 149990,
-      "normalized_sha256": "bc573c90c129c53888d466e211b4ff967b51a949f49f3b9fc017590dafc882ec"
+      "sha256": "ada600c29c7ae06f2c90941e69e4f5b9156a1fee88bf6dc6fb4f8e9529de260c",
+      "size": 149656,
+      "normalized_sha256": "ada600c29c7ae06f2c90941e69e4f5b9156a1fee88bf6dc6fb4f8e9529de260c"
     },
     "crates/folio-app/src/ui/features/reader/view/reading_page/listen_controls.rs": {
       "role": "index",
@@ -3987,9 +3999,27 @@
     },
     "crates/folio-app/src/ui/features/reader/view/scene.rs": {
       "role": "index",
-      "sha256": "f7dfd331c2801c5caa07297c97a3c222f444fe5ba00a837b2198ff2417860d4c",
-      "size": 68392,
-      "normalized_sha256": "f7dfd331c2801c5caa07297c97a3c222f444fe5ba00a837b2198ff2417860d4c"
+      "sha256": "cc65c4c2d923770b76e58edb3b45a79e669f433fe5aa486e2866297038123c07",
+      "size": 52447,
+      "normalized_sha256": "cc65c4c2d923770b76e58edb3b45a79e669f433fe5aa486e2866297038123c07"
+    },
+    "crates/folio-app/src/ui/features/reader/view/scene/decor.rs": {
+      "role": "index",
+      "sha256": "511aeae080f9bb5a6aa7c4dd4ec97797fc9b1a06cca46d238c63d5c553f1dea1",
+      "size": 7731,
+      "normalized_sha256": "511aeae080f9bb5a6aa7c4dd4ec97797fc9b1a06cca46d238c63d5c553f1dea1"
+    },
+    "crates/folio-app/src/ui/features/reader/view/scene/decor_pipeline.rs": {
+      "role": "index",
+      "sha256": "f1046c2891ab79f1202331f0f04b4ad26f8fd43b280fdcaedaa04c1b5bb40e9d",
+      "size": 9856,
+      "normalized_sha256": "f1046c2891ab79f1202331f0f04b4ad26f8fd43b280fdcaedaa04c1b5bb40e9d"
+    },
+    "crates/folio-app/src/ui/features/reader/view/scene/tiles.rs": {
+      "role": "index",
+      "sha256": "594a2c0e6a5714bf007349560fd8639bdd9c3dae68ddd3c3dbcdaad94d25216c",
+      "size": 9205,
+      "normalized_sha256": "594a2c0e6a5714bf007349560fd8639bdd9c3dae68ddd3c3dbcdaad94d25216c"
     },
     "crates/folio-app/src/ui/features/settings/mod.rs": {
       "role": "index",
@@ -4011,15 +4041,15 @@
     },
     "crates/folio-app/src/ui/features/settings/view/compact.rs": {
       "role": "index",
-      "sha256": "8f672fc6177388c46cd91955303cac98b2f1872e780f0282ff56c78698b2c940",
-      "size": 89487,
-      "normalized_sha256": "8f672fc6177388c46cd91955303cac98b2f1872e780f0282ff56c78698b2c940"
+      "sha256": "c20d70d614061268c75f2189a48b953b7c5af2d8d46d1ec4909c7f02c2931e7a",
+      "size": 89465,
+      "normalized_sha256": "c20d70d614061268c75f2189a48b953b7c5af2d8d46d1ec4909c7f02c2931e7a"
     },
     "crates/folio-app/src/ui/features/settings/view/compact/blocks.rs": {
       "role": "index",
-      "sha256": "1a5d185c61371ff982622b2085c1b537832d38e65289dc89ba41977d35a11a03",
-      "size": 5132,
-      "normalized_sha256": "1a5d185c61371ff982622b2085c1b537832d38e65289dc89ba41977d35a11a03"
+      "sha256": "514e06451c0bcbdb344aa5ed0d252692d80ba54f0a204493e83052e923633393",
+      "size": 5167,
+      "normalized_sha256": "514e06451c0bcbdb344aa5ed0d252692d80ba54f0a204493e83052e923633393"
     },
     "crates/folio-app/src/ui/features/settings/view/desktop.rs": {
       "role": "index",
@@ -4029,9 +4059,9 @@
     },
     "crates/folio-app/src/ui/features/settings/view/mod.rs": {
       "role": "index",
-      "sha256": "62a0e656219bb4018a2a94b304d9d3eda6348234bf18cf3f60227f7df67e9cfb",
-      "size": 38701,
-      "normalized_sha256": "62a0e656219bb4018a2a94b304d9d3eda6348234bf18cf3f60227f7df67e9cfb"
+      "sha256": "be2b99830de8a6414bef28dfcae5dc65bca82fc53c3818a41dca9d1d559e7d85",
+      "size": 38805,
+      "normalized_sha256": "be2b99830de8a6414bef28dfcae5dc65bca82fc53c3818a41dca9d1d559e7d85"
     },
     "crates/folio-app/src/ui/features/settings/view/notes_sheet.rs": {
       "role": "index",
@@ -4113,9 +4143,9 @@
     },
     "crates/folio-app/src/ui/features/settings/view/pages/mod.rs": {
       "role": "index",
-      "sha256": "433549d4faf7f18d7e10a15067b32c60997e4d31e66b597a33a09dbb85bf732d",
-      "size": 1389,
-      "normalized_sha256": "433549d4faf7f18d7e10a15067b32c60997e4d31e66b597a33a09dbb85bf732d"
+      "sha256": "2ebe6fe61c8930847355dbe2d4be72b7d22bbd891caae11cab14d3a8b16f7408",
+      "size": 1440,
+      "normalized_sha256": "2ebe6fe61c8930847355dbe2d4be72b7d22bbd891caae11cab14d3a8b16f7408"
     },
     "crates/folio-app/src/ui/features/settings/view/pages/speech.rs": {
       "role": "index",
@@ -4128,6 +4158,12 @@
       "sha256": "a952ae8e4f7ae1872969b8823006b80bfa89256bf6b619d153cd5fe13f9a2c46",
       "size": 8316,
       "normalized_sha256": "a952ae8e4f7ae1872969b8823006b80bfa89256bf6b619d153cd5fe13f9a2c46"
+    },
+    "crates/folio-app/src/ui/features/settings/view/pages/stealth.rs": {
+      "role": "index",
+      "sha256": "acdf89ae5ccc3c6c0ccccf2c7256166c65aedbd3d01657c636ad7b6d351f41e7",
+      "size": 3734,
+      "normalized_sha256": "acdf89ae5ccc3c6c0ccccf2c7256166c65aedbd3d01657c636ad7b6d351f41e7"
     },
     "crates/folio-app/src/ui/features/settings/view/pages/storage.rs": {
       "role": "index",
@@ -4167,15 +4203,15 @@
     },
     "crates/folio-app/src/ui/features/shelf/components/book_card.rs": {
       "role": "index",
-      "sha256": "71f008f8c514bc78234e215ab004cf7981940cde363737f8c9ab86e5e7a6728e",
-      "size": 34042,
-      "normalized_sha256": "71f008f8c514bc78234e215ab004cf7981940cde363737f8c9ab86e5e7a6728e"
+      "sha256": "de620df193391787b442ba4ce34a184d330c6ecd6c08776663edc892047c32f7",
+      "size": 36298,
+      "normalized_sha256": "de620df193391787b442ba4ce34a184d330c6ecd6c08776663edc892047c32f7"
     },
     "crates/folio-app/src/ui/features/shelf/components/book_menu.rs": {
       "role": "index",
-      "sha256": "44e6136497c17d887d8018f708973378e3f19954e068e865cc2038f178d47441",
-      "size": 9239,
-      "normalized_sha256": "44e6136497c17d887d8018f708973378e3f19954e068e865cc2038f178d47441"
+      "sha256": "0c7fe45122ba338c0aad9c4a3a60a924cd0d2e0c517cf8dbb06a999392eb77c8",
+      "size": 9215,
+      "normalized_sha256": "0c7fe45122ba338c0aad9c4a3a60a924cd0d2e0c517cf8dbb06a999392eb77c8"
     },
     "crates/folio-app/src/ui/features/shelf/components/mod.rs": {
       "role": "index",
@@ -4207,6 +4243,12 @@
       "size": 34512,
       "normalized_sha256": "ceb5e3a8e8c6e6a051ce1a07f80b601073cafc0c5e673ea105ba19712573bb19"
     },
+    "crates/folio-app/src/ui/features/shelf/view/covers.rs": {
+      "role": "index",
+      "sha256": "0f1a7944b9533034dd920d259c8f0e44094558ed30ba117eb4ad09e9202b0bb8",
+      "size": 5338,
+      "normalized_sha256": "0f1a7944b9533034dd920d259c8f0e44094558ed30ba117eb4ad09e9202b0bb8"
+    },
     "crates/folio-app/src/ui/features/shelf/view/grid.rs": {
       "role": "index",
       "sha256": "0c07cdac6b91f3c41b375997fe5d178a05478b8335b743ec2da3821ce2500910",
@@ -4215,9 +4257,9 @@
     },
     "crates/folio-app/src/ui/features/shelf/view/mod.rs": {
       "role": "index",
-      "sha256": "0eb0b1c7af57c9c217ea47f4845049e2cedde566e4f34f7406a8d57a8d5aafe8",
-      "size": 154880,
-      "normalized_sha256": "0eb0b1c7af57c9c217ea47f4845049e2cedde566e4f34f7406a8d57a8d5aafe8"
+      "sha256": "b8b872d8a76e391f7e130547ef411add4aebba9f798466c5eafdabdb2d7ea0e9",
+      "size": 154211,
+      "normalized_sha256": "b8b872d8a76e391f7e130547ef411add4aebba9f798466c5eafdabdb2d7ea0e9"
     },
     "crates/folio-app/src/ui/features/shelf/view/network_import.rs": {
       "role": "index",
@@ -4251,9 +4293,9 @@
     },
     "crates/folio-app/src/ui/features/shelf/view/toolbar.rs": {
       "role": "index",
-      "sha256": "b6ab79b3ee738dcc856c20c8e4eb9848aa2bfaa8af55bbef8d2ed79e45c496f9",
-      "size": 11804,
-      "normalized_sha256": "b6ab79b3ee738dcc856c20c8e4eb9848aa2bfaa8af55bbef8d2ed79e45c496f9"
+      "sha256": "2acd9816f83c32c38a5a16855acf6cbb7fb1d6af18ca01d2877d88475dab3f99",
+      "size": 11785,
+      "normalized_sha256": "2acd9816f83c32c38a5a16855acf6cbb7fb1d6af18ca01d2877d88475dab3f99"
     },
     "crates/folio-app/src/ui/features/stats/mod.rs": {
       "role": "index",
@@ -4275,9 +4317,9 @@
     },
     "crates/folio-app/src/ui/features/welcome/mod.rs": {
       "role": "index",
-      "sha256": "702488d6a481a45e8a977bf8f78686526d0f3d1c105594c7af7bae673cdd9c45",
-      "size": 5925,
-      "normalized_sha256": "702488d6a481a45e8a977bf8f78686526d0f3d1c105594c7af7bae673cdd9c45"
+      "sha256": "f0e7b49f4b641fd58f27db6978d1aee58a946ccce1be98f27d92fb8575adceb4",
+      "size": 5899,
+      "normalized_sha256": "f0e7b49f4b641fd58f27db6978d1aee58a946ccce1be98f27d92fb8575adceb4"
     },
     "crates/folio-app/src/ui/foundation/book_label.rs": {
       "role": "index",
@@ -4299,9 +4341,9 @@
     },
     "crates/folio-app/src/ui/foundation/images.rs": {
       "role": "index",
-      "sha256": "0b7655c793e4181cf940e4c23d603d75a48f1828ff877cd2d902560f46115e88",
-      "size": 65185,
-      "normalized_sha256": "0b7655c793e4181cf940e4c23d603d75a48f1828ff877cd2d902560f46115e88"
+      "sha256": "8faac6d3b5e037979b9be48d546edeea25d23514503f8ad1b1795cfa95f52800",
+      "size": 64122,
+      "normalized_sha256": "8faac6d3b5e037979b9be48d546edeea25d23514503f8ad1b1795cfa95f52800"
     },
     "crates/folio-app/src/ui/foundation/mod.rs": {
       "role": "index",
@@ -4323,9 +4365,9 @@
     },
     "crates/folio-app/src/ui/foundation/style.rs": {
       "role": "index",
-      "sha256": "7304f2516662375cad945f4e3fc0da68c60b6ffdf65681207dd852984c21dd70",
-      "size": 4718,
-      "normalized_sha256": "7304f2516662375cad945f4e3fc0da68c60b6ffdf65681207dd852984c21dd70"
+      "sha256": "58869510d61b7d66a821e92edd27776967a51ea2260ed0f6ccc2ead2119b63e4",
+      "size": 4694,
+      "normalized_sha256": "58869510d61b7d66a821e92edd27776967a51ea2260ed0f6ccc2ead2119b63e4"
     },
     "crates/folio-app/src/ui/foundation/theme.rs": {
       "role": "index",
@@ -4335,9 +4377,9 @@
     },
     "crates/folio-app/src/ui/host/desktop.rs": {
       "role": "index",
-      "sha256": "57c605d32545d35ca8f41006b8e29b87852ea0282916f597d6f8aa3fcb3c2c64",
-      "size": 3684,
-      "normalized_sha256": "57c605d32545d35ca8f41006b8e29b87852ea0282916f597d6f8aa3fcb3c2c64"
+      "sha256": "8486808a1b6ab888f959ffe5c9829049a69a401115ee3f8732f35adaaa566222",
+      "size": 4936,
+      "normalized_sha256": "8486808a1b6ab888f959ffe5c9829049a69a401115ee3f8732f35adaaa566222"
     },
     "crates/folio-app/src/ui/host/memory.rs": {
       "role": "index",
@@ -4347,21 +4389,27 @@
     },
     "crates/folio-app/src/ui/host/mobile.rs": {
       "role": "index",
-      "sha256": "b6e9ce600bb0a1dd9f0caa3a696f4888a7e29088f3d6c3ddffc9f0911fc84025",
-      "size": 5199,
-      "normalized_sha256": "b6e9ce600bb0a1dd9f0caa3a696f4888a7e29088f3d6c3ddffc9f0911fc84025"
+      "sha256": "fc012e27e40b6c3b34f2136bdd00382fea14eecc2150d982adf3ae3cf91b542a",
+      "size": 5847,
+      "normalized_sha256": "fc012e27e40b6c3b34f2136bdd00382fea14eecc2150d982adf3ae3cf91b542a"
     },
     "crates/folio-app/src/ui/host/mod.rs": {
       "role": "index",
-      "sha256": "d29428c272b467f776cb7312cc96eb8bc018323429b7fd631003f47fb3aee9cf",
-      "size": 16118,
-      "normalized_sha256": "d29428c272b467f776cb7312cc96eb8bc018323429b7fd631003f47fb3aee9cf"
+      "sha256": "7a818026441247bbe70b775c04941aafa469c635b91ecd904842da748080812f",
+      "size": 18355,
+      "normalized_sha256": "7a818026441247bbe70b775c04941aafa469c635b91ecd904842da748080812f"
+    },
+    "crates/folio-app/src/ui/host/stealth.rs": {
+      "role": "index",
+      "sha256": "c7ad3efd3ba17afaa3f4c512003e1cc4ee5fa4231eecf47a3964c683494fadab",
+      "size": 1802,
+      "normalized_sha256": "c7ad3efd3ba17afaa3f4c512003e1cc4ee5fa4231eecf47a3964c683494fadab"
     },
     "crates/folio-app/src/ui/mod.rs": {
       "role": "index",
-      "sha256": "79456b460498512e98a676624d0ac7d2c32fa78b2445d6f69dd861ef25776f43",
-      "size": 1714,
-      "normalized_sha256": "79456b460498512e98a676624d0ac7d2c32fa78b2445d6f69dd861ef25776f43"
+      "sha256": "2ae2b67c5a637be557d1843cc09dc7a4b007614b79823713810c1ac2a9bea710",
+      "size": 1665,
+      "normalized_sha256": "2ae2b67c5a637be557d1843cc09dc7a4b007614b79823713810c1ac2a9bea710"
     },
     "crates/folio-app/src/ui/platform/android.rs": {
       "role": "index",
@@ -4383,21 +4431,21 @@
     },
     "crates/folio-app/src/ui/platform/desktop.rs": {
       "role": "index",
-      "sha256": "24e49c24a586d0b6e1bf74ed7b6a326d60f3e59565eb403b7012c24c09c5084d",
-      "size": 7845,
-      "normalized_sha256": "24e49c24a586d0b6e1bf74ed7b6a326d60f3e59565eb403b7012c24c09c5084d"
+      "sha256": "10fd5de605560d488763c95b0863408c386fb3e42de744fca43a7d820e135750",
+      "size": 8306,
+      "normalized_sha256": "10fd5de605560d488763c95b0863408c386fb3e42de744fca43a7d820e135750"
     },
     "crates/folio-app/src/ui/platform/ios.rs": {
       "role": "index",
-      "sha256": "056c913334e126ecf542660d2732f17b59da85cddd615d1b7ef47c71b1a2975f",
-      "size": 1045,
-      "normalized_sha256": "056c913334e126ecf542660d2732f17b59da85cddd615d1b7ef47c71b1a2975f"
+      "sha256": "36f071161c6e1547164ab6e6618d32eb903aac465364e6e17a548db3c041dd4a",
+      "size": 1019,
+      "normalized_sha256": "36f071161c6e1547164ab6e6618d32eb903aac465364e6e17a548db3c041dd4a"
     },
     "crates/folio-app/src/ui/platform/mod.rs": {
       "role": "index",
-      "sha256": "b4a024f4edd19bd5ab502575bdc27afcb735545f83cd3641d212acfa6bd90513",
-      "size": 33470,
-      "normalized_sha256": "b4a024f4edd19bd5ab502575bdc27afcb735545f83cd3641d212acfa6bd90513"
+      "sha256": "c63ff44d8a1a1c158aff388d30135180ee855896cd7a3646182cb80a7ce6bf28",
+      "size": 33553,
+      "normalized_sha256": "c63ff44d8a1a1c158aff388d30135180ee855896cd7a3646182cb80a7ce6bf28"
     },
     "crates/folio-app/src/ui/platform/ohos.rs": {
       "role": "index",
@@ -4479,9 +4527,9 @@
     },
     "crates/folio-app/src/ui/services/config.rs": {
       "role": "index",
-      "sha256": "86c1e178749fcdeb43816341f7c714f3f020fe566a658f5903852419b3374f9a",
-      "size": 38275,
-      "normalized_sha256": "86c1e178749fcdeb43816341f7c714f3f020fe566a658f5903852419b3374f9a"
+      "sha256": "c90d707002347f42d7ba7335a5659695ddb0851732a53b944633f0bf58a30b64",
+      "size": 38574,
+      "normalized_sha256": "c90d707002347f42d7ba7335a5659695ddb0851732a53b944633f0bf58a30b64"
     },
     "crates/folio-app/src/ui/services/debug_panel.rs": {
       "role": "index",
@@ -4503,15 +4551,15 @@
     },
     "crates/folio-app/src/ui/services/import_queue.rs": {
       "role": "index",
-      "sha256": "0b38f65f8933f7ffa9d94319178495731d900a94ec5b3a39c4eaeb5a70da151b",
-      "size": 2253,
-      "normalized_sha256": "0b38f65f8933f7ffa9d94319178495731d900a94ec5b3a39c4eaeb5a70da151b"
+      "sha256": "1fdfa0cacb2d6f55dd8e28c6f03722bc0ddc01d56c1bb9ea6bd6510a6d7be4c1",
+      "size": 2220,
+      "normalized_sha256": "1fdfa0cacb2d6f55dd8e28c6f03722bc0ddc01d56c1bb9ea6bd6510a6d7be4c1"
     },
     "crates/folio-app/src/ui/services/l10n.rs": {
       "role": "index",
-      "sha256": "e328f057780e55f197056e0d3dd8c8197db16f48c8067b49521a7ddce0b0f748",
-      "size": 20200,
-      "normalized_sha256": "e328f057780e55f197056e0d3dd8c8197db16f48c8067b49521a7ddce0b0f748"
+      "sha256": "2a8748861438cd13eb4415bebcf9be508b4bb8d8f7111bf3adc7443a5bf5106d",
+      "size": 20160,
+      "normalized_sha256": "2a8748861438cd13eb4415bebcf9be508b4bb8d8f7111bf3adc7443a5bf5106d"
     },
     "crates/folio-app/src/ui/services/lansync.rs": {
       "role": "index",
@@ -4521,15 +4569,15 @@
     },
     "crates/folio-app/src/ui/services/library.rs": {
       "role": "index",
-      "sha256": "dc00c4fe0c2b240faff149764e858ddbb8872dc543eac893304f9db9a4426bf1",
-      "size": 28926,
-      "normalized_sha256": "dc00c4fe0c2b240faff149764e858ddbb8872dc543eac893304f9db9a4426bf1"
+      "sha256": "635ea7629ab3c7fd4b341b42affc7be3059af4b70906ae2a7148773db9156e7e",
+      "size": 28764,
+      "normalized_sha256": "635ea7629ab3c7fd4b341b42affc7be3059af4b70906ae2a7148773db9156e7e"
     },
     "crates/folio-app/src/ui/services/mod.rs": {
       "role": "index",
-      "sha256": "5686a7371ff582248e015439dffc6c903f6f69bffb20e78c3c25224e007655de",
-      "size": 1144,
-      "normalized_sha256": "5686a7371ff582248e015439dffc6c903f6f69bffb20e78c3c25224e007655de"
+      "sha256": "e7316ed777d081f9f85eb9a5bf246cf4269cf1bc4a75b60a0ef55fce20a6c5b2",
+      "size": 1161,
+      "normalized_sha256": "e7316ed777d081f9f85eb9a5bf246cf4269cf1bc4a75b60a0ef55fce20a6c5b2"
     },
     "crates/folio-app/src/ui/services/motion.rs": {
       "role": "index",
@@ -4539,9 +4587,9 @@
     },
     "crates/folio-app/src/ui/services/resident.rs": {
       "role": "index",
-      "sha256": "f9aa33d0b2f15191dc2e90983fc66dbc36515ad4d5b5fd7bc637796f7aeb4444",
-      "size": 4584,
-      "normalized_sha256": "f9aa33d0b2f15191dc2e90983fc66dbc36515ad4d5b5fd7bc637796f7aeb4444"
+      "sha256": "5fc7b536044384ca5dee020403a68c05c418bb8cca168d072c18cda6d9eb6be1",
+      "size": 4539,
+      "normalized_sha256": "5fc7b536044384ca5dee020403a68c05c418bb8cca168d072c18cda6d9eb6be1"
     },
     "crates/folio-app/src/ui/services/source_updates.rs": {
       "role": "index",
@@ -4567,6 +4615,12 @@
       "size": 13907,
       "normalized_sha256": "f1338a71f4063bde18a55a65cc7842e6e2afb01ef944c1339bc61332dceb9e16"
     },
+    "crates/folio-app/src/ui/services/stealth.rs": {
+      "role": "index",
+      "sha256": "059fd6f744156aea4a9edac1cd4a53e5a106742f79cc2140973c77fde08f3d42",
+      "size": 10341,
+      "normalized_sha256": "059fd6f744156aea4a9edac1cd4a53e5a106742f79cc2140973c77fde08f3d42"
+    },
     "crates/folio-app/src/ui/services/storage.rs": {
       "role": "index",
       "sha256": "e277d50499f01556fa3d61b93c4b40914c62b5318ec5e3ecb2244606f77dd3e6",
@@ -4581,9 +4635,9 @@
     },
     "crates/folio-app/src/ui/services/transfer.rs": {
       "role": "index",
-      "sha256": "ddbdad3838f5f82c1826ee634fa6a4901dacdd799591e04d92bf2d961f7e8673",
-      "size": 5518,
-      "normalized_sha256": "ddbdad3838f5f82c1826ee634fa6a4901dacdd799591e04d92bf2d961f7e8673"
+      "sha256": "56dc2a1a0d6955041299f6bdc6020e36c7b42754e02cdd4d304f9fb9e3ca1759",
+      "size": 5466,
+      "normalized_sha256": "56dc2a1a0d6955041299f6bdc6020e36c7b42754e02cdd4d304f9fb9e3ca1759"
     },
     "crates/folio-app/src/ui/services/update.rs": {
       "role": "index",
@@ -4599,15 +4653,15 @@
     },
     "crates/folio-app/src/ui/services/watch.rs": {
       "role": "index",
-      "sha256": "275706907f353a2685c92e69dfaf34ccdca2479a1a085a359e45e0b711ebecdd",
-      "size": 3318,
-      "normalized_sha256": "275706907f353a2685c92e69dfaf34ccdca2479a1a085a359e45e0b711ebecdd"
+      "sha256": "9378e33b96ef073911cf01693e78496e21b4e7b00cfb6582d4349a8a02b522a0",
+      "size": 3283,
+      "normalized_sha256": "9378e33b96ef073911cf01693e78496e21b4e7b00cfb6582d4349a8a02b522a0"
     },
     "crates/folio-app/src/ui/shell/mod.rs": {
       "role": "index",
-      "sha256": "1b5c11857e2135d43923a6f764025f3148195870bfcfb4520d3ce4595859901b",
-      "size": 95454,
-      "normalized_sha256": "1b5c11857e2135d43923a6f764025f3148195870bfcfb4520d3ce4595859901b"
+      "sha256": "70e50c3ec2d1138cd47715d9655fbeb1708cefa6ee0b8d81bbf3eebcf8480060",
+      "size": 94490,
+      "normalized_sha256": "70e50c3ec2d1138cd47715d9655fbeb1708cefa6ee0b8d81bbf3eebcf8480060"
     },
     "crates/folio-app/src/ui/shell/navigation/bottom_bar.rs": {
       "role": "index",
@@ -4645,6 +4699,12 @@
       "size": 8096,
       "normalized_sha256": "ee74157c177ca7479e36f26c230add585e1d119cedccd776d979223dfafa8e25"
     },
+    "crates/folio-app/src/ui/shell/stealth.rs": {
+      "role": "index",
+      "sha256": "557f3c4c06cb0cf5ebcf0c7226db92f63d4bb0357bc89a36c01bf6a678daae6d",
+      "size": 3778,
+      "normalized_sha256": "557f3c4c06cb0cf5ebcf0c7226db92f63d4bb0357bc89a36c01bf6a678daae6d"
+    },
     "crates/folio-app/src/ui/shell/tests.rs": {
       "role": "index",
       "sha256": "fc44ea4fd2da8c774448099adfb99d131de3139d9e6e6571dd147e12c8dfdf97",
@@ -4677,9 +4737,9 @@
     },
     "crates/folio-base/src/identity.rs": {
       "role": "index",
-      "sha256": "3a59856c1ccd1faa554e700cb3273a1bddf5724a9e4da373d4c416bd40b36b49",
-      "size": 10544,
-      "normalized_sha256": "3a59856c1ccd1faa554e700cb3273a1bddf5724a9e4da373d4c416bd40b36b49"
+      "sha256": "b363557ea0eab5943ff273cd0eceeba27b3f750b07480363d7663bcf69578d41",
+      "size": 10505,
+      "normalized_sha256": "b363557ea0eab5943ff273cd0eceeba27b3f750b07480363d7663bcf69578d41"
     },
     "crates/folio-base/src/lib.rs": {
       "role": "index",
@@ -4701,27 +4761,27 @@
     },
     "crates/folio-base/src/paths.rs": {
       "role": "index",
-      "sha256": "7afe262d427685cd1c9fe036e063a82433d879d70868c95e6f3b0852b630b7b9",
-      "size": 20981,
-      "normalized_sha256": "7afe262d427685cd1c9fe036e063a82433d879d70868c95e6f3b0852b630b7b9"
+      "sha256": "903bd8d086f35f58d71a2f6871a3a11157eb0b91b8904d1da337872e438c865c",
+      "size": 20903,
+      "normalized_sha256": "903bd8d086f35f58d71a2f6871a3a11157eb0b91b8904d1da337872e438c865c"
     },
     "crates/folio-base/src/task.rs": {
       "role": "index",
-      "sha256": "b5dd51742c2a37b320883f1dd13725d0ea3577ec222d782eab2173ce6794f37d",
-      "size": 35768,
-      "normalized_sha256": "b5dd51742c2a37b320883f1dd13725d0ea3577ec222d782eab2173ce6794f37d"
+      "sha256": "5a53418d7083141a97029e4c0b3635f093b05670e19405e1a1702289725cd7aa",
+      "size": 35669,
+      "normalized_sha256": "5a53418d7083141a97029e4c0b3635f093b05670e19405e1a1702289725cd7aa"
     },
     "crates/folio-base/src/time.rs": {
       "role": "index",
-      "sha256": "a638db5628b445bcb8defd515cd1dba2d36e6cdbb279655c192f5f4fecb9a647",
-      "size": 11915,
-      "normalized_sha256": "a638db5628b445bcb8defd515cd1dba2d36e6cdbb279655c192f5f4fecb9a647"
+      "sha256": "12d5422b81a0879b23f83029fb6d0233c7ea84e972634d0a6c8950c8de74ba82",
+      "size": 11878,
+      "normalized_sha256": "12d5422b81a0879b23f83029fb6d0233c7ea84e972634d0a6c8950c8de74ba82"
     },
     "crates/folio-base/src/usage.rs": {
       "role": "index",
-      "sha256": "c3a8c509420e8d78b1182698d8b99e4cdc0e01b297768e8eb0b5c49b65eccc55",
-      "size": 29238,
-      "normalized_sha256": "c3a8c509420e8d78b1182698d8b99e4cdc0e01b297768e8eb0b5c49b65eccc55"
+      "sha256": "95dafd53e4d6e9d39f6f870263e05de844a86de829be445370ef211f76d7c0e6",
+      "size": 29188,
+      "normalized_sha256": "95dafd53e4d6e9d39f6f870263e05de844a86de829be445370ef211f76d7c0e6"
     },
     "crates/folio-core/Cargo.toml": {
       "role": "index",
@@ -4749,9 +4809,9 @@
     },
     "crates/folio-core/examples/css-gap.rs": {
       "role": "index",
-      "sha256": "601145ee8e63379e3122b051a636dedf790fe13cd5b0fa2ca94019daed8c6883",
-      "size": 24169,
-      "normalized_sha256": "601145ee8e63379e3122b051a636dedf790fe13cd5b0fa2ca94019daed8c6883"
+      "sha256": "d429a150c5da532759f271f5bf7ba3b4f37313c81b1f85681dd132419d2131a6",
+      "size": 24674,
+      "normalized_sha256": "d429a150c5da532759f271f5bf7ba3b4f37313c81b1f85681dd132419d2131a6"
     },
     "crates/folio-core/examples/db-size.rs": {
       "role": "index",
@@ -4815,57 +4875,57 @@
     },
     "crates/folio-core/locales/de.toml": {
       "role": "index",
-      "sha256": "9c5df8bd00aa11d4e151bede1d17da51207f6ba189de04250324fc849f7cfe1a",
-      "size": 63628,
-      "normalized_sha256": "9c5df8bd00aa11d4e151bede1d17da51207f6ba189de04250324fc849f7cfe1a"
+      "sha256": "13313cc1e2db06bc998cd67785233600a102f30e4093249fc1b43b5fb85792c7",
+      "size": 64602,
+      "normalized_sha256": "13313cc1e2db06bc998cd67785233600a102f30e4093249fc1b43b5fb85792c7"
     },
     "crates/folio-core/locales/en.toml": {
       "role": "index",
-      "sha256": "adae62e577aefc80ded5be28f0322f9e68c8e9e78c32578c79be80f20e8821c9",
-      "size": 60635,
-      "normalized_sha256": "adae62e577aefc80ded5be28f0322f9e68c8e9e78c32578c79be80f20e8821c9"
+      "sha256": "581bd04c110f5784de4c380195308d6092b7b8e1b628d366fd1aa87d18689632",
+      "size": 61534,
+      "normalized_sha256": "581bd04c110f5784de4c380195308d6092b7b8e1b628d366fd1aa87d18689632"
     },
     "crates/folio-core/locales/es.toml": {
       "role": "index",
-      "sha256": "4a50a62287fb97e93d1ceb6b808efadc76dec3f620556360d279f67365ec3091",
-      "size": 62986,
-      "normalized_sha256": "4a50a62287fb97e93d1ceb6b808efadc76dec3f620556360d279f67365ec3091"
+      "sha256": "8565d97dae3a2041068aaada93f4383fd90ed628b17fd7f96bb010f58c6c88f6",
+      "size": 63932,
+      "normalized_sha256": "8565d97dae3a2041068aaada93f4383fd90ed628b17fd7f96bb010f58c6c88f6"
     },
     "crates/folio-core/locales/fr.toml": {
       "role": "index",
-      "sha256": "e5affa41bc8b143e1d2f16f45187eb20fc242fb9a5a58dbe69197713a574b1dc",
-      "size": 64998,
-      "normalized_sha256": "e5affa41bc8b143e1d2f16f45187eb20fc242fb9a5a58dbe69197713a574b1dc"
+      "sha256": "33f6c00eae1aa95cf91fbbdb80db8bdd8c3ed26c5eb8a15bb49493c23470a651",
+      "size": 65936,
+      "normalized_sha256": "33f6c00eae1aa95cf91fbbdb80db8bdd8c3ed26c5eb8a15bb49493c23470a651"
     },
     "crates/folio-core/locales/ja.toml": {
       "role": "index",
-      "sha256": "7816af18093bc098431d350b31a879402425987157e9adedcc04caba585eb859",
-      "size": 70129,
-      "normalized_sha256": "7816af18093bc098431d350b31a879402425987157e9adedcc04caba585eb859"
+      "sha256": "e048d4cb26264e1f8828b1e79457c7396671ed72647b92eb861ed87da7675422",
+      "size": 71176,
+      "normalized_sha256": "e048d4cb26264e1f8828b1e79457c7396671ed72647b92eb861ed87da7675422"
     },
     "crates/folio-core/locales/ko.toml": {
       "role": "index",
-      "sha256": "c3811140ca85361bcea020c34d0596cfb2d5359d324a08cc6f746a9b4b1eac7f",
-      "size": 66861,
-      "normalized_sha256": "c3811140ca85361bcea020c34d0596cfb2d5359d324a08cc6f746a9b4b1eac7f"
+      "sha256": "ac4f1f61b272c66d8aa7cc9bf274bf1453719ab52e0fe4b1aed342db2e132bad",
+      "size": 67882,
+      "normalized_sha256": "ac4f1f61b272c66d8aa7cc9bf274bf1453719ab52e0fe4b1aed342db2e132bad"
     },
     "crates/folio-core/locales/ru.toml": {
       "role": "index",
-      "sha256": "996b931e06a1119ddb2ff2e309732f88f31a5345ee6479ef68aea36b232e0525",
-      "size": 84155,
-      "normalized_sha256": "996b931e06a1119ddb2ff2e309732f88f31a5345ee6479ef68aea36b232e0525"
+      "sha256": "351d80f9670102e69f3b5ca40dc1ecdaad24f505e4d05afce7f5b31d35c08685",
+      "size": 85567,
+      "normalized_sha256": "351d80f9670102e69f3b5ca40dc1ecdaad24f505e4d05afce7f5b31d35c08685"
     },
     "crates/folio-core/locales/zh-CN.toml": {
       "role": "index",
-      "sha256": "ff6e225f6f4f92f67dae63fa146ed59ac41eed82e360491579e77e0e43938f7e",
-      "size": 59096,
-      "normalized_sha256": "ff6e225f6f4f92f67dae63fa146ed59ac41eed82e360491579e77e0e43938f7e"
+      "sha256": "cbda1285b53013962a2ef73a61b353987e9e14e820a658348858a738091e6a45",
+      "size": 59988,
+      "normalized_sha256": "cbda1285b53013962a2ef73a61b353987e9e14e820a658348858a738091e6a45"
     },
     "crates/folio-core/locales/zh-TW.toml": {
       "role": "index",
-      "sha256": "681e2fb26bff6cc77223c3c9e9ac7792e065fd7cfc89422b18a7db3dcff46beb",
-      "size": 57334,
-      "normalized_sha256": "681e2fb26bff6cc77223c3c9e9ac7792e065fd7cfc89422b18a7db3dcff46beb"
+      "sha256": "97cd1414a51029298bd6ed6502585b1d9064c5e3bdc0e0e58dd939a62469138b",
+      "size": 58226,
+      "normalized_sha256": "97cd1414a51029298bd6ed6502585b1d9064c5e3bdc0e0e58dd939a62469138b"
     },
     "crates/folio-core/src/backup.rs": {
       "role": "index",
@@ -4899,9 +4959,9 @@
     },
     "crates/folio-core/src/content/anchor.rs": {
       "role": "index",
-      "sha256": "d34b5dc779c8508fb33d0ea03639e383e70af1c2a7b99f6bc74545759790d689",
-      "size": 19266,
-      "normalized_sha256": "d34b5dc779c8508fb33d0ea03639e383e70af1c2a7b99f6bc74545759790d689"
+      "sha256": "dac8689f50be4f021c7b035f78b918df1de5946a0f72b5e8195baa7f569e261b",
+      "size": 19224,
+      "normalized_sha256": "dac8689f50be4f021c7b035f78b918df1de5946a0f72b5e8195baa7f569e261b"
     },
     "crates/folio-core/src/content/anchor/tests.rs": {
       "role": "index",
@@ -4917,15 +4977,15 @@
     },
     "crates/folio-core/src/content/hit.rs": {
       "role": "index",
-      "sha256": "863a1b9d6148a013b62cba9c4e7bc612cc6e03b13d84a6c11c5bac1c09526ed0",
-      "size": 22942,
-      "normalized_sha256": "863a1b9d6148a013b62cba9c4e7bc612cc6e03b13d84a6c11c5bac1c09526ed0"
+      "sha256": "619c9a8dc62e07b4fd2844710c6e9158d9c06f8dc8ff95b5ec9d0cbd64112c36",
+      "size": 23596,
+      "normalized_sha256": "0b68d6ab98456924e501fdc0f641c476f0215eed2028666187259609e936a0f3"
     },
     "crates/folio-core/src/content/hit/tests.rs": {
       "role": "index",
-      "sha256": "6de146f766ce34e305004ca784776c83c4c24cb773c1528271dfa31406b3295e",
-      "size": 27945,
-      "normalized_sha256": "6de146f766ce34e305004ca784776c83c4c24cb773c1528271dfa31406b3295e"
+      "sha256": "b88ec18e0dfd359ef4e31c36185df54f995147fc8a2e63310c375e11ca54b705",
+      "size": 29730,
+      "normalized_sha256": "b88ec18e0dfd359ef4e31c36185df54f995147fc8a2e63310c375e11ca54b705"
     },
     "crates/folio-core/src/content/mod.rs": {
       "role": "index",
@@ -4941,9 +5001,9 @@
     },
     "crates/folio-core/src/error.rs": {
       "role": "index",
-      "sha256": "35f9ca84da371ea2582359469cd7e3ff7a816e439b37736d10c8de74300165ef",
-      "size": 11449,
-      "normalized_sha256": "35f9ca84da371ea2582359469cd7e3ff7a816e439b37736d10c8de74300165ef"
+      "sha256": "a4912b6064c5a2eda7809ac3ad395ae8b6f57f786f76b428ae59dc633d821bd0",
+      "size": 11422,
+      "normalized_sha256": "a4912b6064c5a2eda7809ac3ad395ae8b6f57f786f76b428ae59dc633d821bd0"
     },
     "crates/folio-core/src/infra/backgrounds.rs": {
       "role": "index",
@@ -4959,9 +5019,9 @@
     },
     "crates/folio-core/src/infra/config.rs": {
       "role": "index",
-      "sha256": "d74db33ffd68b589396d5c15bee3a9e58fdd062c74583d1467474b3626422da7",
-      "size": 25960,
-      "normalized_sha256": "d74db33ffd68b589396d5c15bee3a9e58fdd062c74583d1467474b3626422da7"
+      "sha256": "a7971463411a83504441fcb7c1d75f0fd752b3cefe0d1d4ca357356e948d9991",
+      "size": 26255,
+      "normalized_sha256": "a7971463411a83504441fcb7c1d75f0fd752b3cefe0d1d4ca357356e948d9991"
     },
     "crates/folio-core/src/infra/config/account.rs": {
       "role": "index",
@@ -5010,6 +5070,12 @@
       "sha256": "8532939bd830fb4ba7d017bed81b7473d994df01d2213372922a68f547bedd16",
       "size": 3220,
       "normalized_sha256": "8532939bd830fb4ba7d017bed81b7473d994df01d2213372922a68f547bedd16"
+    },
+    "crates/folio-core/src/infra/config/stealth.rs": {
+      "role": "index",
+      "sha256": "be62a96050647f5cd1eedeefe39a75e8ee1d4ff2700e0595068683ca2cc3c545",
+      "size": 4424,
+      "normalized_sha256": "be62a96050647f5cd1eedeefe39a75e8ee1d4ff2700e0595068683ca2cc3c545"
     },
     "crates/folio-core/src/infra/config/tests_load.rs": {
       "role": "index",
@@ -5071,29 +5137,35 @@
       "size": 17579,
       "normalized_sha256": "d20a03723b301f90d43990c2fbebff55fa7b3801f08d2871f2082a72f14efa77"
     },
+    "crates/folio-core/src/ingest/import/cover_backfill_tests.rs": {
+      "role": "index",
+      "sha256": "401bcc42abd907ce342f05e3da58abcfb3ae0caa14d7690aa0d5a1addc98d395",
+      "size": 5581,
+      "normalized_sha256": "401bcc42abd907ce342f05e3da58abcfb3ae0caa14d7690aa0d5a1addc98d395"
+    },
     "crates/folio-core/src/ingest/import/indexing.rs": {
       "role": "index",
-      "sha256": "60fd505d92e3cc489dd358bf228464e2cc5261fa51c639675bc4fa0894306ae7",
-      "size": 6718,
-      "normalized_sha256": "60fd505d92e3cc489dd358bf228464e2cc5261fa51c639675bc4fa0894306ae7"
+      "sha256": "736424bf4b1558749afb39816672a15123724a010495c2c90a143f7914bb5127",
+      "size": 6636,
+      "normalized_sha256": "736424bf4b1558749afb39816672a15123724a010495c2c90a143f7914bb5127"
     },
     "crates/folio-core/src/ingest/import/maintenance.rs": {
       "role": "index",
-      "sha256": "592894e92b45013e85480759728292d036b5dae4d1e8bc021ff5b92c2ded882f",
-      "size": 15254,
-      "normalized_sha256": "592894e92b45013e85480759728292d036b5dae4d1e8bc021ff5b92c2ded882f"
+      "sha256": "2085a3a136d0788f6ceb2e5c788d19f9b2b9a7d30116acf17c32192eac94f779",
+      "size": 26434,
+      "normalized_sha256": "2085a3a136d0788f6ceb2e5c788d19f9b2b9a7d30116acf17c32192eac94f779"
     },
     "crates/folio-core/src/ingest/import/mod.rs": {
       "role": "index",
-      "sha256": "5ee60b23c0fc9fbd4cfa2c5ace2769e7fe6979eacf5d365eb8caf9b960fbcdb1",
-      "size": 12931,
-      "normalized_sha256": "5ee60b23c0fc9fbd4cfa2c5ace2769e7fe6979eacf5d365eb8caf9b960fbcdb1"
+      "sha256": "9ca6947fe60d20831b19261eb8d9b915cf07925e59ac72dc1af312b6cbaede58",
+      "size": 12916,
+      "normalized_sha256": "9ca6947fe60d20831b19261eb8d9b915cf07925e59ac72dc1af312b6cbaede58"
     },
     "crates/folio-core/src/ingest/import/pipeline.rs": {
       "role": "index",
-      "sha256": "790b5c800e37eaf2b90d3baafcd0ddbeb15b4f46ec4ce127eae7fe5ac9b697ec",
-      "size": 35690,
-      "normalized_sha256": "790b5c800e37eaf2b90d3baafcd0ddbeb15b4f46ec4ce127eae7fe5ac9b697ec"
+      "sha256": "d79bfef8b503337e013f2b741a94cd846450a61dbe70548d161d5c58eb36a224",
+      "size": 35403,
+      "normalized_sha256": "d79bfef8b503337e013f2b741a94cd846450a61dbe70548d161d5c58eb36a224"
     },
     "crates/folio-core/src/ingest/import/projections.rs": {
       "role": "index",
@@ -5127,9 +5199,9 @@
     },
     "crates/folio-core/src/ingest/import/tests.rs": {
       "role": "index",
-      "sha256": "a5dc32ed76c9763b4a348a43cc64ca5a1ad8107e3e7d2041db16c34db6e199f7",
-      "size": 109658,
-      "normalized_sha256": "a5dc32ed76c9763b4a348a43cc64ca5a1ad8107e3e7d2041db16c34db6e199f7"
+      "sha256": "abfbdbff72b1dfd414243274f0c15ec6a14c352cc662289a9b8528cdedd40995",
+      "size": 109516,
+      "normalized_sha256": "abfbdbff72b1dfd414243274f0c15ec6a14c352cc662289a9b8528cdedd40995"
     },
     "crates/folio-core/src/ingest/import/versioned.rs": {
       "role": "index",
@@ -5139,9 +5211,9 @@
     },
     "crates/folio-core/src/ingest/mod.rs": {
       "role": "index",
-      "sha256": "9f4b459e1fc750839e8a8fde0e0d2ab615a853a3b259f4d923c49bb9e9300d7e",
-      "size": 1172,
-      "normalized_sha256": "9f4b459e1fc750839e8a8fde0e0d2ab615a853a3b259f4d923c49bb9e9300d7e"
+      "sha256": "95a845c62fe1baaf46f5c96968a2816429646281fbe3f477b5fcb4e9f0fb55c8",
+      "size": 1136,
+      "normalized_sha256": "95a845c62fe1baaf46f5c96968a2816429646281fbe3f477b5fcb4e9f0fb55c8"
     },
     "crates/folio-core/src/ingest/scan.rs": {
       "role": "index",
@@ -5169,15 +5241,15 @@
     },
     "crates/folio-core/src/ingest/watch.rs": {
       "role": "index",
-      "sha256": "bab2cb833671b335ccbd6b05bdb57376a34fc8431550357cb466954a0a0216f5",
-      "size": 26373,
-      "normalized_sha256": "bab2cb833671b335ccbd6b05bdb57376a34fc8431550357cb466954a0a0216f5"
+      "sha256": "a34071dda11db62c57c2cc908c0cf449a983106fb21738be2e683ddf8164cc67",
+      "size": 26341,
+      "normalized_sha256": "a34071dda11db62c57c2cc908c0cf449a983106fb21738be2e683ddf8164cc67"
     },
     "crates/folio-core/src/lib.rs": {
       "role": "index",
-      "sha256": "d9afd6931a0c2606dc3ddf84bc8c3e842ff8f1f252b7e32cd67c3f12c45d37e5",
-      "size": 4271,
-      "normalized_sha256": "d9afd6931a0c2606dc3ddf84bc8c3e842ff8f1f252b7e32cd67c3f12c45d37e5"
+      "sha256": "01c6fb1be93bc740a3cbf0c47a38de23bd8db8299d903008d5390351d4817517",
+      "size": 4293,
+      "normalized_sha256": "01c6fb1be93bc740a3cbf0c47a38de23bd8db8299d903008d5390351d4817517"
     },
     "crates/folio-core/src/net/ai.rs": {
       "role": "index",
@@ -5319,9 +5391,9 @@
     },
     "crates/folio-fonts/src/text/load.rs": {
       "role": "index",
-      "sha256": "6ef9eb229cd280723bd766dd1991801fc1318ba456ee2d52a03acb254f5138ec",
-      "size": 49356,
-      "normalized_sha256": "6ef9eb229cd280723bd766dd1991801fc1318ba456ee2d52a03acb254f5138ec"
+      "sha256": "4ac0eb0710251066839dbf8e5b3610a3280d77e7541b67cab9d40f79c9f84491",
+      "size": 49348,
+      "normalized_sha256": "4ac0eb0710251066839dbf8e5b3610a3280d77e7541b67cab9d40f79c9f84491"
     },
     "crates/folio-fonts/src/text/mod.rs": {
       "role": "index",
@@ -5403,9 +5475,9 @@
     },
     "crates/folio-format/src/chm.rs": {
       "role": "index",
-      "sha256": "1d0874941212c7fd31a1234cd8f8d93a5d74b7ba10303792a406873a843c9cfe",
-      "size": 40125,
-      "normalized_sha256": "1d0874941212c7fd31a1234cd8f8d93a5d74b7ba10303792a406873a843c9cfe"
+      "sha256": "c738b8aeb82a745ae61584c4197544bfff175ce98833d4ef968d0881321e10be",
+      "size": 40093,
+      "normalized_sha256": "c738b8aeb82a745ae61584c4197544bfff175ce98833d4ef968d0881321e10be"
     },
     "crates/folio-format/src/comic_cache.rs": {
       "role": "index",
@@ -5421,9 +5493,9 @@
     },
     "crates/folio-format/src/container.rs": {
       "role": "index",
-      "sha256": "808c1c6e9a53ba3ba7edb979509d94201c83792a1a22c30d010043a13da9172e",
-      "size": 27500,
-      "normalized_sha256": "808c1c6e9a53ba3ba7edb979509d94201c83792a1a22c30d010043a13da9172e"
+      "sha256": "9322e361c474afc50db4ae4e6da2e6cfdb27a7dedbc4cfc37e29fd1be5e24903",
+      "size": 27467,
+      "normalized_sha256": "9322e361c474afc50db4ae4e6da2e6cfdb27a7dedbc4cfc37e29fd1be5e24903"
     },
     "crates/folio-format/src/content.rs": {
       "role": "index",
@@ -5451,39 +5523,123 @@
     },
     "crates/folio-format/src/css/computed.rs": {
       "role": "index",
-      "sha256": "22048ff3a6142163e5f774406ecfff08ca90ae81b5feee8d011d8ad0fa9ba607",
-      "size": 85056,
-      "normalized_sha256": "22048ff3a6142163e5f774406ecfff08ca90ae81b5feee8d011d8ad0fa9ba607"
+      "sha256": "4cfcaefdd5a5de24d881a0ab3e4f01e75c4289264aaeb7efd744d2f9d5025822",
+      "size": 66437,
+      "normalized_sha256": "4cfcaefdd5a5de24d881a0ab3e4f01e75c4289264aaeb7efd744d2f9d5025822"
     },
     "crates/folio-format/src/css/computed/apply.rs": {
       "role": "index",
-      "sha256": "93a347c4d407c06d6df62bcfc61bd26ca44c8529d8235e9c12c9daaafbdb5b5f",
-      "size": 63626,
-      "normalized_sha256": "93a347c4d407c06d6df62bcfc61bd26ca44c8529d8235e9c12c9daaafbdb5b5f"
+      "sha256": "bfd9ad528f17a1672292cf69b523cdfd76ce82f87447aed4ad25d6a99fba3ee1",
+      "size": 54140,
+      "normalized_sha256": "bfd9ad528f17a1672292cf69b523cdfd76ce82f87447aed4ad25d6a99fba3ee1"
+    },
+    "crates/folio-format/src/css/computed/apply/border.rs": {
+      "role": "index",
+      "sha256": "ba1e2e83216cd23488ccdc6148813234767e1fe4fc9f6b1ec967dfc49a2fed7c",
+      "size": 5361,
+      "normalized_sha256": "ba1e2e83216cd23488ccdc6148813234767e1fe4fc9f6b1ec967dfc49a2fed7c"
+    },
+    "crates/folio-format/src/css/computed/apply/boxes.rs": {
+      "role": "index",
+      "sha256": "fa45db044500cdbc4372df44cae8f81552fbb6bacfac0ea93c113a1cdba115bc",
+      "size": 6642,
+      "normalized_sha256": "fa45db044500cdbc4372df44cae8f81552fbb6bacfac0ea93c113a1cdba115bc"
+    },
+    "crates/folio-format/src/css/computed/apply/inherit.rs": {
+      "role": "index",
+      "sha256": "e46d39a270a47efb44dc5580310b3c4462f478346a8c880a5d1f2b079a9206a8",
+      "size": 7123,
+      "normalized_sha256": "e46d39a270a47efb44dc5580310b3c4462f478346a8c880a5d1f2b079a9206a8"
+    },
+    "crates/folio-format/src/css/computed/apply/values.rs": {
+      "role": "index",
+      "sha256": "6cba6955e0feb571ba50378b0d3b19277916b6bd14630238a34e7ea80182d84e",
+      "size": 34122,
+      "normalized_sha256": "d0afa6d2a34e9b075f64fb8d1215faac19706cc4c29c250f24b9a3e42658f2f5"
+    },
+    "crates/folio-format/src/css/computed/cascade.rs": {
+      "role": "index",
+      "sha256": "c56439a6f61930184a0aac00a0f152172f6f0de9541cac13304be3244c455ec4",
+      "size": 11432,
+      "normalized_sha256": "c56439a6f61930184a0aac00a0f152172f6f0de9541cac13304be3244c455ec4"
+    },
+    "crates/folio-format/src/css/computed/derived.rs": {
+      "role": "index",
+      "sha256": "eddf881032d5b4d328c120998948e11b369317855eb6c545644aeed61ef4d22b",
+      "size": 1742,
+      "normalized_sha256": "eddf881032d5b4d328c120998948e11b369317855eb6c545644aeed61ef4d22b"
+    },
+    "crates/folio-format/src/css/computed/known.rs": {
+      "role": "index",
+      "sha256": "5db022596d7891a26f4358260d7227d555c8cd6a906ac3ca355a45690307e50c",
+      "size": 8265,
+      "normalized_sha256": "a470c3797bef59e44a9e3b2ae070c6e69934ea515424e4fdd1ba309771b4b5bb"
     },
     "crates/folio-format/src/css/computed/tests.rs": {
       "role": "index",
-      "sha256": "a99a5060f888316c13165aea24843f57115634f078293db911b5c03f527caf0a",
-      "size": 152191,
-      "normalized_sha256": "a99a5060f888316c13165aea24843f57115634f078293db911b5c03f527caf0a"
+      "sha256": "8625111bdb745d31799ae0cec6457a73c54fde5dedde5742c941a630af27e35c",
+      "size": 148401,
+      "normalized_sha256": "8625111bdb745d31799ae0cec6457a73c54fde5dedde5742c941a630af27e35c"
+    },
+    "crates/folio-format/src/css/computed/tests/new_styles.rs": {
+      "role": "observe",
+      "sha256": "7f6b71575b9d52028eeb1fd9337f0e5c665f80dcb29c5e3f3dbe45b0e51eb389",
+      "size": 8486,
+      "normalized_sha256": "7f6b71575b9d52028eeb1fd9337f0e5c665f80dcb29c5e3f3dbe45b0e51eb389"
+    },
+    "crates/folio-format/src/css/computed/tests/ruby.rs": {
+      "role": "observe",
+      "sha256": "46cd254ea28ae1a222edcc17acd857021bacb11cb2fa63e80290ba53e4d25630",
+      "size": 6689,
+      "normalized_sha256": "46cd254ea28ae1a222edcc17acd857021bacb11cb2fa63e80290ba53e4d25630"
+    },
+    "crates/folio-format/src/css/computed/types.rs": {
+      "role": "index",
+      "sha256": "e297ed4a3df323af192649a89c8158eedcfee051f340265e2234b0b00d8c8663",
+      "size": 7813,
+      "normalized_sha256": "e297ed4a3df323af192649a89c8158eedcfee051f340265e2234b0b00d8c8663"
+    },
+    "crates/folio-format/src/css/computed/types2.rs": {
+      "role": "index",
+      "sha256": "b66a6d5b6b1806f8126d98d8b860ed6e9695049b3a1c92bf314442280bd0b12f",
+      "size": 17937,
+      "normalized_sha256": "3d4292b3e373283be2151164d270868cae49848dfbf9bed7416b0d570eb0d890"
+    },
+    "crates/folio-format/src/css/features.rs": {
+      "role": "index",
+      "sha256": "06b450ebd03dd6013085195cf37d9927ac083b4373602e475af095daf4601253",
+      "size": 9476,
+      "normalized_sha256": "886d2843f106089ea0b2a1c94d0b8d7a73c481d009c4fdb155851cff87bd1eff"
+    },
+    "crates/folio-format/src/css/font_face.rs": {
+      "role": "index",
+      "sha256": "587a6c21e6b46a6b533d1cb3a39c632c606d49a1d65b1efaacfad7c3b4aa409b",
+      "size": 1870,
+      "normalized_sha256": "587a6c21e6b46a6b533d1cb3a39c632c606d49a1d65b1efaacfad7c3b4aa409b"
+    },
+    "crates/folio-format/src/css/media.rs": {
+      "role": "index",
+      "sha256": "76404b052890bfb9268c3ce97d1a2d19cf66ce7833f69281273e81df9327c220",
+      "size": 9965,
+      "normalized_sha256": "76404b052890bfb9268c3ce97d1a2d19cf66ce7833f69281273e81df9327c220"
     },
     "crates/folio-format/src/css/mod.rs": {
       "role": "index",
-      "sha256": "b49cd9661867f89d5da173c513ffe7d89e6f4d505311f4bd44697e5e7efef1a1",
-      "size": 36739,
-      "normalized_sha256": "b49cd9661867f89d5da173c513ffe7d89e6f4d505311f4bd44697e5e7efef1a1"
+      "sha256": "af4064a503c2d4fccd794db649575e56dc9d5a039388153982771f22b1fffa97",
+      "size": 37712,
+      "normalized_sha256": "5974581529548fe41eb0ee8185b47231e062dc3fffad7e13c461e884f7ba327b"
     },
     "crates/folio-format/src/css/selector.rs": {
       "role": "index",
-      "sha256": "e1571eb55b7275cc06233bde606dbb306d5631c34fdc1a6f72f3473a7fc6e6ab",
-      "size": 23176,
-      "normalized_sha256": "e1571eb55b7275cc06233bde606dbb306d5631c34fdc1a6f72f3473a7fc6e6ab"
+      "sha256": "033223a99a77ce833f97891f95652f4a1470e8f0f3d3a7f5c67f650c7696664e",
+      "size": 23345,
+      "normalized_sha256": "033223a99a77ce833f97891f95652f4a1470e8f0f3d3a7f5c67f650c7696664e"
     },
     "crates/folio-format/src/css/selector/tests.rs": {
       "role": "index",
-      "sha256": "ab63d6d5f02e325432d3d5a2176bb1e83c0b979394c23d64f05f3734c451bca9",
-      "size": 11052,
-      "normalized_sha256": "ab63d6d5f02e325432d3d5a2176bb1e83c0b979394c23d64f05f3734c451bca9"
+      "sha256": "7cd48a9f547489b42d1e8a52b470271cc94c5da3026499cb005c91530470a129",
+      "size": 11713,
+      "normalized_sha256": "7cd48a9f547489b42d1e8a52b470271cc94c5da3026499cb005c91530470a129"
     },
     "crates/folio-format/src/css/settings.rs": {
       "role": "index",
@@ -5493,21 +5649,21 @@
     },
     "crates/folio-format/src/css/tests.rs": {
       "role": "index",
-      "sha256": "8b95eb9edd9bf3e3c811cacf6033527a52b6647f4bda58a0074e97d19f54fc16",
-      "size": 20566,
-      "normalized_sha256": "8b95eb9edd9bf3e3c811cacf6033527a52b6647f4bda58a0074e97d19f54fc16"
+      "sha256": "361664ce2dc69e16ed5739ae1409ca8457716737d609c5c87ae34dca554bb6fd",
+      "size": 24475,
+      "normalized_sha256": "361664ce2dc69e16ed5739ae1409ca8457716737d609c5c87ae34dca554bb6fd"
     },
     "crates/folio-format/src/css/ua.rs": {
       "role": "index",
-      "sha256": "cf065dd6e7eb5381e8d42b0df10c4fb4800a9225e46d52f0c8c0fbd98aba66ce",
-      "size": 11554,
-      "normalized_sha256": "cf065dd6e7eb5381e8d42b0df10c4fb4800a9225e46d52f0c8c0fbd98aba66ce"
+      "sha256": "616207c25a1e87120ab4eec4df1176c320e835ebc73152f8aaf53b0a15e591dd",
+      "size": 12418,
+      "normalized_sha256": "616207c25a1e87120ab4eec4df1176c320e835ebc73152f8aaf53b0a15e591dd"
     },
     "crates/folio-format/src/css/value.rs": {
       "role": "index",
-      "sha256": "363e0f26d7c90f5f156f2f8b1897364350f772ef5d2ac3b1df75dcb5eddb54e1",
-      "size": 47754,
-      "normalized_sha256": "363e0f26d7c90f5f156f2f8b1897364350f772ef5d2ac3b1df75dcb5eddb54e1"
+      "sha256": "7c892d343e34accfebba5837b656294f62f0e974fb52fb8124166097ff7b245a",
+      "size": 47778,
+      "normalized_sha256": "7c892d343e34accfebba5837b656294f62f0e974fb52fb8124166097ff7b245a"
     },
     "crates/folio-format/src/djvu.rs": {
       "role": "index",
@@ -5523,15 +5679,15 @@
     },
     "crates/folio-format/src/document/book.rs": {
       "role": "index",
-      "sha256": "94507dec0773198fa6f4cc982f3f41c352be5dfaddb8100fd90c7cece2d400ed",
-      "size": 50354,
-      "normalized_sha256": "94507dec0773198fa6f4cc982f3f41c352be5dfaddb8100fd90c7cece2d400ed"
+      "sha256": "aa5ac0e1e5262c69819ed779edfedf3748a2c760d65e8b814192ff60116461a8",
+      "size": 50249,
+      "normalized_sha256": "aa5ac0e1e5262c69819ed779edfedf3748a2c760d65e8b814192ff60116461a8"
     },
     "crates/folio-format/src/document/mod.rs": {
       "role": "index",
-      "sha256": "4a9e5c89776903e9a2547db842f920ed41b0b629743bab14a5918c96c37da666",
-      "size": 17396,
-      "normalized_sha256": "4a9e5c89776903e9a2547db842f920ed41b0b629743bab14a5918c96c37da666"
+      "sha256": "ad1a685d15fbdad8c78129644afa3e0bb022792bb3581a677b3d80cfe3aff6b7",
+      "size": 17354,
+      "normalized_sha256": "ad1a685d15fbdad8c78129644afa3e0bb022792bb3581a677b3d80cfe3aff6b7"
     },
     "crates/folio-format/src/docx.rs": {
       "role": "index",
@@ -5541,21 +5697,21 @@
     },
     "crates/folio-format/src/dom.rs": {
       "role": "index",
-      "sha256": "886f23e8fb01793979e18a64ff49940bc207d329d8a39b421c733ec2c4a215b5",
-      "size": 25199,
-      "normalized_sha256": "886f23e8fb01793979e18a64ff49940bc207d329d8a39b421c733ec2c4a215b5"
+      "sha256": "12d431166de03f2babb0897e9f0f7b12446c3b62451a18366a05c41f58279afe",
+      "size": 25167,
+      "normalized_sha256": "12d431166de03f2babb0897e9f0f7b12446c3b62451a18366a05c41f58279afe"
     },
     "crates/folio-format/src/epub.rs": {
       "role": "index",
-      "sha256": "e04984947a2b373d781d3956966b04d135f090e56ad946b616f09ddea44a18d6",
-      "size": 112628,
-      "normalized_sha256": "e04984947a2b373d781d3956966b04d135f090e56ad946b616f09ddea44a18d6"
+      "sha256": "eb23c6436bfa0a748d14dd97adc4599e02b67566049104223ca51a036e5c410a",
+      "size": 112475,
+      "normalized_sha256": "eb23c6436bfa0a748d14dd97adc4599e02b67566049104223ca51a036e5c410a"
     },
     "crates/folio-format/src/epub/tests.rs": {
       "role": "index",
-      "sha256": "423d2f59876d7bb4ace59bcbb8a7f7c07a08c367023f1c11011466bacb5b2905",
-      "size": 112330,
-      "normalized_sha256": "423d2f59876d7bb4ace59bcbb8a7f7c07a08c367023f1c11011466bacb5b2905"
+      "sha256": "7870f8b8f17281bd44e8dafb1e0d72e71657ac7c6f9d5b4f23ea72faafecd3d1",
+      "size": 112139,
+      "normalized_sha256": "7870f8b8f17281bd44e8dafb1e0d72e71657ac7c6f9d5b4f23ea72faafecd3d1"
     },
     "crates/folio-format/src/error.rs": {
       "role": "index",
@@ -5565,9 +5721,9 @@
     },
     "crates/folio-format/src/ext.rs": {
       "role": "index",
-      "sha256": "1a54afd16cf9d66cd45082b46ea52de036264a2be22bb3134860d7ae80e8caad",
-      "size": 7182,
-      "normalized_sha256": "1a54afd16cf9d66cd45082b46ea52de036264a2be22bb3134860d7ae80e8caad"
+      "sha256": "bfe64bfba7e533ba99e796a992b38700241b365334b6bccc6fd9af47b330bc2a",
+      "size": 7148,
+      "normalized_sha256": "bfe64bfba7e533ba99e796a992b38700241b365334b6bccc6fd9af47b330bc2a"
     },
     "crates/folio-format/src/fb2.rs": {
       "role": "index",
@@ -5601,9 +5757,9 @@
     },
     "crates/folio-format/src/lib.rs": {
       "role": "index",
-      "sha256": "bba5b56d25583171626207b475d162b5f71c05246de8602efb4f41e0ff5cc230",
-      "size": 47171,
-      "normalized_sha256": "bba5b56d25583171626207b475d162b5f71c05246de8602efb4f41e0ff5cc230"
+      "sha256": "c5358fd3f1cbc8b342261cb111e17f5a4c2fed526381071308685212acccccdf",
+      "size": 47044,
+      "normalized_sha256": "c5358fd3f1cbc8b342261cb111e17f5a4c2fed526381071308685212acccccdf"
     },
     "crates/folio-format/src/limits.rs": {
       "role": "index",
@@ -5619,9 +5775,9 @@
     },
     "crates/folio-format/src/metrics.rs": {
       "role": "index",
-      "sha256": "427345e273ef3eb1ea736492a4963c580faeece82f777a85344f953f7c17b47d",
-      "size": 21011,
-      "normalized_sha256": "427345e273ef3eb1ea736492a4963c580faeece82f777a85344f953f7c17b47d"
+      "sha256": "74a909330521a3a8d004053e5838cfd20a822b49378fb2f35ed2ef69a36e106a",
+      "size": 20678,
+      "normalized_sha256": "74a909330521a3a8d004053e5838cfd20a822b49378fb2f35ed2ef69a36e106a"
     },
     "crates/folio-format/src/mhtml.rs": {
       "role": "index",
@@ -5631,9 +5787,9 @@
     },
     "crates/folio-format/src/mobi.rs": {
       "role": "index",
-      "sha256": "6d09e8da7ea9503de5c449d7d34c7b78c29241f3ab90231b1334d50bfdbe347e",
-      "size": 117005,
-      "normalized_sha256": "6d09e8da7ea9503de5c449d7d34c7b78c29241f3ab90231b1334d50bfdbe347e"
+      "sha256": "48dd47929683331d3baeb16d5eab7f3816633b40696e9c5cf3528b0664c07ec4",
+      "size": 116910,
+      "normalized_sha256": "48dd47929683331d3baeb16d5eab7f3816633b40696e9c5cf3528b0664c07ec4"
     },
     "crates/folio-format/src/mobi/codec.rs": {
       "role": "index",
@@ -5643,9 +5799,9 @@
     },
     "crates/folio-format/src/mobi/encoding.rs": {
       "role": "index",
-      "sha256": "43b55a58a56c925399e997a49ac0085abaaee677bd291a1c665b3ea2508e3581",
-      "size": 6758,
-      "normalized_sha256": "43b55a58a56c925399e997a49ac0085abaaee677bd291a1c665b3ea2508e3581"
+      "sha256": "36ee9c98ac1b81dad5749fa5e1f304016c8b68e399cc438e8bbd344b32792ad7",
+      "size": 6717,
+      "normalized_sha256": "36ee9c98ac1b81dad5749fa5e1f304016c8b68e399cc438e8bbd344b32792ad7"
     },
     "crates/folio-format/src/mobi/header.rs": {
       "role": "index",
@@ -5673,9 +5829,9 @@
     },
     "crates/folio-format/src/novel/draft.rs": {
       "role": "index",
-      "sha256": "8451d769792005bd31f63b0c2a8c010a0b68de579ade18960008b80d9e8f4859",
-      "size": 32112,
-      "normalized_sha256": "8451d769792005bd31f63b0c2a8c010a0b68de579ade18960008b80d9e8f4859"
+      "sha256": "24ce407d470f1ef7ae9554f6dd0c8ccdb1e1daf31811616b5fef90f545cb3689",
+      "size": 32090,
+      "normalized_sha256": "24ce407d470f1ef7ae9554f6dd0c8ccdb1e1daf31811616b5fef90f545cb3689"
     },
     "crates/folio-format/src/novel/mod.rs": {
       "role": "index",
@@ -5697,27 +5853,27 @@
     },
     "crates/folio-format/src/palmdb.rs": {
       "role": "index",
-      "sha256": "ad402ab626736137a168b84ba51276dc305d4853c87708288d47a5045d2ae0fb",
-      "size": 19947,
-      "normalized_sha256": "ad402ab626736137a168b84ba51276dc305d4853c87708288d47a5045d2ae0fb"
+      "sha256": "c846076a9a4700ce61fb086abf12e752f8f1b862820e5a86bb4eeab77c9d981d",
+      "size": 19899,
+      "normalized_sha256": "c846076a9a4700ce61fb086abf12e752f8f1b862820e5a86bb4eeab77c9d981d"
     },
     "crates/folio-format/src/pdb.rs": {
       "role": "index",
-      "sha256": "f2858e60e72b650f69682333c24180047ea702f14d2cacc6df92c0b64725dbb4",
-      "size": 30967,
-      "normalized_sha256": "f2858e60e72b650f69682333c24180047ea702f14d2cacc6df92c0b64725dbb4"
+      "sha256": "5706dc0e85c62233a21a3c3d650ad2693d8bf98b3f877fa9995612aff3067ca3",
+      "size": 30946,
+      "normalized_sha256": "5706dc0e85c62233a21a3c3d650ad2693d8bf98b3f877fa9995612aff3067ca3"
     },
     "crates/folio-format/src/pdf.rs": {
       "role": "index",
-      "sha256": "2424607830a3c8c17295f8c9912f163480a6b077e989c2d9dfb580ec6a5e0b3f",
-      "size": 145355,
-      "normalized_sha256": "2424607830a3c8c17295f8c9912f163480a6b077e989c2d9dfb580ec6a5e0b3f"
+      "sha256": "27d51fc9e86f0e850b2f2da40096dd2f1592425717ebc0a897eb3cf98f04d61a",
+      "size": 145348,
+      "normalized_sha256": "27d51fc9e86f0e850b2f2da40096dd2f1592425717ebc0a897eb3cf98f04d61a"
     },
     "crates/folio-format/src/provider.rs": {
       "role": "index",
-      "sha256": "a96201fd7214e828d8b68b3b0ff81c0b30eaa8e74fb02eb9df11ec1b60b310ae",
-      "size": 37835,
-      "normalized_sha256": "a96201fd7214e828d8b68b3b0ff81c0b30eaa8e74fb02eb9df11ec1b60b310ae"
+      "sha256": "09fd6501443d02d2d00ad2f3fdb082ae03659cc9a92a16a36985b73958a1c7c4",
+      "size": 37764,
+      "normalized_sha256": "09fd6501443d02d2d00ad2f3fdb082ae03659cc9a92a16a36985b73958a1c7c4"
     },
     "crates/folio-format/src/rtf.rs": {
       "role": "index",
@@ -5733,15 +5889,15 @@
     },
     "crates/folio-format/src/sniff.rs": {
       "role": "index",
-      "sha256": "d537af7b781bb0f2a7f1dd5b19b871a0a4c250ee5c44b6d3cc322f4e91090354",
-      "size": 74295,
-      "normalized_sha256": "d537af7b781bb0f2a7f1dd5b19b871a0a4c250ee5c44b6d3cc322f4e91090354"
+      "sha256": "9d7fe112a6944ed7a4dc62ea8eaa9c102c77c1ec9d6f1d885158eb14d7736e9f",
+      "size": 74256,
+      "normalized_sha256": "9d7fe112a6944ed7a4dc62ea8eaa9c102c77c1ec9d6f1d885158eb14d7736e9f"
     },
     "crates/folio-format/src/svg.rs": {
       "role": "index",
-      "sha256": "dcab824c93afb41d781e44b7913319cf601eea6e2b060ec2be8fbec5503f355c",
-      "size": 10514,
-      "normalized_sha256": "dcab824c93afb41d781e44b7913319cf601eea6e2b060ec2be8fbec5503f355c"
+      "sha256": "b552fd0d2a43085f8ff19b68318e88a522fe3dda186632f0a3c7348b97bd96a5",
+      "size": 19441,
+      "normalized_sha256": "b552fd0d2a43085f8ff19b68318e88a522fe3dda186632f0a3c7348b97bd96a5"
     },
     "crates/folio-format/src/test_support.rs": {
       "role": "index",
@@ -5757,9 +5913,9 @@
     },
     "crates/folio-format/src/text.rs": {
       "role": "index",
-      "sha256": "3a1d6705e44329015f2d8a49205c08cbc7834e217ba6419ba4aaa9e9a61dca7e",
-      "size": 19646,
-      "normalized_sha256": "3a1d6705e44329015f2d8a49205c08cbc7834e217ba6419ba4aaa9e9a61dca7e"
+      "sha256": "56fb39e957565e10b13626fe9ba0b83010063be0e7c6407c5256bb8d255cb38d",
+      "size": 19558,
+      "normalized_sha256": "56fb39e957565e10b13626fe9ba0b83010063be0e7c6407c5256bb8d255cb38d"
     },
     "crates/folio-format/src/text_map.rs": {
       "role": "index",
@@ -5823,9 +5979,9 @@
     },
     "crates/folio-model/src/format.rs": {
       "role": "index",
-      "sha256": "78206b428f9e6c5550dcfcb4bec3ad6490ae1d9f681a20813f92a4a57dfbce3f",
-      "size": 31772,
-      "normalized_sha256": "78206b428f9e6c5550dcfcb4bec3ad6490ae1d9f681a20813f92a4a57dfbce3f"
+      "sha256": "806ae02859029034f8df9251d2cfca24db8b10b51130bd5de719178050e65b6c",
+      "size": 31638,
+      "normalized_sha256": "806ae02859029034f8df9251d2cfca24db8b10b51130bd5de719178050e65b6c"
     },
     "crates/folio-model/src/group.rs": {
       "role": "index",
@@ -5847,9 +6003,9 @@
     },
     "crates/folio-model/src/position.rs": {
       "role": "index",
-      "sha256": "45371ca3bba29b35c92705beac61e58ba0f92188d9bfb3b806a8652842bb8e87",
-      "size": 5516,
-      "normalized_sha256": "45371ca3bba29b35c92705beac61e58ba0f92188d9bfb3b806a8652842bb8e87"
+      "sha256": "dc30219f8e558855e1710bf101f08822813a3a6f656c3e4ec459ce87e8c1f261",
+      "size": 5484,
+      "normalized_sha256": "dc30219f8e558855e1710bf101f08822813a3a6f656c3e4ec459ce87e8c1f261"
     },
     "crates/folio-model/src/reading.rs": {
       "role": "index",
@@ -5871,9 +6027,9 @@
     },
     "crates/folio-model/src/types.rs": {
       "role": "index",
-      "sha256": "46830dc6789caf515f9c78624c0063b9b871da340eb3d1b36bf570acab7b01ad",
-      "size": 24258,
-      "normalized_sha256": "46830dc6789caf515f9c78624c0063b9b871da340eb3d1b36bf570acab7b01ad"
+      "sha256": "03e18bcddb8e7c860cffbf1852c24def18a7a0059b1ca2b3f880eec739dee868",
+      "size": 24221,
+      "normalized_sha256": "03e18bcddb8e7c860cffbf1852c24def18a7a0059b1ca2b3f880eec739dee868"
     },
     "crates/folio-net/Cargo.toml": {
       "role": "index",
@@ -6021,21 +6177,57 @@
     },
     "crates/folio-render/src/collect.rs": {
       "role": "index",
-      "sha256": "6d5e2b5f904c65c688c5617aa242d1a7e5b654b411ef28c88fb3ec5dcc4b3b8f",
-      "size": 136111,
-      "normalized_sha256": "6d5e2b5f904c65c688c5617aa242d1a7e5b654b411ef28c88fb3ec5dcc4b3b8f"
+      "sha256": "d611c6c92072eb1ab4074fa5fca9ef0fef0cb2f05ecbf964150b9d0672a558b3",
+      "size": 135075,
+      "normalized_sha256": "d611c6c92072eb1ab4074fa5fca9ef0fef0cb2f05ecbf964150b9d0672a558b3"
+    },
+    "crates/folio-render/src/collect/columns_layout.rs": {
+      "role": "index",
+      "sha256": "6f75e0c4ffa278015b7f204f6efb3f38015973a7f8340a9f6890675556583fe6",
+      "size": 13355,
+      "normalized_sha256": "6f75e0c4ffa278015b7f204f6efb3f38015973a7f8340a9f6890675556583fe6"
+    },
+    "crates/folio-render/src/collect/combine.rs": {
+      "role": "index",
+      "sha256": "aeb6fcb9927b7abe1e88a30e2228c1afaca8719889c0bbca843c5c67f6870207",
+      "size": 1493,
+      "normalized_sha256": "aeb6fcb9927b7abe1e88a30e2228c1afaca8719889c0bbca843c5c67f6870207"
+    },
+    "crates/folio-render/src/collect/grid_layout.rs": {
+      "role": "index",
+      "sha256": "8b5e49d65bd18e9bf96c62838c1a2a1ff7daa4badaf43c3dc0c44f69a78518d6",
+      "size": 10024,
+      "normalized_sha256": "8b5e49d65bd18e9bf96c62838c1a2a1ff7daa4badaf43c3dc0c44f69a78518d6"
+    },
+    "crates/folio-render/src/collect/table_layout.rs": {
+      "role": "index",
+      "sha256": "1e996d3b2d78a0a858b339650ef4a371e9d5dfc8967860f791fbe11a164b1c7b",
+      "size": 15636,
+      "normalized_sha256": "1e996d3b2d78a0a858b339650ef4a371e9d5dfc8967860f791fbe11a164b1c7b"
+    },
+    "crates/folio-render/src/columns.rs": {
+      "role": "index",
+      "sha256": "9657b55e9509e9d496619a9b1dfbe735d67059f9a701eb337dedb0c2bc82d13c",
+      "size": 7980,
+      "normalized_sha256": "9657b55e9509e9d496619a9b1dfbe735d67059f9a701eb337dedb0c2bc82d13c"
+    },
+    "crates/folio-render/src/flex.rs": {
+      "role": "index",
+      "sha256": "9fe3d18cf54095329101624487d94f3076f068f76929dc02cbd6c16715f48572",
+      "size": 7908,
+      "normalized_sha256": "9fe3d18cf54095329101624487d94f3076f068f76929dc02cbd6c16715f48572"
     },
     "crates/folio-render/src/font.rs": {
       "role": "index",
-      "sha256": "9f3c947fe610890039ce020c86fe340bdf29c9211e73bd754ad8830dfb7780e9",
-      "size": 13602,
-      "normalized_sha256": "9f3c947fe610890039ce020c86fe340bdf29c9211e73bd754ad8830dfb7780e9"
+      "sha256": "33fba5f6cabc2b74d5d406f6835f4c58631bd5a706131a242829b45ef230c686",
+      "size": 17326,
+      "normalized_sha256": "33fba5f6cabc2b74d5d406f6835f4c58631bd5a706131a242829b45ef230c686"
     },
     "crates/folio-render/src/fragment.rs": {
       "role": "index",
-      "sha256": "dfdc236a4828dd2c3db6f506541206a1025535a6017988e3f265c805c06b2f7f",
-      "size": 26013,
-      "normalized_sha256": "dfdc236a4828dd2c3db6f506541206a1025535a6017988e3f265c805c06b2f7f"
+      "sha256": "63293e1f2992eaba8c8a0fa0457b01150cf45e9501bf3510eb1126eec755188d",
+      "size": 25965,
+      "normalized_sha256": "63293e1f2992eaba8c8a0fa0457b01150cf45e9501bf3510eb1126eec755188d"
     },
     "crates/folio-render/src/fragment/tests.rs": {
       "role": "index",
@@ -6045,21 +6237,33 @@
     },
     "crates/folio-render/src/geometry.rs": {
       "role": "index",
-      "sha256": "cf87785afa977b685375f8cb5c98eacf5986e3587cfdee01c597d30c5349fa60",
-      "size": 48348,
-      "normalized_sha256": "cf87785afa977b685375f8cb5c98eacf5986e3587cfdee01c597d30c5349fa60"
+      "sha256": "4ce25d81fea1057f6fc633b551b5c32492b1f70ae410330ed546586067764e9e",
+      "size": 45074,
+      "normalized_sha256": "e7ac919157d50d1310e7d3f86726e7c9ff44b47c22fdf19248377a5482662e84"
+    },
+    "crates/folio-render/src/geometry/seed.rs": {
+      "role": "index",
+      "sha256": "2e97ae25bf4a9e36b77442a553a0d8c2018568792172a1335448722dbc1d014d",
+      "size": 6262,
+      "normalized_sha256": "2e97ae25bf4a9e36b77442a553a0d8c2018568792172a1335448722dbc1d014d"
+    },
+    "crates/folio-render/src/grid.rs": {
+      "role": "index",
+      "sha256": "c37d7adf366d6b3c1bb8c82a61943791cc3477286fbc7224bf26ce748af0df37",
+      "size": 6030,
+      "normalized_sha256": "c37d7adf366d6b3c1bb8c82a61943791cc3477286fbc7224bf26ce748af0df37"
     },
     "crates/folio-render/src/key.rs": {
       "role": "index",
-      "sha256": "26524ecc44ec287a8f7a07a7a52175759cd839bb60c311884acc2bf257fa12b0",
-      "size": 18441,
-      "normalized_sha256": "26524ecc44ec287a8f7a07a7a52175759cd839bb60c311884acc2bf257fa12b0"
+      "sha256": "3ad7e40e191cd49fea6443750860bc1af7f0a12294ea1d22c944af10a67c420c",
+      "size": 18357,
+      "normalized_sha256": "3ad7e40e191cd49fea6443750860bc1af7f0a12294ea1d22c944af10a67c420c"
     },
     "crates/folio-render/src/lib.rs": {
       "role": "index",
-      "sha256": "19e690f11b9038b1ddd39da51c58bd377683d7e1cbb8b4966ec078991b6cf74e",
-      "size": 19357,
-      "normalized_sha256": "19e690f11b9038b1ddd39da51c58bd377683d7e1cbb8b4966ec078991b6cf74e"
+      "sha256": "59a9cb957b6b28986ff9f27d39adb5025e25cf6d4f8cd965e3854c3998cec002",
+      "size": 20336,
+      "normalized_sha256": "59a9cb957b6b28986ff9f27d39adb5025e25cf6d4f8cd965e3854c3998cec002"
     },
     "crates/folio-render/src/marker.rs": {
       "role": "index",
@@ -6069,9 +6273,9 @@
     },
     "crates/folio-render/src/page.rs": {
       "role": "index",
-      "sha256": "b2b2d1a71ee3b9c7a110d37ab48bcf5699dd6ad2f23edf9b11e4fef346c5463d",
-      "size": 10061,
-      "normalized_sha256": "b2b2d1a71ee3b9c7a110d37ab48bcf5699dd6ad2f23edf9b11e4fef346c5463d"
+      "sha256": "b50861acd88d099ea4dec25ef21a4a3f36e922774efcc8b824c749529106478f",
+      "size": 10020,
+      "normalized_sha256": "b50861acd88d099ea4dec25ef21a4a3f36e922774efcc8b824c749529106478f"
     },
     "crates/folio-render/src/ports.rs": {
       "role": "index",
@@ -6079,17 +6283,29 @@
       "size": 11369,
       "normalized_sha256": "f50e0f6f3ab5991968ed999db440c0de6455ef7f9b54e8eeecde55607d4f5a7c"
     },
+    "crates/folio-render/src/stacking.rs": {
+      "role": "index",
+      "sha256": "add253c989b6f6f6fa60a8f3b5422fde17a74d55696b072d13153efdd4c6cd4d",
+      "size": 3799,
+      "normalized_sha256": "add253c989b6f6f6fa60a8f3b5422fde17a74d55696b072d13153efdd4c6cd4d"
+    },
     "crates/folio-render/src/table.rs": {
       "role": "index",
-      "sha256": "9aa465b6be486dafff704c906dcf3ae9bc52654bb4a38a1bc50e655b884bab60",
-      "size": 20299,
-      "normalized_sha256": "9aa465b6be486dafff704c906dcf3ae9bc52654bb4a38a1bc50e655b884bab60"
+      "sha256": "a4f5ad32f7a64a7ef00c2e32f92fa6eef02016fd327c61576c835de2b643f697",
+      "size": 23698,
+      "normalized_sha256": "a4f5ad32f7a64a7ef00c2e32f92fa6eef02016fd327c61576c835de2b643f697"
     },
     "crates/folio-render/src/tests.rs": {
       "role": "index",
-      "sha256": "71047bd9c4ede9cfa72de470b8f32ad390a28563d63a06a229d83a69845630e8",
-      "size": 226340,
-      "normalized_sha256": "71047bd9c4ede9cfa72de470b8f32ad390a28563d63a06a229d83a69845630e8"
+      "sha256": "c1d1d8c4b56dd319262377380b530adef3397d3335438e3cb61818ea032295e6",
+      "size": 214418,
+      "normalized_sha256": "c1d1d8c4b56dd319262377380b530adef3397d3335438e3cb61818ea032295e6"
+    },
+    "crates/folio-render/src/tests/align.rs": {
+      "role": "observe",
+      "sha256": "c8efba84c73d3bee59c7309c233f9cc88cbd7a8d481dd158415fcab068802618",
+      "size": 1839,
+      "normalized_sha256": "c8efba84c73d3bee59c7309c233f9cc88cbd7a8d481dd158415fcab068802618"
     },
     "crates/folio-render/src/tests/cache.rs": {
       "role": "observe",
@@ -6097,11 +6313,65 @@
       "size": 17699,
       "normalized_sha256": "caaa54c119960a10ceff4709f3f61a9ed0bb6657fa2b0041a8eb0a4ae64e4270"
     },
+    "crates/folio-render/src/tests/columns.rs": {
+      "role": "observe",
+      "sha256": "90fcf0fdd351b6a65e24f0dc645d41949bf0e15fe3982f8c2b2ead2928db491d",
+      "size": 6639,
+      "normalized_sha256": "b9d320ddf45cd4dac19fe2cb104daf134bb89f4a3772fd58cc5e66a819a3ae4b"
+    },
+    "crates/folio-render/src/tests/decor.rs": {
+      "role": "observe",
+      "sha256": "28b2867972a9bf481c0152bc8306c4ac3b81da6cf6bf735c41807b16d69360ab",
+      "size": 3565,
+      "normalized_sha256": "28b2867972a9bf481c0152bc8306c4ac3b81da6cf6bf735c41807b16d69360ab"
+    },
+    "crates/folio-render/src/tests/flex.rs": {
+      "role": "observe",
+      "sha256": "fe5948e5d4f2bb0e305ef251ab89d43aab0f40d6ce4e228a5e0596d69467142c",
+      "size": 6074,
+      "normalized_sha256": "6d71ea240ffdd68dc3ccf71c46db27d424cc8420baafe6e856c2cc27fad8cfea"
+    },
+    "crates/folio-render/src/tests/generated.rs": {
+      "role": "observe",
+      "sha256": "c443b1b63802e9b092898cc5960e97c5ab269d069ff89493b49127f3f4a28720",
+      "size": 1064,
+      "normalized_sha256": "c443b1b63802e9b092898cc5960e97c5ab269d069ff89493b49127f3f4a28720"
+    },
+    "crates/folio-render/src/tests/grid.rs": {
+      "role": "observe",
+      "sha256": "2f55f4750ee9ae9f48939e257934e42d3af2cf57ab0b2f55f7dcc7f941acb90a",
+      "size": 4528,
+      "normalized_sha256": "2f55f4750ee9ae9f48939e257934e42d3af2cf57ab0b2f55f7dcc7f941acb90a"
+    },
     "crates/folio-render/src/tests/index.rs": {
       "role": "observe",
-      "sha256": "e7124f3e6daed9ee55b03a35a93b8ff2d37486b4a26db9fa8b45ad920b95e167",
-      "size": 22628,
-      "normalized_sha256": "e7124f3e6daed9ee55b03a35a93b8ff2d37486b4a26db9fa8b45ad920b95e167"
+      "sha256": "bb7a6e2a4248384fbb7a4aa01e747b7fee7efa55b4528d2b23fc798fad6a45d0",
+      "size": 24725,
+      "normalized_sha256": "bb7a6e2a4248384fbb7a4aa01e747b7fee7efa55b4528d2b23fc798fad6a45d0"
+    },
+    "crates/folio-render/src/tests/inline.rs": {
+      "role": "observe",
+      "sha256": "76b8e125dbf1753bde76622e4417b1697bd0dada35d4591a70d9f6c817c86e48",
+      "size": 1373,
+      "normalized_sha256": "76b8e125dbf1753bde76622e4417b1697bd0dada35d4591a70d9f6c817c86e48"
+    },
+    "crates/folio-render/src/tests/stacking.rs": {
+      "role": "observe",
+      "sha256": "4f5645a8bde872abd48def4314f27fc4e1181b72eb1ef69b59f0579a68bef035",
+      "size": 2618,
+      "normalized_sha256": "8544bc92eb08ed6fc778765167433196f8ae86e35b895fecba8d1176ff0ef0ee"
+    },
+    "crates/folio-render/src/tests/table.rs": {
+      "role": "observe",
+      "sha256": "b4e8b4a685eb0e61ed252881128e40911c0babfcd7d6ed49bce7fbc6b51c638a",
+      "size": 19769,
+      "normalized_sha256": "b4e8b4a685eb0e61ed252881128e40911c0babfcd7d6ed49bce7fbc6b51c638a"
+    },
+    "crates/folio-render/src/tests/text.rs": {
+      "role": "observe",
+      "sha256": "30aa386952c2e91ecf1588582a22abbe2c7fc0156cd83087ec22f1b863dae186",
+      "size": 5580,
+      "normalized_sha256": "d739a4052acf478235ae6a12a7f65e8d709c699910f7b8e9d73cbd6510178cb3"
     },
     "crates/folio-render/src/tests/vertical.rs": {
       "role": "observe",
@@ -6111,9 +6381,21 @@
     },
     "crates/folio-render/src/wrap.rs": {
       "role": "index",
-      "sha256": "40e6cbee1d90a694ad71c0b334866ebac9206bd31727202a47d0cc94859a9adb",
-      "size": 63097,
-      "normalized_sha256": "40e6cbee1d90a694ad71c0b334866ebac9206bd31727202a47d0cc94859a9adb"
+      "sha256": "34a4ca752c7fd3805669f4c3ba7999aee9488317ca4ce6d4da453e7d74ce29a5",
+      "size": 62084,
+      "normalized_sha256": "074b75ef980c2884d387dfe737124ab2a07a24756d000c8273925832c98cdb41"
+    },
+    "crates/folio-render/src/wrap/combine.rs": {
+      "role": "index",
+      "sha256": "729c895dec739c01a02720ed7036665d20b91ea5f268387d2c35a605e1aca439",
+      "size": 2393,
+      "normalized_sha256": "729c895dec739c01a02720ed7036665d20b91ea5f268387d2c35a605e1aca439"
+    },
+    "crates/folio-render/src/wrap/text_ops.rs": {
+      "role": "index",
+      "sha256": "fa4b7ebbdce4d5d5c9b17874abb15543ad12594c993e66ea8341684428006849",
+      "size": 2420,
+      "normalized_sha256": "fa4b7ebbdce4d5d5c9b17874abb15543ad12594c993e66ea8341684428006849"
     },
     "crates/folio-search/Cargo.toml": {
       "role": "index",
@@ -6123,15 +6405,15 @@
     },
     "crates/folio-search/src/lib.rs": {
       "role": "index",
-      "sha256": "bb92d52e89933462ae96daf3588c3af88dc211413c51a32419d475af2e84ee86",
-      "size": 31048,
-      "normalized_sha256": "bb92d52e89933462ae96daf3588c3af88dc211413c51a32419d475af2e84ee86"
+      "sha256": "2fc164dff0acbf196f08109414f24897beeab2851128c8e6b9d3f5049b007e0c",
+      "size": 31018,
+      "normalized_sha256": "2fc164dff0acbf196f08109414f24897beeab2851128c8e6b9d3f5049b007e0c"
     },
     "crates/folio-search/src/tests.rs": {
       "role": "index",
-      "sha256": "0f88f29bf704daf0bd0b860b737fb46a2d7ec367593c6a54f9627a7128956805",
-      "size": 34509,
-      "normalized_sha256": "0f88f29bf704daf0bd0b860b737fb46a2d7ec367593c6a54f9627a7128956805"
+      "sha256": "b0e49fb46413ce892fdd7fe7c7e5d23612daabe6d91bd80571a37a431126c287",
+      "size": 34481,
+      "normalized_sha256": "b0e49fb46413ce892fdd7fe7c7e5d23612daabe6d91bd80571a37a431126c287"
     },
     "crates/folio-speech/Cargo.toml": {
       "role": "index",
@@ -6181,17 +6463,23 @@
       "size": 1775,
       "normalized_sha256": "ece6988d73d9eb2024af581133bc0177b7e8f059e03d17ff249fd85774395737"
     },
+    "crates/folio-store/examples/sync-probe.rs": {
+      "role": "index",
+      "sha256": "6d36457163b70cfc07519503c030502b682cc695f4687f40b1f57c56039770c1",
+      "size": 4866,
+      "normalized_sha256": "6d36457163b70cfc07519503c030502b682cc695f4687f40b1f57c56039770c1"
+    },
     "crates/folio-store/src/annotations.rs": {
       "role": "index",
-      "sha256": "a8a2d5e7bc3ebcdde6e1fc128b409b730d6eeae04534cd9d77fe37b141401986",
-      "size": 32419,
-      "normalized_sha256": "a8a2d5e7bc3ebcdde6e1fc128b409b730d6eeae04534cd9d77fe37b141401986"
+      "sha256": "04be77ce9fd8785590e7bd97f193645c2892acabc40704fb3f90a096df475fee",
+      "size": 32383,
+      "normalized_sha256": "04be77ce9fd8785590e7bd97f193645c2892acabc40704fb3f90a096df475fee"
     },
     "crates/folio-store/src/assets/cover.rs": {
       "role": "index",
-      "sha256": "248502d7c1ee6bd44afce2570f99802d3b5e77bb16d33a0495b7a5350617ead1",
-      "size": 8243,
-      "normalized_sha256": "248502d7c1ee6bd44afce2570f99802d3b5e77bb16d33a0495b7a5350617ead1"
+      "sha256": "fcaea8ae01452d2c31f2b37c760e7da0fa840d36d0127ccf78dce98daa6b80d7",
+      "size": 8176,
+      "normalized_sha256": "fcaea8ae01452d2c31f2b37c760e7da0fa840d36d0127ccf78dce98daa6b80d7"
     },
     "crates/folio-store/src/assets/mod.rs": {
       "role": "index",
@@ -6201,9 +6489,9 @@
     },
     "crates/folio-store/src/assets/thumb.rs": {
       "role": "index",
-      "sha256": "ef47696efe736ca8d30d3748afeb256e0c046071cb5e4e725a9e45c89f29f1ac",
-      "size": 18468,
-      "normalized_sha256": "ef47696efe736ca8d30d3748afeb256e0c046071cb5e4e725a9e45c89f29f1ac"
+      "sha256": "f1e50b813cdec584497050439ef4fa188f17694a0b19b085d863267b22457067",
+      "size": 18195,
+      "normalized_sha256": "f1e50b813cdec584497050439ef4fa188f17694a0b19b085d863267b22457067"
     },
     "crates/folio-store/src/bookmarks.rs": {
       "role": "index",
@@ -6213,9 +6501,9 @@
     },
     "crates/folio-store/src/books.rs": {
       "role": "index",
-      "sha256": "78e3496f9c84a02e98d67c66b3ac4f57763ee3c82a7fef37dd35f456a9094d4b",
-      "size": 48446,
-      "normalized_sha256": "78e3496f9c84a02e98d67c66b3ac4f57763ee3c82a7fef37dd35f456a9094d4b"
+      "sha256": "3f30c42658735720fff834de9dc946032818c2f1b210f59bc55dbff811b52aa8",
+      "size": 47347,
+      "normalized_sha256": "3f30c42658735720fff834de9dc946032818c2f1b210f59bc55dbff811b52aa8"
     },
     "crates/folio-store/src/collections.rs": {
       "role": "index",
@@ -6225,9 +6513,15 @@
     },
     "crates/folio-store/src/content.rs": {
       "role": "index",
-      "sha256": "3ba00089410a478434e30ef9ce8356c866766f23d5b4bef8d1321bb6074ac2b5",
-      "size": 34972,
-      "normalized_sha256": "3ba00089410a478434e30ef9ce8356c866766f23d5b4bef8d1321bb6074ac2b5"
+      "sha256": "ffe7b3260963b8574536b8db05b9848e58b0cd1c1718c03da0a57bc87f32ba72",
+      "size": 34831,
+      "normalized_sha256": "ffe7b3260963b8574536b8db05b9848e58b0cd1c1718c03da0a57bc87f32ba72"
+    },
+    "crates/folio-store/src/cover_backfill.rs": {
+      "role": "index",
+      "sha256": "aacf162e4554628dfca9953472d3ef0f829e75c08fe0bc8665716a31d96b501d",
+      "size": 3812,
+      "normalized_sha256": "aacf162e4554628dfca9953472d3ef0f829e75c08fe0bc8665716a31d96b501d"
     },
     "crates/folio-store/src/import_log.rs": {
       "role": "index",
@@ -6237,9 +6531,9 @@
     },
     "crates/folio-store/src/lib.rs": {
       "role": "index",
-      "sha256": "834e6a26ea9da4092f20b68134880479a51beb6c4b151f86a04ef93be3e05630",
-      "size": 11753,
-      "normalized_sha256": "834e6a26ea9da4092f20b68134880479a51beb6c4b151f86a04ef93be3e05630"
+      "sha256": "e29ff5764087b1bd36c3f168f7abc693fcd7fcfa20f230d7b72b4e65a529b4fa",
+      "size": 12765,
+      "normalized_sha256": "e29ff5764087b1bd36c3f168f7abc693fcd7fcfa20f230d7b72b4e65a529b4fa"
     },
     "crates/folio-store/src/notes.rs": {
       "role": "index",
@@ -6255,9 +6549,9 @@
     },
     "crates/folio-store/src/reading.rs": {
       "role": "index",
-      "sha256": "aff884796b773851de4666f3ef342f9ac226a70d13aaeed1635d31ee48969309",
-      "size": 27377,
-      "normalized_sha256": "aff884796b773851de4666f3ef342f9ac226a70d13aaeed1635d31ee48969309"
+      "sha256": "710cf81ac18a8fdb37de9f6936866d8afa2ef7291d11ac8db73268d2c7042084",
+      "size": 27342,
+      "normalized_sha256": "710cf81ac18a8fdb37de9f6936866d8afa2ef7291d11ac8db73268d2c7042084"
     },
     "crates/folio-store/src/record_revisions.rs": {
       "role": "index",
@@ -6309,9 +6603,9 @@
     },
     "crates/folio-store/src/schema.rs": {
       "role": "index",
-      "sha256": "49267beff0abec62f9921ac64960811e07f7354648cedc6c3713cc2d10a85b07",
-      "size": 38748,
-      "normalized_sha256": "49267beff0abec62f9921ac64960811e07f7354648cedc6c3713cc2d10a85b07"
+      "sha256": "280bf11b499ae9d0242e22015ca630308599975bdd202385332655f050a4a9c8",
+      "size": 38337,
+      "normalized_sha256": "280bf11b499ae9d0242e22015ca630308599975bdd202385332655f050a4a9c8"
     },
     "crates/folio-store/src/sources.rs": {
       "role": "index",
@@ -6363,9 +6657,9 @@
     },
     "crates/folio-store/src/tests.rs": {
       "role": "index",
-      "sha256": "fdb2b9ae31ff65c6a4e308da89b5d436d2838acaa0248dee561bcdbd67224a18",
-      "size": 95867,
-      "normalized_sha256": "fdb2b9ae31ff65c6a4e308da89b5d436d2838acaa0248dee561bcdbd67224a18"
+      "sha256": "6ad066ee6a7ecb6e084cf3437ff8f8caa06b4e1c8f6629871e48cc644e53129a",
+      "size": 95695,
+      "normalized_sha256": "6ad066ee6a7ecb6e084cf3437ff8f8caa06b4e1c8f6629871e48cc644e53129a"
     },
     "crates/folio-store/src/translations.rs": {
       "role": "index",
@@ -6447,15 +6741,15 @@
     },
     "doc/字体.md": {
       "role": "index",
-      "sha256": "d81d390086835595d8e38fa87e029fd4c145b9386adf41a1aafd1a1809b74266",
-      "size": 4771,
-      "normalized_sha256": "d81d390086835595d8e38fa87e029fd4c145b9386adf41a1aafd1a1809b74266"
+      "sha256": "7970d2dbdd805edc1e1c6ddcced4d14b9bda73c3099e2322b55ce246e5ea5764",
+      "size": 5202,
+      "normalized_sha256": "7970d2dbdd805edc1e1c6ddcced4d14b9bda73c3099e2322b55ce246e5ea5764"
     },
     "doc/工程规范.md": {
       "role": "index",
-      "sha256": "ad5514105d5a98914a3f94216d0b8d5a9259d84f2e199445129ee1bef0f4a61b",
-      "size": 5270,
-      "normalized_sha256": "ad5514105d5a98914a3f94216d0b8d5a9259d84f2e199445129ee1bef0f4a61b"
+      "sha256": "2c82cee9c5f998d24ed3bb17bd3e31fa8f4f666108cc5d4734596c753d65c2af",
+      "size": 5609,
+      "normalized_sha256": "2c82cee9c5f998d24ed3bb17bd3e31fa8f4f666108cc5d4734596c753d65c2af"
     },
     "doc/数据结构.md": {
       "role": "index",
@@ -6465,9 +6759,9 @@
     },
     "doc/文档索引.md": {
       "role": "index",
-      "sha256": "5bebd5609404133edbaae102bca6492138ac72f73f9ac8bb70a651eb2eb3c5ab",
-      "size": 1137,
-      "normalized_sha256": "5bebd5609404133edbaae102bca6492138ac72f73f9ac8bb70a651eb2eb3c5ab"
+      "sha256": "f4f00046fff4e0bd1eff8df4639fae69da3474db9043dbdd6f9abd0241af12fd",
+      "size": 1248,
+      "normalized_sha256": "f4f00046fff4e0bd1eff8df4639fae69da3474db9043dbdd6f9abd0241af12fd"
     },
     "doc/服务.md": {
       "role": "index",
@@ -6483,9 +6777,9 @@
     },
     "doc/渲染.md": {
       "role": "index",
-      "sha256": "93c9087c39af527631b834ee4d85ec011a14d8027319a556e3c211b81ee7c39c",
-      "size": 4939,
-      "normalized_sha256": "93c9087c39af527631b834ee4d85ec011a14d8027319a556e3c211b81ee7c39c"
+      "sha256": "af33dc73e46cc18a73e696e60685d6b1a299332ad3a6928b9159387e2a7873ad",
+      "size": 6961,
+      "normalized_sha256": "af33dc73e46cc18a73e696e60685d6b1a299332ad3a6928b9159387e2a7873ad"
     },
     "doc/网络.md": {
       "role": "index",
@@ -6523,11 +6817,17 @@
       "size": 49152,
       "normalized_sha256": "9875ade348ab3aaf649c4e23539ae1d1e00da205c416f70fe255e1d32cb0b380"
     },
+    "doc/计划/2026-11-23-性能基准记录.md": {
+      "role": "index",
+      "sha256": "3439e4d1ab5e38af37c8d755d88e5e63a1dee2dbb88b76ba4b8a522822d9b275",
+      "size": 4391,
+      "normalized_sha256": "3439e4d1ab5e38af37c8d755d88e5e63a1dee2dbb88b76ba4b8a522822d9b275"
+    },
     "doc/软件架构.md": {
       "role": "index",
-      "sha256": "f9c3ffc724c270553d768153b14cc6e1410ac1c1df5d6b482844adf29b0be4de",
-      "size": 35055,
-      "normalized_sha256": "f9c3ffc724c270553d768153b14cc6e1410ac1c1df5d6b482844adf29b0be4de"
+      "sha256": "f2c0b432d932d6a12203267468fefa29bc15994b1d5e2fe8e11ffa525bac8f66",
+      "size": 35708,
+      "normalized_sha256": "f2c0b432d932d6a12203267468fefa29bc15994b1d5e2fe8e11ffa525bac8f66"
     },
     "packaging/README.md": {
       "role": "index",
@@ -6625,9 +6925,9 @@
     },
     "tools/folio-xtask/src/governance.rs": {
       "role": "index",
-      "sha256": "3540d39d400a0ec63628ee6467a4ba204a4d47f0ada4b91c728293ff774790d3",
-      "size": 17073,
-      "normalized_sha256": "3540d39d400a0ec63628ee6467a4ba204a4d47f0ada4b91c728293ff774790d3"
+      "sha256": "d9c55429a17baf1b279e52f0c28a85c9bc6fe3a9acc9c9e4ee717ea0b3feecd6",
+      "size": 19608,
+      "normalized_sha256": "d9c55429a17baf1b279e52f0c28a85c9bc6fe3a9acc9c9e4ee717ea0b3feecd6"
     },
     "tools/folio-xtask/src/inventory.rs": {
       "role": "index",

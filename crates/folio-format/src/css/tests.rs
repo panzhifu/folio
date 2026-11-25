@@ -558,3 +558,53 @@ fn the_page_background_is_read_from_root_rules_only() {
         })
     );
 }
+
+/// `@supports` 用层叠的判据筛兼容块：接得住的进规则，接不住的整块丢。
+/// 逗号列表只取任一成立，括号里的 `or` / `and` 按顶层分词，判不了的仍照收。
+#[test]
+fn supports_blocks_follow_declaration_support() {
+    let accepted = rules(
+        "@supports (display: grid) { p { color: red } } \
+         @supports (writing-mode: vertical-rl), (no-such-property: x) { span { color: blue } }",
+    );
+    let color_of = |set: &RuleSet| -> Option<String> {
+        set.rules
+            .iter()
+            .find_map(|r| r.declarations.iter().find(|d| d.property == "color"))
+            .map(|d| d.value.clone())
+    };
+    assert_eq!(
+        color_of(&accepted).as_deref(),
+        Some("red"),
+        "支持的特性块应进规则"
+    );
+    assert_eq!(accepted.rules.len(), 2, "逗号列表任一成立即可");
+
+    let skipped = rules("@supports (display: no-such-value) { p { color: red } }");
+    assert!(skipped.rules.is_empty(), "不支持的整块丢掉");
+    let parsed = rules("@supports (unknown: fn(value)) { p { color: red } }");
+    assert_eq!(
+        color_of(&parsed).as_deref(),
+        Some("red"),
+        "判不了的特性宁可照收"
+    );
+
+    let logic = rules(
+        "@supports (display: grid) and (writing-mode: vertical-rl) { p { color: red } } \
+         @supports (display: grid) and (no-such-property: x) { p { color: blue } } \
+         @supports (no-such-property: x) or (writing-mode: vertical-rl) { p { color: green } } \
+         @supports not (no-such-property: x) { p { color: yellow } } \
+         @supports ((display: grid) and (writing-mode: vertical-rl)) or (no-such-property: x) { p { color: cyan } }",
+    );
+    let colors: Vec<_> = logic
+        .rules
+        .iter()
+        .filter_map(|r| r.declarations.iter().find(|d| d.property == "color"))
+        .map(|d| d.value.as_str())
+        .collect();
+    assert_eq!(
+        colors,
+        ["red", "green", "yellow", "cyan"],
+        "and/or/not 与嵌套括号按条件求值；不成立块不留"
+    );
+}

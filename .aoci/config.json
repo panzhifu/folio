@@ -275,6 +275,17 @@
         "created_by": "aoci-init",
         "order": 119,
         "enabled": true
+      },
+      {
+        "rule_id": "project-observe-skills",
+        "action": "observe",
+        "pattern": ".agents/skills/**",
+        "pattern_kind": "glob",
+        "reason": "Development-only skill assets are tooling documentation, not Folio product architecture; observing their fingerprints keeps repository drift visible without consuming whole-index cognition capacity.",
+        "source": "user",
+        "created_by": "claude-code",
+        "order": 200,
+        "enabled": true
       }
     ]
   },
