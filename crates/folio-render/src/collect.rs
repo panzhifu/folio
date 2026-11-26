@@ -1,6 +1,7 @@
 //! 收集与摆放：行内子树展平成段文本 + piece 表；块级顺序、兄弟外边距、缩进与对齐。
 //! 从 `layout` 切出来只为一个文件能一次读完；条目 `pub(super)` 只对 `layout` 内部开放。
 
+mod atoms;
 mod columns_layout;
 mod combine;
 mod grid_layout;
@@ -12,6 +13,8 @@ use std::sync::LazyLock;
 use unicode_linebreak::linebreaks;
 
 use super::cache::{BlockCache, BlockKey, CachedBlock};
+pub(crate) use atoms::{PlacedFloat, Slot, bleeds_wide, fills_the_screen, first_letter_norm, has_image, picture_src, single_image, svg_aspect, text_len_in};
+use super::flex::{align_content_offset, order_modified_len};
 use super::font::{RunStyle, StyleArena, StyleRef};
 use super::geometry::{
     BlockBox, ImageRun, Justify, JustifyMode, LineBox, LineFragment, LineRun, MarkerRun, StackMark,
@@ -24,8 +27,8 @@ use super::wrap::{
     hard_lines, hyphen_break_banned, orig_of, scan_by_char, scan_by_word, trim_end_spaces,
 };
 use folio_format::css::computed::{
-    AlignItems, CellVAlign, Clear, ComputedStyle, Direction, Display, FlexDirection, Float, Length,
-    Positioning, StyledDom, TextAlign, TextCombine, TextJustify, WordBreak,
+    AlignItems, CellVAlign, Clear, ComputedStyle, Direction, Display, Float, Length, Positioning,
+    StyledDom, TextAlign, TextCombine, TextJustify, WordBreak,
 };
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
@@ -59,21 +62,6 @@ pub(super) const STACK_SIZE_TOLERANCE: f32 = 0.08;
 fn attr_count(dom: &Dom, node: NodeId, name: &str) -> Option<i64> {
     dom.attr(node, name)
         .and_then(|v| v.trim().parse::<i64>().ok())
-}
-
-/// 摆一段行内内容的四件套：落点 `(x, y)`、行宽，以及百分比的折算基准。
-///
-/// 这四个数在 `children` → `block` → `wrap_paragraph` → `wrap_lines` 一路同进同出，
-/// 又全是裸 `f32`：收成一条结构体不只是为了让签名短，是因为**把 `width` 与 `basis`
-/// 传反了编译器不会拦**，症状是「百分比边距莫名其妙」，而无头测试里只有一屏错位。
-#[derive(Clone, Copy)]
-struct Slot {
-    x: f32,
-    y: f32,
-    /// 行宽：已扣掉这一块自己的边距、边框与内边距。
-    width: f32,
-    /// 包含块宽：`text-indent` / `padding` 那一族百分比的折算基准。
-    basis: f32,
 }
 
 pub(super) struct Ctx<'a> {
@@ -114,206 +102,6 @@ pub(super) struct Ctx<'a> {
     /// `<p>注</p><img>`），排这一块就按「图…注」的顺序来一次。只对当前这一块生效，
     /// 排完立刻清掉；换过顺序的那一块也**不走块缓存**（缓存键里没有这一格）。
     pub(super) caption_last: Option<NodeId>,
-}
-
-/// 一个已经摆出去的浮动盒。坐标是章内的**绝对值**，而且记的是**外边距盒** ——
-/// 绕着它排的那些行要让开的就是这一圈（`.img1` 那句 `margin-right: .8em` 正是靠它
-/// 变成图与字之间的那条缝）。
-#[derive(Clone, Copy)]
-pub(super) struct PlacedFloat {
-    /// 摆在右侧（`float: right`）。两侧的规则完全对称，所以只要一个布尔。
-    pub(super) right: bool,
-    pub(super) x: f32,
-    pub(super) y: f32,
-    pub(super) width: f32,
-    pub(super) height: f32,
-}
-
-impl PlacedFloat {
-    fn bottom(&self) -> f32 {
-        self.y + self.height
-    }
-
-    /// 行带 `[top, top + band)` 与这个浮动盒纵向有没有相交。CSS 的口径正是「相交就让位」，
-    /// 不是「顶边落在里面才让位」—— 后者会让压着图下缘的那一行字贴到图上。
-    fn overlaps(&self, top: f32, band: f32) -> bool {
-        self.y < top + band && self.bottom() > top
-    }
-}
-
-/// `::first-letter` 涵盖的那一段字节区间：从段首起，到第一个硬行里第一个**字母单元**
-/// 结束（数字也算 —— 浏览器给 `1984` 的首字符就是那个 `1`）。紧贴首字母的标点按 CSS
-/// 也在这个盒里（`「開」` 的引号），而它们本来就被这一段涵盖了，不必再往回找一遍。
-/// 全段一个字母单元都没有（纯标点、纯图片）时给 `None`，也就是不造这个盒。
-fn first_letter_norm(collected: &Collected) -> Option<Range<usize>> {
-    let head = collected.text.split('\n').next()?;
-    let at = head
-        .char_indices()
-        .find(|(_, ch)| ch.is_alphabetic() || ch.is_ascii_digit())?
-        .0;
-    // 区间**从段首起**，不是从那个字母起：紧贴首字母的标点按 CSS 也算在这个盒里面
-    // （`「開」` 的引号），而它们本来就被这一段涵盖了。
-    Some(0..at + head[at..].chars().next()?.len_utf8())
-}
-
-/// 有没有「这块的内容就是一张图」：跳过纯空白文本与非 `img` 的行内包裹，整棵子树里
-/// 只找一个 `<img>`。两张、或图旁边还站着正文，就不是这一档 → `None`
-/// （那一块按不浮动处理，两档判据见 [`Ctx::float_box_width`]）。
-fn single_image(dom: &Dom, node: NodeId) -> Option<NodeId> {
-    if dom.is_element(node, "img") {
-        return Some(node);
-    }
-    let mut found: Option<NodeId> = None;
-    for &child in dom.get(node).children.iter() {
-        let n = dom.get(child);
-        if n.kind == NodeKind::Text {
-            if !n.text.trim().is_empty() {
-                return None;
-            }
-            continue;
-        }
-        if n.kind != NodeKind::Element {
-            return None;
-        }
-        let img = single_image(dom, child)?;
-        if found.replace(img).is_some() {
-            return None;
-        }
-    }
-    found
-}
-
-/// 一棵子树里的非空白字数（图注那一格的长短判据）。
-fn text_len_in(dom: &Dom, node: NodeId) -> usize {
-    let n = dom.get(node);
-    if n.kind == NodeKind::Text {
-        return n.text.chars().filter(|c| !c.is_whitespace()).count();
-    }
-    n.children.iter().map(|c| text_len_in(dom, *c)).sum()
-}
-
-/// 这一块的子树里有没有 `<img>`（图注那一格不许含图，含图就是「图文混排的一块」）。
-fn has_image(dom: &Dom, node: NodeId) -> bool {
-    if dom.is_element(node, "img") {
-        return true;
-    }
-    dom.get(node).children.iter().any(|c| has_image(dom, *c))
-}
-
-/// 「这一格的内容就是一张图」的那一族，交回它的**原始**引用值（给 `images.resolve` 那张表）。
-///
-/// 认三种形状：
-/// - `<img src>` —— 一直认的那一种。
-/// - `<image href>` / `<image xlink:href>` —— SVG 里的图。DOM 存属性名时丢掉前缀并转小写
-///   （`content/dom` 的 `add_attrs_if_missing` 用 `name.local`），所以 `xlink:href` 落表就是
-///   `href`，不需要按前缀找。
-/// - `<svg …><image href="cover.jpeg"/></svg>` —— **Calibre 导出封面页的标准写法**
-///   （EPUB2 的 `titlepage.xhtml` 十有八九是这个形状，基督山伯爵那本就是）。以前只认
-///   `img`，这一章就折成 0 高：0 高的章在滚动链里不存在（`reader/book.rs` 那道
-///   `height() > 0.0` 的筛子），症状是「从第二章回滑，滑不到第一节那张封面」。
-///
-/// 只认**一张** `image` 的 svg：叠多张、或带 `path`/`text` 的那种是矢量画，该走
-/// `content::format::svg` 的整幅栅格化，不在排版里冒充一张位图。
-pub(super) fn picture_src(dom: &Dom, node: NodeId, styles: &StyledDom) -> Option<String> {
-    if dom.is_element(node, "img") {
-        return dom.attr(node, "src").map(str::to_string);
-    }
-    if dom.is_element(node, "image") {
-        return dom
-            .attr(node, "href")
-            .or_else(|| dom.attr(node, "src"))
-            .map(str::to_string);
-    }
-    if !dom.is_element(node, "svg") {
-        return None;
-    }
-    let mut images = dom
-        .element_children(node)
-        .filter(|child| dom.is_element(*child, "image"));
-    let image = images.next();
-    if image.is_some() {
-        // Calibre 封面那种 `<svg><image href/></svg>`：仍是位图那一路。
-        if images.next().is_some() {
-            return None;
-        }
-        return image.and_then(|image| {
-            dom.attr(image, "href")
-                .or_else(|| dom.attr(image, "src"))
-                .map(str::to_string)
-        });
-    }
-    // 内联矢量花边：序列化成 data URI，由图片那条路栅格化后画出来。
-    // 没有形状子节点时回 None —— 与从前「vector art 不冒充位图」一致。
-    folio_format::svg::inline_svg_data_uri(dom, node, styles)
-}
-
-/// 这一张图该不该**横向出血**到屏幕宽（多看 / 掌阅的 `duokan-bleed`）。
-///
-/// 查的是**本节点与它的每一层祖先**：真书里这一条写在包图的那个块上，不写在 `<img>`
-/// 自己身上 ——《诡秘之主》的三个类全是 `div`（`fmdG1` / `textdA1` / `textdE1`），
-/// 《基督山伯爵》同理。只查本节点样式的写法等于整条没接（而落差表会说「接住了」，
-/// 正是本仓库那条「Applied 不等于排版层读了」要挡的形状）。
-///
-/// 只认横向那两条边（`left` / `right`）。纵向出血要的是「这张图盖住页顶/页底」，
-/// 那得改分片边界，不是改一张图的盒尺寸 —— 现在没人消费，所以 `top` / `bottom`
-/// 单独置位时这里回 `false`（它确实什么都不改，与没写同一表现）。
-pub(super) fn bleeds_wide(dom: &Dom, styles: &StyledDom, node: NodeId) -> bool {
-    dom.ancestors_including_self(node)
-        .any(|id| styles.get(id).is_some_and(|style| style.bleed.horizontal()))
-}
-
-/// 这张图该不该按**屏幕宽**铺开：块级与行内两处共用这一条。
-///
-/// 「该铺」由两件事决定，缺一条都不铺：
-///
-/// - **要不要铺**（`wide`）：作者写了 `duokan-bleed`，或读者那一档是「铺满屏幕」。
-///   `wide` 由调用方先算好（`bleed` 要先被「原始尺寸」那一档压掉），这里不再重判。
-/// - **够不够大**（`big_enough`）：一块 24px 的徽标独占一段也不该被拉成满屏。判据是
-///   宽 ≥ 版心八成、或高 ≥ **一屏**八成；`object-fit: cover` 是作者显式要盖满，免这一条。
-///
-/// 「一屏」= 页高，没有页高（连续滚动那一档 `page_height` 传 `None`）就用屏高。
-/// 从前这里只认页高，于是同一张图在滚动里被放大、切到分页/仿真又缩回去 ——
-/// 读者报的「切到仿真图变小」就是这一条在两端各判了一次的结果。
-pub(super) fn fills_the_screen(
-    wide: bool,
-    w: f32,
-    h: f32,
-    column_width: f32,
-    page_height: Option<f32>,
-    screen_height: Option<f32>,
-) -> bool {
-    // `object-fit` 只决定「图在自己的盒里怎么裁/留底」，**不改盒子的宽**。
-    // 盒子的宽听 CSS；要铺到屏幕宽只有作者显式出血（`wide`）这一条。
-    if !wide {
-        return false;
-    }
-    // 「够不够大」：一张页内的插图不该被撑满整屏。一屏 = 页高，没有页高（连续滚动）
-    // 就用屏高 —— 两档同一条判据。
-    let one_screen = page_height.or(screen_height).unwrap_or(f32::INFINITY);
-    w >= column_width * 0.8 || h >= one_screen * 0.8
-}
-
-/// `<svg>` 这一格的高宽比，来自它的 `viewBox`（属性名同样已转小写）。不是 svg、或 viewBox
-/// 读不出正数时给 `None`。
-///
-/// 这一格的比例是**版面**信息而不是图片信息：Calibre 那份写的是
-/// `width="100%" height="100%" viewBox="0 0 563 751"`，意思是「铺满版心，按 563:751 摊开」。
-/// 所以有 viewBox 就按它给高 —— 图暂时解不出来也照样留这一格，否则那一章高 0、
-/// 在滚动链里根本不存在。
-pub(super) fn svg_aspect(dom: &Dom, node: NodeId) -> Option<f32> {
-    if !dom.is_element(node, "svg") {
-        return None;
-    }
-    let view = dom.attr(node, "viewbox")?;
-    let nums: Vec<f32> = view
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .filter_map(|part| part.trim().parse().ok())
-        .collect();
-    // `viewBox="min-x min-y width height"`：四位，且宽高都是正数。
-    if nums.len() != 4 || nums[2] <= 0.0 {
-        return None;
-    }
-    (nums[3] > 0.0).then_some(nums[3] / nums[2])
 }
 
 /// 一段行内内容展平后的产物。
@@ -1386,7 +1174,7 @@ impl<'a> Ctx<'a> {
         let pt = bt + style.padding_top.resolve(basis).max(0.0);
         let pb = bb + style.padding_bottom.resolve(basis).max(0.0);
         let content_w = (width - pl - pr).max(1.0);
-        let is_row = style.flex_direction == FlexDirection::Row;
+        let is_row = style.flex_direction.is_row();
 
         // 子项：跳过 display:none 与绝对定位（后者收起来等整章排完再摆，与 children 同口径）。
         let mut items: Vec<NodeId> = self.children_of(node).to_vec();
@@ -1478,7 +1266,13 @@ impl<'a> Ctx<'a> {
 
         if is_row {
             // ---- 主轴 = x ----
-            let mut finfos: Vec<super::flex::Item> = Vec::with_capacity(items.len());
+            // `order` 只改视觉顺序，DOM/文本表仍按源序，命中与选区不受影响。
+            let orders: Vec<i32> = items
+                .iter()
+                .map(|&child| self.style_of(child).order)
+                .collect();
+            let visual = order_modified_len(items.len(), &orders);
+            let mut infos_by_id: Vec<super::flex::Item> = Vec::with_capacity(items.len());
             for &child in &items {
                 let s = self.style_of(child);
                 let (_, box_w) = self.solve_block_width(s, content_w, x + pl);
@@ -1492,7 +1286,7 @@ impl<'a> Ctx<'a> {
                     .max_width
                     .map(|l| l.resolve(content_w))
                     .unwrap_or(f32::MAX);
-                finfos.push(super::flex::Item {
+                infos_by_id.push(super::flex::Item {
                     basis: basis_px,
                     grow,
                     shrink,
@@ -1500,10 +1294,48 @@ impl<'a> Ctx<'a> {
                     max: max.max(min),
                 });
             }
-            let lines = super::flex::wrap_lines(&finfos, content_w, main_gap, style.flex_wrap);
-            let mut cross_cursor = 0.0f32;
+            // `wrap_lines` 要按 order 排后的视觉序装箱；返回的下标是视觉序，摆的时候折回源序。
+            let visual_infos: Vec<super::flex::Item> =
+                visual.iter().map(|&i| infos_by_id[i]).collect();
+            let visual_lines =
+                super::flex::wrap_lines(&visual_infos, content_w, main_gap, style.flex_wrap);
+            let lines: Vec<Vec<usize>> = visual_lines
+                .iter()
+                .map(|line| {
+                    let mut source: Vec<usize> = line.iter().map(|&i| visual[i]).collect();
+                    if style.flex_direction.is_reverse() {
+                        source.reverse();
+                    }
+                    source
+                })
+                .collect();
+            let line_heights: Vec<f32> = lines
+                .iter()
+                .map(|line| {
+                    super::flex::resolve_line(&infos_by_id, line, content_w, main_gap)
+                        .iter()
+                        .fold(0.0f32, |acc, _| acc.max(1.0))
+                })
+                .collect();
+            let line_cross_max = line_heights.iter().copied().fold(0.0f32, f32::max);
+            let align_available = Self::definite(style.height, cb_h)
+                .map(|h| style.content_size(h, pt + pb))
+                .unwrap_or(content_w);
+            let (lead_cross, extra_cross, stretch_lines) = if lines.len() > 1 {
+                align_content_offset(
+                    style.align_content,
+                    align_available,
+                    line_heights.iter().sum(),
+                    lines.len(),
+                    cross_gap,
+                )
+            } else {
+                // 单行 Flex 容器不受 align-content 影响。
+                (0.0, 0.0, false)
+            };
+            let mut cross_cursor = lead_cross;
             for line in &lines {
-                let sizes = super::flex::resolve_line(&finfos, line, content_w, main_gap);
+                let sizes = super::flex::resolve_line(&infos_by_id, line, content_w, main_gap);
                 let items_sum: f32 = sizes.iter().sum();
                 let gap_total = main_gap * (line.len().saturating_sub(1)) as f32;
                 let free = content_w - items_sum - gap_total;
@@ -1517,9 +1349,18 @@ impl<'a> Ctx<'a> {
                     line_end: usize,
                     cross: f32,
                     align: AlignItems,
+                    baseline: f32,
                 }
                 let mut placed: Vec<Placed> = Vec::with_capacity(line.len());
-                let mut item_x = x + pl + lead;
+                let mut item_x = if style.flex_direction.is_reverse() {
+                    x + pl + content_w
+                        - lead
+                        - sizes.iter().sum::<f32>()
+                        - main_gap * (line.len().saturating_sub(1)) as f32
+                        - extra * (line.len().saturating_sub(1)) as f32
+                } else {
+                    x + pl + lead
+                };
                 for (k, &idx) in line.iter().enumerate() {
                     let child = items[idx];
                     let item_w = sizes[k].max(1.0);
@@ -1527,23 +1368,37 @@ impl<'a> Ctx<'a> {
                     let line_start = self.lines.len();
                     let block_start = self.blocks.len();
                     let cross = self.block(child, item_x, 0.0, item_w, item_w, None);
+                    let line_end = self.lines.len();
+                    let baseline = self.lines[line_start..line_end]
+                        .first()
+                        .map_or(0.0, |line| line.baseline);
                     placed.push(Placed {
                         block_start,
                         block_end: self.blocks.len(),
                         line_start,
-                        line_end: self.lines.len(),
+                        line_end,
                         cross,
                         align,
+                        baseline,
                     });
                     item_x += item_w + main_gap + extra;
                 }
-                let line_cross = placed.iter().map(|p| p.cross).fold(0.0f32, f32::max);
+                let line_cross = placed
+                    .iter()
+                    .map(|p| p.cross)
+                    .fold(0.0f32, f32::max)
+                    .max(if stretch_lines { line_cross_max } else { 0.0 });
+                let line_baseline = placed
+                    .iter()
+                    .filter(|p| p.align == AlignItems::Baseline)
+                    .fold(0.0f32, |acc, p| acc.max(p.baseline));
                 // align-self 逐项盖 align-items：stretch 拉满整行交叉尺寸，其余平移。
                 for p in placed {
                     let align_dy = match p.align {
                         AlignItems::Start | AlignItems::Stretch => 0.0,
                         AlignItems::End => line_cross - p.cross,
                         AlignItems::Center => (line_cross - p.cross) / 2.0,
+                        AlignItems::Baseline => line_baseline - p.baseline,
                     };
                     let dy = y + pt + cross_cursor + align_dy;
                     for line_box in &mut self.lines[p.line_start..p.line_end] {
@@ -1558,17 +1413,46 @@ impl<'a> Ctx<'a> {
                         block.height = line_cross;
                     }
                 }
-                cross_cursor += line_cross + cross_gap;
+                cross_cursor += line_cross + cross_gap + extra_cross;
             }
-            let content_h = (cross_cursor - cross_gap).max(0.0);
+            let total_cross = (cross_cursor - cross_gap - extra_cross).max(0.0);
+            let used_cross = if stretch_lines {
+                align_available
+            } else {
+                total_cross + lead_cross
+            };
             self.close_block(
                 index,
-                pt + Self::used_content_height(style, content_h, pt + pb, cb_h) + pb,
+                pt + Self::used_content_height(style, used_cross, pt + pb, cb_h) + pb,
             )
         } else {
             // ---- 主轴 = y（高度 auto，按固有高依次堆；交叉轴 = x 走 align-items）----
-            let mut cursor = 0.0f32;
-            for &child in &items {
+            let orders: Vec<i32> = items
+                .iter()
+                .map(|&child| self.style_of(child).order)
+                .collect();
+            let ordered = order_modified_len(items.len(), &orders);
+            let reverse = style.flex_direction.is_reverse();
+            let mut cursor = if reverse {
+                let total: f32 = ordered
+                    .iter()
+                    .map(|&idx| {
+                        let child = items[idx];
+                        let align = self.style_of(child).align_self.unwrap_or(style.align_items);
+                        let w = if align == AlignItems::Stretch {
+                            content_w
+                        } else {
+                            self.flex_intrinsic_width(child, content_w).min(content_w)
+                        };
+                        self.block_light(child, w, w, None)
+                    })
+                    .sum();
+                (total + main_gap * (ordered.len().saturating_sub(1)) as f32).max(0.0)
+            } else {
+                0.0
+            };
+            for &idx in &ordered {
+                let child = items[idx];
                 let align = self.style_of(child).align_self.unwrap_or(style.align_items);
                 // 交叉尺寸：stretch 铺满内容宽；否则量固有宽。
                 let item_w = match align {
@@ -1580,12 +1464,21 @@ impl<'a> Ctx<'a> {
                     AlignItems::Start | AlignItems::Stretch => 0.0,
                     AlignItems::End => cross_free,
                     AlignItems::Center => cross_free / 2.0,
+                    AlignItems::Baseline => 0.0,
                 };
                 let item_x = x + pl + dx;
-                let h = self.block(child, item_x, y + pt + cursor, item_w, content_w, None);
-                cursor += h + main_gap;
+                if reverse {
+                    let h = self.block_light(child, item_w, item_w, None);
+                    cursor -= h;
+                    let _ = self.block(child, item_x, y + pt + cursor, item_w, item_w, None);
+                    cursor -= main_gap;
+                } else {
+                    let _ = self.block(child, item_x, y + pt + cursor, item_w, content_w, None);
+                    let h = self.blocks.last().map_or(0.0, |b| b.height);
+                    cursor += h + main_gap;
+                }
             }
-            let content_h = (cursor - main_gap).max(0.0);
+            let content_h = (cursor + if reverse { main_gap } else { -main_gap }).max(0.0);
             self.close_block(
                 index,
                 pt + Self::used_content_height(style, content_h, pt + pb, cb_h) + pb,

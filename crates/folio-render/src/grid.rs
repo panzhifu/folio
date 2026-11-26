@@ -1,28 +1,29 @@
-//! 网格：列轨道求解与自动放置（CSS Grid 的简化子集）。
+//! 网格：轨道求解与自动放置（CSS Grid 的简化子集）。
 //!
-//! 与 `flex` / `table` 同一层：输入是轨道定义、可用宽与各列内容宽，输出是每列宽与
-//! 每个子项的 (行, 列)。实排与量高两条路都调这一份，两份几何从构造上同源。
+//! 与 `flex` / `table` 同一层：输入是轨道定义、可用尺寸与各轨道内容尺寸，输出是
+//! 每列/每行宽高与每个子项的 (行, 列)。实排与量高两条路都调这一份，两份几何从构造上同源。
 //!
 //! 落地范围（如实记录，别当已做）：
-//! - 列轨道：固定长度、百分比、`fr`、`minmax(长度, 长度)`、`minmax(长度, fr)`、`auto`
-//!   （`auto` 取该列内容最大宽）。行轨道不读 `grid-template-rows`，一律按内容高。
+//! - 轨道：固定长度、百分比、`fr`、`minmax(长度, 长度)`、`minmax(长度, fr)`、`auto`
+//!   （`auto` 取该轨道内容最大尺寸）。行轨道用同一套求解，内容高由排版层先量出。
 //! - 放置：显式 `grid-column` / `grid-row`（线号 / `span N`）+ 行主序稀疏自动放置；
 //!   跨行/跨列占住的格子会被后续项跳过，跨行格不够高时把缺口均摊进所占行。
 //! - 对齐：容器 `align-items` 用于行内纵向；子项 `justify-self` 用于列内横向。
-//!   `align-self` 与嵌套 grid 不在这一档。
+//!   `align-self` 已由逐项覆盖，`inline-grid` 仍按行内流处理。
 
 use folio_format::css::computed::GridTrack;
 
-/// 求解列宽。`auto_widths[i]` 是第 `i` 列的内容最大宽（只对 `auto` 轨道有意义）。
+/// 求解一条轴的轨道尺寸。`auto_sizes[i]` 是第 `i` 条轨道的内容尺寸
+/// （只对 `auto` 轨道有意义）。
 ///
 /// 先给固定轨道与 `auto` 轨道结清尺寸，再把剩余空间按 `fr` 比例分给弹性轨道
-/// （弹性轨道有 `minmax` 下界时先扣下界再分）。可用宽不足以放下所有下界时按实际
-/// 尺寸排、表格整体溢出，不缩字。
-pub(super) fn resolve_columns(
+/// （弹性轨道有 `minmax` 下界时先扣下界再分）。可用尺寸不足以放下所有下界时按实际
+/// 尺寸排、整体溢出，不缩字。
+pub(super) fn resolve_tracks(
     tracks: &[GridTrack],
     available: f32,
     gap: f32,
-    auto_widths: &[f32],
+    auto_sizes: &[f32],
 ) -> Vec<f32> {
     let n = tracks.len();
     let mut widths = vec![0.0f32; n];
@@ -41,7 +42,7 @@ pub(super) fn resolve_columns(
                 fr[i] = f.max(0.0);
             }
             GridTrack::Auto => {
-                widths[i] = auto_widths.get(i).copied().unwrap_or(0.0).max(0.0);
+                widths[i] = auto_sizes.get(i).copied().unwrap_or(0.0).max(0.0);
             }
         }
     }
@@ -58,6 +59,16 @@ pub(super) fn resolve_columns(
         }
     }
     widths
+}
+
+/// 求解列宽：一条轴的通用求解在 [`resolve_tracks`]。
+pub(super) fn resolve_columns(
+    tracks: &[GridTrack],
+    available: f32,
+    gap: f32,
+    auto_widths: &[f32],
+) -> Vec<f32> {
+    resolve_tracks(tracks, available, gap, auto_widths)
 }
 
 /// 一个子项的定位意图：行/列起点（1-based，None = 自动）与跨格数。

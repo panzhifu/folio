@@ -387,6 +387,7 @@ fn reference_seeds(layout: &Layout, styles: &StyledDom) -> Vec<DecorSeed> {
             background_rect,
             origin_rect,
             full_bleed: false,
+            clip: None,
             background: style.background_color,
             radius: style.corner_radii(block.width, block.height),
             border: [

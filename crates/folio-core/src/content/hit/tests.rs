@@ -802,3 +802,46 @@ fn text_combine_hits_and_highlights_as_one_cell() {
         first[0]
     );
 }
+
+/// `overflow` 真裁切接上命中与选区：整行裁掉的行不产矩形，裁剪框外的落点不命中，
+/// 但可见文本坐标表不动（源锚点没有被裁短）。
+#[test]
+fn overflow_visible_lines_are_not_hittable_and_drop_selection_rects() {
+    let chapter = typeset(
+        "<body><div class='box'><p>甲乙</p><p>丙丁</p><p>戊己</p></div></body>",
+        ".box { height: 28px; overflow: hidden } p { margin: 0; font-size: 16px; line-height: 28px }",
+        200.0,
+    );
+    let block = chapter.layout.line_clip(0).expect("第一段在裁剪框里");
+    let outside = chapter.layout.line_clip(2).expect("第三段也在裁剪框里");
+    assert!(chapter.layout.line_clipped(2), "第三段在 28px 高的盒外");
+    assert_eq!(block, outside, "三行读同一份折好的裁剪框");
+
+    let line = &chapter.layout.lines[0];
+    let y = line.y + line.height * 0.5;
+    assert!(
+        hit_test(&chapter.layout, &chapter.dom, &chapter.map, &Mono, 5.0, y).is_some(),
+        "框内的字照旧点得到"
+    );
+    let clipped = &chapter.layout.lines[2];
+    let clipped_y = clipped.y + clipped.height * 0.5;
+    assert!(
+        hit_test(
+            &chapter.layout,
+            &chapter.dom,
+            &chapter.map,
+            &Mono,
+            5.0,
+            clipped_y
+        )
+        .is_none(),
+        "裁掉的那一行不该还能命中"
+    );
+
+    let all = chapter.map.chars();
+    let rects = rects_for_range(&chapter.layout, &chapter.dom, &chapter.map, &Mono, 0..all);
+    assert!(
+        rects.iter().all(|rect| rect.y < chapter.layout.lines[2].y),
+        "选区矩形不落在被裁掉的行上：{rects:?}"
+    );
+}

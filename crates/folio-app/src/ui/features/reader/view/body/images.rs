@@ -423,7 +423,7 @@ pub(super) fn image_child(
     // 静态时 slide 为 0，等价于从前那一层，只是多一个不占位的裁切壳。
     let animated = image.stack_slide.abs() > 0.01 || image.stack_incoming;
     let slide = if animated { image.stack_slide } else { 0.0 };
-    let frame = div()
+    let mut frame = div()
         .absolute()
         .left(px(image.x))
         .top(px(image.top))
@@ -449,6 +449,18 @@ pub(super) fn image_child(
                         .h(px(h)),
                 ),
         );
+    // CSS `overflow` 祖先给这一图的裁剪框：外层是给 `object-fit` 的那一格用的固定框，
+    // 再套一层同样大小的框就把祖先溢出也裁掉（GPUI 的 `overflow_hidden` 只认自身框）。
+    if let Some(clip) = image.clip {
+        frame = div()
+            .absolute()
+            .left(clip.origin.x)
+            .top(clip.origin.y)
+            .w(clip.size.width)
+            .h(clip.size.height)
+            .overflow_hidden()
+            .child(frame);
+    }
     // 脚注标记优先：它是「注」图，不是插图，点它要的是注文而不是放大。
     if let Some(note) = image.footnote {
         return footnote_marker(frame, note, reader.clone(), index);

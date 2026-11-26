@@ -527,6 +527,19 @@ pub(super) fn decoration_child(
     if let Some(outline) = decor.outline {
         push_outline(&mut parts, &decor, outline);
     }
+    if let Some(clip) = decor.clip {
+        parts = vec![
+            div()
+                .absolute()
+                .left(clip.origin.x)
+                .top(clip.origin.y)
+                .w(clip.size.width)
+                .h(clip.size.height)
+                .overflow_hidden()
+                .children(std::mem::take(&mut parts))
+                .into_any_element(),
+        ];
+    }
     parts
 }
 

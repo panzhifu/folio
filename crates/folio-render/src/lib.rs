@@ -58,8 +58,8 @@ use folio_format::dom::{Dom, NodeId};
 pub use cache::BlockCache;
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap, has_cjk_latin_boundary};
 pub use geometry::{
-    BlockBox, ColumnRule, DecorPicture, DecorSeed, ImageRun, Justify, JustifyMode, Layout,
-    LayoutOptions, LineBox, LineFragment, LineRun, MarkerRun, StackMark,
+    BlockBox, ClipRect, ColumnRule, DecorPicture, DecorSeed, ImageRun, Justify, JustifyMode,
+    Layout, LayoutOptions, LineBox, LineFragment, LineRun, MarkerRun, StackMark,
 };
 pub use key::{LayoutInputs, LayoutKey, METRICS_REV, content_hash, quantize_px};
 pub use page::{Page, PageList};
@@ -278,6 +278,8 @@ fn layout_inner(
         }
     }
     out.column_rules = ctx.column_rules;
+    // `overflow` 的裁剪框与样式同源，排完折一次；之后命中/选区/绘制只读这张表。
+    out.fold_clips(styles);
     // 层叠序：每条行沿 owner 的祖先链找最近的层叠上下文，取 z。绘制侧按它重排谁盖住谁；
     // 正文源序、命中与分页一律不变。全部为 0 时零回归。
     out.line_z = stacking::compute_line_z(dom, styles, &out);

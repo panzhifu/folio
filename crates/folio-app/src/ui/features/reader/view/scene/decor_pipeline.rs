@@ -6,12 +6,42 @@
 
 use folio_core::content::format::css::computed::{BorderStyle, Color};
 use folio_core::layout::DecorSeed;
-use gpui_kit::Hsla;
+use gpui_kit::{Bounds, Hsla, Pixels, point, px, size};
 
 use super::tiles::background_tiles;
 use super::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
 use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::run_color;
+
+/// 把排版层的 `ClipRect` 折成屏幕框；平移规则与 `Scene::build` 里的 inline/cross 同源。
+///
+/// 只裁单轴（`overflow-x` 或 `overflow-y`）时，另一轴用 `±∞` 表示。GPUI 的
+/// `ContentMask` 只收有限矩形，所以这里把无限的那两端换成远大于视口的常数；
+/// 它随后会与窗口自己的 mask 取交，那一轴等价于没裁。
+pub(in crate::ui::features::reader) fn screen_clip(
+    rect: folio_core::layout::ClipRect,
+    origin_y: f32,
+    vertical: bool,
+    slide: f32,
+    x: f32,
+    top: f32,
+) -> Bounds<Pixels> {
+    // 比任何一屏都大得多，又远没到 `origin + size` 溢出的量级。
+    const FAR: f32 = 1.0e6;
+    let x0 = if rect.x0.is_finite() { rect.x0 } else { -FAR };
+    let x1 = if rect.x1.is_finite() { rect.x1 } else { FAR };
+    let y0 = if rect.y0.is_finite() { rect.y0 } else { -FAR };
+    let y1 = if rect.y1.is_finite() { rect.y1 } else { FAR };
+    let (left, top) = if vertical {
+        (x + x0 + slide, top + y0)
+    } else {
+        (x + x0, y0 - origin_y + top)
+    };
+    Bounds {
+        origin: point(px(left), px(top)),
+        size: size(px(x1 - x0), px(y1 - y0)),
+    }
+}
 
 /// 栏间分隔线从排版坐标到绘制单元的折法：一条栏线就是一个「只有一条边的装饰块」。
 ///
@@ -65,6 +95,7 @@ fn place_column_rules(
             box_shadows: Vec::new(),
             outline: None,
             backdrop_blur: None,
+            clip: None,
         });
     }
     out
@@ -219,6 +250,9 @@ pub(in crate::ui::features::reader) fn place_decorations(
                     offset,
                 }),
             backdrop_blur: seed.backdrop_blur,
+            clip: seed
+                .clip
+                .map(|rect| screen_clip(rect, origin_y, vertical, slide, x, top)),
         });
     }
     out.extend(place_column_rules(

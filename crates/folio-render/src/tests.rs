@@ -1,5 +1,5 @@
-//! E1/E2/E3 块级 + 行内 + 图片布局。几何用「汉字 1 em、拉丁 0.5 em」的 mock
-//! `Measure` 断言；真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
+//! E1/E2/E3 块级 + 行内 + 图片布局。几何用「汉字 1 em、拉丁 0.5 em」的 mock `Measure`
+//! 断言；真实字体度量在 app 侧接入，逻辑同一。只依赖公开 API。
 
 use crate::wrap::{Sizes, collect};
 use crate::{
@@ -3661,6 +3661,7 @@ mod generated;
 mod grid;
 mod index;
 mod inline;
+mod overflow;
 mod stacking;
 mod table;
 mod text;

@@ -7,7 +7,7 @@ use folio_core::content::format::css::computed::{
     BorderStyle,
 };
 use folio_core::layout::{DecorPicture, DecorSeed};
-use gpui_kit::Hsla;
+use gpui_kit::{Bounds, Hsla, Pixels};
 
 /// 可见范围内一块盒子的块级装饰：背景色与四边边框（实心画）。
 ///
@@ -49,6 +49,9 @@ pub struct BlockDecor {
     /// `backdrop-filter: blur(<px>)` 的半径。`None` = 没有这条声明。
     /// 绘制侧先糊底下那一块、再画本块的底色（`body::decor::decoration_child`）。
     pub backdrop_blur: Option<f32>,
+    /// 祖先 `overflow: hidden|clip` 的裁剪框（屏幕坐标），`None` = 不裁。
+    /// 装饰按块画，不能逐字形裁；绘制侧给这一块套一层矩形裁剪。
+    pub clip: Option<Bounds<Pixels>>,
 }
 
 /// 一块盒子的阴影：偏移、模糊、内阴影与最终颜色。

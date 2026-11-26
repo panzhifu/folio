@@ -120,10 +120,10 @@ pub(super) fn highlight_rects(
         }
         // 横排：底色贴字墨，不铺满整条行盒（见 [`text_ink_box`]）。`rect.y` 就是行顶，
         // 行盒按 y 单调，`+0.5` 落回它自己那一行。
+        let line = &layout.lines[line_at_y(layout, rect.y + 0.5)];
         let (top, height) = if vertical {
             (rect.y, rect.height)
         } else {
-            let line = &layout.lines[line_at_y(layout, rect.y + 0.5)];
             text_ink_box(line).unwrap_or((rect.y, rect.height))
         };
         // 落位分轴：横排沿 y 减片原点，竖排沿 x 加 `slide`（推进轴从长条右缘反着数）。
@@ -133,11 +133,60 @@ pub(super) fn highlight_rects(
         } else {
             top - origin_y + header
         };
-        out.push(Bounds::new(
+        let mark = Bounds::new(
             point(px(left), px(top_at)),
             size(px(rect.width), px(height)),
-        ));
+        );
+        if let Some(mark) = clipped_mark(
+            layout,
+            line_at_y(layout, rect.y + 0.5),
+            mark,
+            x,
+            origin_y,
+            header,
+            slide,
+        ) {
+            out.push(mark);
+        }
     }
+}
+
+/// 把一条痕迹矩形夹进行盒的 overflow 裁剪框。
+///
+/// `clip` 是排版层折好的 `ClipRect`（章内物理坐标），`rect` 是已经落到**元素局部**
+/// 的屏幕矩形。这里先把 `clip` 按同一套平移翻成屏幕坐标再取交；竖排也走同一套
+/// `slide`/`origin_y`/`header` 规则，与 `Scene::build` 同源。
+fn clipped_mark(
+    layout: &folio_core::layout::Layout,
+    line: usize,
+    rect: Bounds<Pixels>,
+    x: f32,
+    origin_y: f32,
+    header: f32,
+    slide: f32,
+) -> Option<Bounds<Pixels>> {
+    let Some(clip) = layout.line_clip(line) else {
+        return Some(rect);
+    };
+    // 与 `scene::decor_pipeline::screen_clip` 同一套平移；±∞ 的那一边换成远大于
+    // 这一屏的常数，与痕迹取交时等价于没裁那一轴。
+    const FAR: f32 = 1.0e6;
+    let x0 = if clip.x0.is_finite() { clip.x0 } else { -FAR };
+    let x1 = if clip.x1.is_finite() { clip.x1 } else { FAR };
+    let y0 = if clip.y0.is_finite() { clip.y0 } else { -FAR };
+    let y1 = if clip.y1.is_finite() { clip.y1 } else { FAR };
+    let vertical = layout.vertical();
+    let left = if vertical { x + x0 + slide } else { x + x0 };
+    let top = if vertical {
+        header + y0
+    } else {
+        y0 - origin_y + header
+    };
+    let clip_screen = Bounds::new(point(px(left), px(top)), size(px(x1 - x0), px(y1 - y0)));
+    if !rect.intersects(&clip_screen) {
+        return None;
+    }
+    Some(rect.intersect(&clip_screen))
 }
 
 /// 一章的批注：库里的锚点 → 本章坐标 → 元素局部的一条条痕迹，追加进字形元素。

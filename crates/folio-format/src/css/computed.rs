@@ -11,6 +11,7 @@ mod derived;
 mod known;
 mod types;
 mod types2;
+mod types3;
 pub use cascade::cascade;
 pub(super) use known::KNOWN_UNIMPLEMENTED;
 pub use types::{
@@ -18,11 +19,13 @@ pub use types::{
     BackgroundRepeat, BackgroundSize, BackgroundTile, BoxSizing, Clear, Float,
 };
 pub use types2::{
+
     BackgroundClip, BreakWhen, CellVAlign, Color, ColumnFill, ColumnSpan, Cursor, FontKerning,
     FontSmoothing, FontStretch, Hyphens, InlineVAlign, Length, Positioning, RubyAlign,
     RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextCombine, TextRendering, TextShadow,
     TextTransform, WordBreak,
 };
+pub use types3::{AlignContent, AlignItems, FlexDirection, FlexWrap, JustifyContent, JustifySelf};
 
 use crate::dom::NodeId;
 use std::sync::Arc;
@@ -295,56 +298,6 @@ pub enum Display {
     InlineGrid,
 }
 
-/// `flex-direction`：主轴方向。只收 `row` / `column`（`-reverse` 本子集不做）。
-///
-/// 它是**逻辑**方向而非物理 x/y：`row` 沿书写模式的行内轴，`column` 沿块轴，
-/// 竖排下由排版层用 [`WritingMode`] 的投影折成物理坐标。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum FlexDirection {
-    #[default]
-    Row,
-    Column,
-}
-
-/// `flex-wrap`：主轴放不下时是否换行。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum FlexWrap {
-    #[default]
-    NoWrap,
-    Wrap,
-}
-
-/// `align-items`：子项在**交叉轴**上的对齐。`baseline` 本子集不做（它要字形度量对齐）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum AlignItems {
-    #[default]
-    Stretch,
-    Start,
-    End,
-    Center,
-}
-
-/// `justify-self`：grid 子项在自身格子里的**行内轴**对齐。初值 `auto` 按 stretch 处理。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum JustifySelf {
-    #[default]
-    Auto,
-    Start,
-    End,
-    Center,
-    Stretch,
-}
-
-/// `justify-content`：子项在**主轴**上的分布。只收书里用到的四档。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum JustifyContent {
-    #[default]
-    Start,
-    End,
-    Center,
-    SpaceBetween,
-}
-
 /// `transform` 里会建立层叠上下文、且绘制侧能兑现的那一部分。
 ///
 /// 完整矩阵与 3D 变换不做（落进 `ignored`）。这里只留层叠相关、能折成简单平移/缩放的
@@ -420,7 +373,7 @@ pub enum Visibility {
     Collapse,
 }
 
-/// `grid-template-columns` 里的一条轨道尺寸：固定 px、百分比、`fr` 弹性、或 `minmax(min,max)`。
+/// `grid-template-columns`/`grid-template-rows` 的轨道尺寸：固定 px、百分比、`fr` 或 `minmax`。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GridTrack {
     Length(Length),
@@ -636,6 +589,8 @@ pub struct ComputedStyle {
     pub align_self: Option<AlignItems>,
     /// 主轴分布。不继承。
     pub justify_content: JustifyContent,
+    /// 多行 Flex 容器的交叉轴行分布。不继承；列主轴降级为 `Stretch`。
+    pub align_content: AlignContent,
     /// `gap` 的两个分量：主轴为 `row` 时 `column_gap` 是横缝、`row_gap` 是纵缝；
     /// 主轴为 `column` 时互换。CSS 里 `gap` / `row-gap` / `column-gap` **不继承**。
     pub row_gap: Option<Length>,
@@ -655,6 +610,8 @@ pub struct ComputedStyle {
     pub flex_grow: f32,
     pub flex_shrink: f32,
     pub flex_basis: Option<Length>,
+    /// Flex 子项的视觉顺序（order-modified document order）。不继承。
+    pub order: i32,
     /// `z-index`：层叠顺序。只对定位元素与 Flex 子项生效，见 `stacking`。不继承。
     pub z_index: i32,
     /// `opacity`：不透明度，`1.0` = 初值（不建立层叠上下文）。不继承。
@@ -700,8 +657,9 @@ pub struct ComputedStyle {
     pub text_combine: TextCombine,
     /// `text-size-adjust` / `-webkit-text-size-adjust`：阅读器字号提示（100% = 不缩放）。
     pub text_size_adjust: Option<f32>,
-    /// `grid-template-columns` 的轨道定义与 `quotes`（均可继承 quotes、grid 轨道不继承）。
+    /// `grid-template-columns` / `grid-template-rows` 轨道定义（均不继承），与 `quotes` 同放。
     pub grid_template_columns: Arc<[GridTrack]>,
+    pub grid_template_rows: Arc<[GridTrack]>,
     pub quotes: Option<[QuotePair; 2]>,
     /// `background-clip`：底色与背景图裁到哪个盒。不继承。初值 `border-box`。
     pub background_clip: BackgroundClip,
@@ -956,20 +914,14 @@ impl Default for ComputedStyle {
             padding_right: Length::ZERO,
             display: Display::Block,
             flex_direction: FlexDirection::default(),
-            flex_wrap: FlexWrap::default(),
-            align_items: AlignItems::default(),
-            align_self: None,
-            justify_content: JustifyContent::default(),
-            row_gap: None,
-            column_gap: None,
-            column_count: None,
-            column_width: None,
+            flex_wrap: FlexWrap::default(), align_items: AlignItems::default(), align_self: None,
+            justify_content: JustifyContent::default(), align_content: AlignContent::default(),
+            row_gap: None, column_gap: None,
+            column_count: None, column_width: None,
             column_fill: ColumnFill::Balance,
             column_rule: BorderEdge::default(),
             column_span: ColumnSpan::default(),
-            flex_grow: 0.0,
-            flex_shrink: 1.0,
-            flex_basis: None,
+            flex_grow: 0.0, flex_shrink: 1.0, flex_basis: None, order: 0,
             z_index: 0,
             opacity: 1.0,
             paint_opacity: 1.0,
@@ -995,7 +947,7 @@ impl Default for ComputedStyle {
             text_transform: TextTransform::None,
             text_combine: TextCombine::None,
             text_size_adjust: None,
-            grid_template_columns: Arc::from(Vec::new()),
+            grid_template_columns: Arc::from(Vec::new()), grid_template_rows: Arc::from(Vec::new()),
             background_clip: BackgroundClip::BorderBox,
             background_origin: BackgroundClip::PaddingBox,
             grid_column_start: None,
@@ -1153,17 +1105,15 @@ impl std::hash::Hash for ComputedStyle {
         (self.flex_wrap as u8).hash(h);
         (self.align_items as u8).hash(h);
         self.align_self.map(|v| v as u8).hash(h);
-        (self.justify_content as u8).hash(h);
-        opt_len(&self.row_gap, h);
-        opt_len(&self.column_gap, h);
+        (self.justify_content as u8).hash(h); (self.align_content as u8).hash(h);
+        opt_len(&self.row_gap, h); opt_len(&self.column_gap, h);
         self.column_count.hash(h);
         opt_len(&self.column_width, h);
         (self.column_fill as u8, self.column_span as u8).hash(h);
         self.column_rule.width.to_bits().hash(h);
         (self.column_rule.style as u8, self.column_rule.color).hash(h);
-        f(self.flex_grow, h);
-        f(self.flex_shrink, h);
-        opt_len(&self.flex_basis, h);
+        f(self.flex_grow, h); f(self.flex_shrink, h); opt_len(&self.flex_basis, h);
+        self.order.hash(h);
         self.z_index.hash(h);
         f(self.opacity, h);
         f(self.paint_opacity, h);
@@ -1218,7 +1168,7 @@ impl std::hash::Hash for ComputedStyle {
         (self.text_transform as u8).hash(h);
         self.text_combine.hash(h);
         self.text_size_adjust.map(f32::to_bits).hash(h);
-        self.grid_template_columns.len().hash(h);
+        (self.grid_template_columns.len(), self.grid_template_rows.len()).hash(h); // grid 轨道长度
         (self.background_clip as u8).hash(h);
         self.backdrop_blur.map(f32::to_bits).hash(h);
         (self.background_origin as u8).hash(h);
@@ -1227,7 +1177,8 @@ impl std::hash::Hash for ComputedStyle {
         self.grid_row_start.hash(h);
         self.grid_row_span.hash(h);
         (self.justify_self as u8).hash(h);
-        for track in self.grid_template_columns.iter() {
+        let tracks = self.grid_template_columns.iter().chain(self.grid_template_rows.iter());
+        for track in tracks {
             match track {
                 GridTrack::Length(l) => {
                     0u8.hash(h);

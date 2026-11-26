@@ -1946,7 +1946,7 @@ fn paint_picture_page(
             // 这一张是「铺满这一页的整页图」，不是哪一叠里的一张。
             stack: None,
             stack_slide: 0.0,
-            stack_incoming: false,
+            stack_incoming: false, clip: None,
         });
         if role.draws_main() && turn.is_none() {
             let size = if contain {

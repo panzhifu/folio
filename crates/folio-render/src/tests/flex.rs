@@ -9,7 +9,8 @@ use crate::{Dom, Layout, LayoutOptions, NoImages, layout};
 // 度量桩：汉字 16px、拉丁 8px、行高 28。Flex 子项按主轴排，坐标全在逻辑域，
 // 竖排由 Layout::assemble 转置，所以同一套断言横竖共用。
 
-/// 按 tag 取子项的边框盒 `(x, y, w, h)`，按文档序。
+/// 按 tag 取子项的边框盒 `(x, y, w, h)`，按 CSS `order`-modified 视觉序。
+/// 函数名保留 `flex_boxes` 是为旧用例少改；返回顺序用页面上的左右/上下位置来定。
 fn flex_boxes(dom: &Dom, laid: &Layout, tag_name: &str) -> Vec<(f32, f32, f32, f32)> {
     laid.blocks
         .iter()
@@ -97,6 +98,121 @@ fn flex_row_wrap_breaks_into_lines() {
     let boxes = flex_boxes(&dom, &laid, "i");
     // 每项 basis 50，版心 90 → 一行放不下一对(100)，第二个子项换到下一行。
     assert!(boxes[1].1 > boxes[0].1, "第二个子项换到下一行");
+}
+
+#[test]
+fn flex_row_reverse_mirrors_the_main_axis() {
+    let html = "<div><i class='a'>甲</i><i class='b'>乙</i></div>";
+    let css = "div { display: flex; flex-direction: row-reverse }";
+    let (dom, laid) = typeset(html, css, 200.0);
+    let container = find(&dom, "div");
+    let mut children = dom.element_children(container);
+    let a = children.next().unwrap();
+    let b = children.next().unwrap();
+    let box_of = |node| {
+        laid.blocks
+            .iter()
+            .find(|block| block.node == node && block.border_box)
+            .unwrap()
+    };
+    // 源序 a,b；反向后 b 贴起点，a 贴在 b 右侧。DOM 表不变，命中与选区仍按源序。
+    assert!(
+        box_of(a).x > box_of(b).x,
+        "反向后第一个源序项在右边：{:?} {:?}",
+        box_of(a),
+        box_of(b)
+    );
+}
+
+#[test]
+fn flex_order_changes_visual_but_not_source_order() {
+    let html = "<div><i class='a'>甲</i><i class='b'>乙</i></div>";
+    let css = "div { display: flex } .a { order: 2 } .b { order: -1 }";
+    let (dom, laid) = typeset(html, css, 200.0);
+    let container = find(&dom, "div");
+    let mut children = dom.element_children(container);
+    let a = children.next().unwrap();
+    let b = children.next().unwrap();
+    let box_of = |node| {
+        laid.blocks
+            .iter()
+            .find(|block| block.node == node && block.border_box)
+            .unwrap()
+    };
+    assert!(
+        box_of(b).x < box_of(a).x,
+        "order 小的 b 先摆：{:?} {:?}",
+        box_of(a),
+        box_of(b)
+    );
+}
+
+#[test]
+fn flex_column_reverse_stacks_from_the_bottom() {
+    let html = "<div><i class='a'>甲</i><i class='b'>乙</i></div>";
+    let css = "div { display: flex; flex-direction: column-reverse; height: 100px }";
+    let (dom, laid) = typeset(html, css, 200.0);
+    let container = find(&dom, "div");
+    let mut children = dom.element_children(container);
+    let a = children.next().unwrap();
+    let b = children.next().unwrap();
+    let box_of = |node| {
+        laid.blocks
+            .iter()
+            .find(|block| block.node == node && block.border_box)
+            .unwrap()
+    };
+    // 反向 column：源序第一项从底部起，所以 a 在下、b 在上。
+    assert!(
+        box_of(a).y > box_of(b).y,
+        "反向 column 把源序第一项放在下面：{:?} {:?}",
+        box_of(a),
+        box_of(b)
+    );
+}
+
+#[test]
+fn flex_justify_space_evenly_spreads_all_gaps() {
+    let html = "<div><i>甲</i><i>乙</i></div>";
+    let css = "div { display: flex; justify-content: space-evenly }";
+    let (dom, laid) = typeset(html, css, 200.0);
+    let boxes = flex_boxes(&dom, &laid, "i");
+    // 每项 16，自由 168；三道等缝各 56 → 起点 56 与 56+16+56=128。
+    assert!((boxes[0].0 - 56.0).abs() < 0.01, "{boxes:?}");
+    assert!((boxes[1].0 - 128.0).abs() < 0.01, "{boxes:?}");
+}
+
+#[test]
+fn flex_align_content_space_between_spreads_multiple_lines() {
+    let html = "<div><i>甲</i><i>乙</i><i>丙</i></div>";
+    let css = "div { display: flex; flex-wrap: wrap; align-content: space-between; height: 100px } i { flex: 0 1 50px }";
+    let (dom, laid) = typeset(html, css, 90.0);
+    let boxes = flex_boxes(&dom, &laid, "i");
+    assert!(boxes[1].1 > boxes[0].1, "前两项在第一行");
+    assert!(boxes[2].1 > boxes[1].1, "第三项在第二行");
+    assert!(
+        boxes[2].1 + boxes[2].3 > boxes[0].1 + 84.0,
+        "space-between 把两行拉开到容器上下：{boxes:?}"
+    );
+}
+
+#[test]
+fn flex_align_items_baseline_aligns_first_lines() {
+    let html = "<div><i class='a'>甲</i><i class='b'>乙</i></div>";
+    let css = "div { display: flex; align-items: baseline } .a { font-size: 40px } .b { font-size: 16px }";
+    let (dom, laid) = typeset(html, css, 200.0);
+    let boxes = flex_boxes(&dom, &laid, "i");
+    let baseline = |node| {
+        laid.lines
+            .iter()
+            .find(|l| l.owner == node)
+            .map(|l| l.y + l.baseline)
+    };
+    let container = find(&dom, "div");
+    let mut children = dom.element_children(container);
+    let a = children.next().unwrap();
+    let b = children.next().unwrap();
+    assert_eq!(baseline(a), baseline(b), "两项首行基线要对齐：{boxes:?}");
 }
 
 #[test]

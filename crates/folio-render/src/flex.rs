@@ -7,7 +7,7 @@
 //! 坐标全是**逻辑**的：主轴在横排是 x、竖排由外层的 `Layout::assemble` 统一转置。这里只
 //! 谈「沿主轴走了多远」，不碰物理 x/y —— 所以横排竖排共用同一套算法。
 
-use folio_format::css::computed::{FlexWrap, JustifyContent};
+use folio_format::css::computed::{AlignContent, FlexWrap, JustifyContent};
 
 /// 一个 Flex 子项进入主轴分配前的已知量，全部 CSS px。
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +122,63 @@ pub(super) fn justify_offset(free: f32, item_count: usize, mode: JustifyContent)
             };
             (0.0, extra)
         }
+        JustifyContent::SpaceAround | JustifyContent::SpaceEvenly if item_count == 0 => (0.0, 0.0),
+        JustifyContent::SpaceAround | JustifyContent::SpaceEvenly if item_count == 1 => {
+            (free / 2.0, 0.0)
+        }
+        JustifyContent::SpaceAround => (free / (2 * item_count) as f32, free / item_count as f32),
+        JustifyContent::SpaceEvenly => {
+            let unit = free / (item_count + 1) as f32;
+            (unit, unit)
+        }
+    }
+}
+
+/// 按 `order` 排出的视觉顺序：相同 order 保持 DOM 源序（稳定排序）。
+pub(super) fn order_modified_len(len: usize, orders: &[i32]) -> Vec<usize> {
+    let mut out: Vec<usize> = (0..len).collect();
+    out.sort_by_key(|&i| (orders.get(i).copied().unwrap_or(0), i));
+    out
+}
+
+/// 多行 Flex 容器的交叉轴分布：返回首行偏移、行间额外缝、每行是否拉伸。
+pub(super) fn align_content_offset(
+    mode: AlignContent,
+    available: f32,
+    used: f32,
+    line_count: usize,
+    gap: f32,
+) -> (f32, f32, bool) {
+    let free = (available - used).max(0.0);
+    let extra_gap = gap.max(0.0) * line_count.saturating_sub(1) as f32;
+    let free = (free - extra_gap).max(0.0);
+    match mode {
+        AlignContent::Stretch if line_count > 0 => (0.0, free / line_count as f32, true),
+        AlignContent::Stretch => (0.0, 0.0, false),
+        AlignContent::Start => (0.0, 0.0, false),
+        AlignContent::End => (free, 0.0, false),
+        AlignContent::Center => (free / 2.0, 0.0, false),
+        AlignContent::SpaceBetween => (
+            0.0,
+            if line_count > 1 {
+                free / (line_count - 1) as f32
+            } else {
+                0.0
+            },
+            false,
+        ),
+        AlignContent::SpaceAround if line_count == 0 => (0.0, 0.0, false),
+        AlignContent::SpaceAround if line_count == 1 => (free / 2.0, 0.0, false),
+        AlignContent::SpaceAround => (
+            free / (2 * line_count) as f32,
+            free / line_count as f32,
+            false,
+        ),
+        AlignContent::SpaceEvenly if line_count == 0 => (0.0, 0.0, false),
+        AlignContent::SpaceEvenly => {
+            let unit = free / (line_count + 1) as f32;
+            (unit, unit, false)
+        }
     }
 }
 
@@ -207,5 +264,38 @@ mod tests {
             (50.0, 0.0)
         );
         assert_eq!(justify_offset(100.0, 2, JustifyContent::End), (100.0, 0.0));
+        assert_eq!(
+            justify_offset(100.0, 2, JustifyContent::SpaceAround),
+            (25.0, 50.0)
+        );
+        assert_eq!(
+            justify_offset(100.0, 2, JustifyContent::SpaceEvenly),
+            (100.0 / 3.0, 100.0 / 3.0)
+        );
+        assert_eq!(
+            justify_offset(100.0, 1, JustifyContent::SpaceEvenly),
+            (50.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn order_modified_order_is_stable() {
+        assert_eq!(order_modified_len(4, &[0, -1, 0, 2]), vec![1, 0, 2, 3]);
+    }
+
+    #[test]
+    fn align_content_distributes_multiple_lines() {
+        assert_eq!(
+            align_content_offset(AlignContent::SpaceBetween, 300.0, 200.0, 2, 0.0),
+            (0.0, 100.0, false)
+        );
+        assert_eq!(
+            align_content_offset(AlignContent::SpaceEvenly, 300.0, 200.0, 2, 0.0),
+            (100.0 / 3.0, 100.0 / 3.0, false)
+        );
+        assert_eq!(
+            align_content_offset(AlignContent::Stretch, 300.0, 200.0, 2, 0.0),
+            (0.0, 50.0, true)
+        );
     }
 }

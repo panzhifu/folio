@@ -1,21 +1,21 @@
 //! 排版结果的数据形状：run、行片段、行盒、块盒、`Layout` 与其查询，加上 `LayoutOptions`。
-//!
-//! 从 `layout` 主模块切出来只为了一个文件能一次读完；跨文件的条目用
-//! `pub(super)`，即**只对 `layout` 内部开放**，不属于对外公开面。
+//! 从 `layout` 主模块切出来只为了一个文件能一次读完；跨文件条目用 `pub(super)`，只对 layout 内部开放。
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
-use folio_format::css::computed::ObjectFit;
 use folio_format::css::computed::{
+    ObjectFit,
     BackgroundAttachment, BackgroundClip, ComputedStyle, Display, StyledDom, TextAlign, WritingMode,
 };
 use folio_format::dom::NodeId;
 use folio_format::metrics::Metric;
 
+mod clip;
 mod seed;
+pub use clip::ClipRect;
 pub use seed::{ColumnRule, DecorPicture, DecorSeed};
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
@@ -261,6 +261,8 @@ pub struct Layout {
     flow: WritingMode,
     /// 第 `i` 行属于 `blocks` 哪条；与 `lines` 等长，`u32::MAX` = 无归属（手工拼表）。
     owner: Vec<u32>,
+    /// 每个块的包含块下标。先序区间折叠一次，`None` = 最外层。
+    block_parent: Vec<Option<u32>>,
     /// 行盒是否**严格叠放**：沿推进轴上一条的底不超过下一条的顶（见 [`Self::flow_start`]）。
     /// 真排版满足，但那是假设；二分错了是**静默答错**（点这行选中别处）。所以为假时按推进轴
     /// 的查询退回线性扫 —— 慢一点但不会答错（接负外边距那天症状先出现在速度上）。
@@ -269,6 +271,12 @@ pub struct Layout {
     pub line_z: Vec<Option<Arc<[i32]>>>,
     /// 多栏的栏间线（横排竖带/竖排横带）。
     pub column_rules: Vec<ColumnRule>,
+    /// 每一行的 `overflow` 裁剪框（所有 overflow 祖先取交），与 `lines` 等长。
+    ///
+    /// 排完、样式还在手边时折一次（[`Self::fold_clips`]）；命中、选区与绘制之后
+    /// 都只读这张表，不再各自沿块树问一遍。空表 = 还没折过（手工拼表的测试），
+    /// 那时一律按「没有裁剪」处理。
+    line_clips: Vec<Option<ClipRect>>,
 }
 
 /// 把**逻辑横排**长条整体投影成竖排物理坐标。断行、基线、shaping、命中
@@ -374,6 +382,7 @@ impl Layout {
             transposed(blocks, lines, width, height, flow)
         };
         let owner = fold_line_owner(&blocks, lines.len());
+        let block_parent = clip::fold_block_parents(&blocks);
         let mut out = Self {
             blocks,
             lines,
@@ -381,10 +390,12 @@ impl Layout {
             height,
             flow,
             owner,
+            block_parent,
             stacked: false,
             root_full_bleed: false,
             line_z: Vec::new(),
             column_rules: Vec::new(),
+            line_clips: Vec::new(),
         };
         // 叠放性最后才折：那条判据问的是「沿推进轴的底边」，而那两个入口是 `Layout` 的
         // 方法（竖排的起点要按长条总长翻面，那份信息在 `self` 上）。
@@ -572,11 +583,8 @@ impl Layout {
     /// 答案是排完时折好的那张表（[`fold_line_owner`]），O(1)，与折叠前那句
     /// `blocks.iter().rev().find(…)` 同一条规则：按表序逐个写入，最后留在格里的就是最深的块。
     pub fn block_of_line(&self, i: usize) -> Option<&BlockBox> {
-        let at = *self.owner.get(i)?;
-        if at == u32::MAX {
-            return None;
-        }
-        self.blocks.get(at as usize)
+        let at = self.line_owner(i)?;
+        self.blocks.get(at)
     }
 
     /// 与可见带 `[from_y, to_y)` 有关的那些行 —— **绘制那一帧只该问这个数**：
@@ -713,6 +721,7 @@ impl Layout {
                 background_rect,
                 origin_rect,
                 full_bleed,
+                clip: self.ancestor_clip_rect(index, styles),
                 background: style.background_color,
                 radius: style.corner_radii(block.width, block.height),
                 border: [

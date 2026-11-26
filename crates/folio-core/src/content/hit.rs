@@ -66,6 +66,16 @@ fn combine_second(fragments: &[LineFragment], index: usize) -> Option<&LineRun> 
         .then_some(second)
 }
 
+/// 屏幕/排版位置是否落在这行的 overflow 裁剪框里。
+///
+/// 裁剪框由排版层在样式还在手边时折好，命中与绘制读同一张表；没折过（手拼表的测试）
+/// 时 `None`，与 CSS `overflow: visible` 等价。
+fn clipped_point(layout: &Layout, line: usize, x: f32, y: f32) -> bool {
+    layout
+        .line_clip(line)
+        .is_some_and(|clip| !clip.contains(x, y))
+}
+
 /// 屏幕位置 → 字符偏移。
 ///
 /// 纵向夹到最近的行，横向按字符**前进量的中点**判归属 —— 点在字的右半边算下一个字之前。
@@ -93,6 +103,10 @@ pub fn hit_test(
     };
     let line_index = line_at_y(layout, along_flow);
     let line = &layout.lines[line_index];
+    // 落点被 overflow 祖先裁掉时整条命中作废，但源字符坐标一点不改。
+    if clipped_point(layout, line_index, x, y) {
+        return None;
+    }
     // 这一行的文本边界。没有字符的行（纯图片 / 空行）给不出坐标。
     let line_range = line_chars(layout, dom, map, line_index)?;
     let block = layout.block_of_line(line_index)?;
@@ -327,6 +341,11 @@ pub fn rects_for_range_in(
         let Some(line_range) = line_chars(layout, dom, map, line_index) else {
             continue;
         };
+        // 整行落在裁剪框外时不产矩形；只相交的那一行交给绘制侧逐字形裁，
+        // 这里仍返回原矩形，调用方按同一框裁高亮（锚点/选区坐标不动）。
+        if layout.line_clipped(line_index) {
+            continue;
+        }
         // 这一行与选区的交集为空就跳过。
         let from = line_range.start.max(start);
         let to = line_range.end.min(end);

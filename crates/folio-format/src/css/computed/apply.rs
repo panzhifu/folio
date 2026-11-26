@@ -10,11 +10,11 @@ use values::*;
 pub(crate) use values::{apply_in_cascade_order, parse_inline_style};
 
 use super::{
-    AlignItems, BackgroundClip, BorderStyle, BoxSizing, CellVAlign, ComputedStyle, DecorationStyle,
-    Direction, Display, EmphasisPosition, FlexDirection, FlexWrap, Hyphens, InlineVAlign,
-    JustifyContent, JustifySelf, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow, Positioning,
-    RubyAlign, RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign, TextJustify,
-    TextTransform, Visibility, WordBreak,
+    AlignContent, AlignItems, BackgroundClip, BorderStyle, BoxSizing, CellVAlign, ComputedStyle,
+    DecorationStyle, Direction, Display, EmphasisPosition, FlexDirection, FlexWrap, Hyphens,
+    InlineVAlign, JustifyContent, JustifySelf, KNOWN_UNIMPLEMENTED, Length, ObjectFit, Overflow,
+    Positioning, RubyAlign, RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextAlign,
+    TextJustify, TextTransform, Visibility, WordBreak,
 };
 use crate::css::Declaration;
 use crate::css::features;
@@ -25,6 +25,9 @@ use crate::css::value::{
     parse_list_style, parse_text_shadow, parse_writing_mode, relative_weight, set_edge, set_length,
     set_margin, set_min_length, set_px,
 };
+
+#[inline]
+fn set<T: Copy>(slot: &mut T, value: T) -> bool { *slot = value; true }
 
 /// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。
 /// `root_px` 是根字号（rem 按它折）；`parent` 是 font-size 的相对基准（CSS 的规定）。
@@ -709,14 +712,10 @@ pub(super) fn apply(
         },
         // ---- Flex 容器属性。CSS 规定这些不继承，值写错整条作废 ----
         "flex-direction" => match value.to_ascii_lowercase().as_str() {
-            "row" => {
-                style.flex_direction = FlexDirection::Row;
-                true
-            }
-            "column" => {
-                style.flex_direction = FlexDirection::Column;
-                true
-            }
+            "row" => set(&mut style.flex_direction, FlexDirection::Row),
+            "row-reverse" => set(&mut style.flex_direction, FlexDirection::RowReverse),
+            "column" => set(&mut style.flex_direction, FlexDirection::Column),
+            "column-reverse" => set(&mut style.flex_direction, FlexDirection::ColumnReverse),
             _ => false,
         },
         "flex-wrap" => match value.to_ascii_lowercase().as_str() {
@@ -735,62 +734,41 @@ pub(super) fn apply(
                 style.align_self = None;
                 true
             }
-            "stretch" => {
-                style.align_self = Some(AlignItems::Stretch);
-                true
-            }
-            "start" => {
-                style.align_self = Some(AlignItems::Start);
-                true
-            }
-            "end" => {
-                style.align_self = Some(AlignItems::End);
-                true
-            }
-            "center" => {
-                style.align_self = Some(AlignItems::Center);
-                true
-            }
+            "stretch" => set(&mut style.align_self, Some(AlignItems::Stretch)),
+            "start" => set(&mut style.align_self, Some(AlignItems::Start)),
+            "end" => set(&mut style.align_self, Some(AlignItems::End)),
+            "center" => set(&mut style.align_self, Some(AlignItems::Center)),
+            "baseline" => set(&mut style.align_self, Some(AlignItems::Baseline)),
             _ => false,
         },
         "align-items" => match value.to_ascii_lowercase().as_str() {
-            "stretch" => {
-                style.align_items = AlignItems::Stretch;
-                true
-            }
-            "flex-start" | "start" => {
-                style.align_items = AlignItems::Start;
-                true
-            }
-            "flex-end" | "end" => {
-                style.align_items = AlignItems::End;
-                true
-            }
-            "center" => {
-                style.align_items = AlignItems::Center;
-                true
-            }
+            "stretch" => set(&mut style.align_items, AlignItems::Stretch),
+            "flex-start" | "start" => set(&mut style.align_items, AlignItems::Start),
+            "flex-end" | "end" => set(&mut style.align_items, AlignItems::End),
+            "center" => set(&mut style.align_items, AlignItems::Center),
+            "baseline" => set(&mut style.align_items, AlignItems::Baseline),
             _ => false,
         },
         "justify-content" => match value.to_ascii_lowercase().as_str() {
-            "flex-start" | "start" => {
-                style.justify_content = JustifyContent::Start;
-                true
-            }
-            "flex-end" | "end" => {
-                style.justify_content = JustifyContent::End;
-                true
-            }
-            "center" => {
-                style.justify_content = JustifyContent::Center;
-                true
-            }
-            "space-between" => {
-                style.justify_content = JustifyContent::SpaceBetween;
-                true
-            }
+            "flex-start" | "start" => set(&mut style.justify_content, JustifyContent::Start),
+            "flex-end" | "end" => set(&mut style.justify_content, JustifyContent::End),
+            "center" => set(&mut style.justify_content, JustifyContent::Center),
+            "space-between" => set(&mut style.justify_content, JustifyContent::SpaceBetween),
+            "space-around" => set(&mut style.justify_content, JustifyContent::SpaceAround),
+            "space-evenly" => set(&mut style.justify_content, JustifyContent::SpaceEvenly),
             _ => false,
         },
+        "align-content" => match value.to_ascii_lowercase().as_str() {
+            "normal" | "stretch" => set(&mut style.align_content, AlignContent::Stretch),
+            "flex-start" | "start" => set(&mut style.align_content, AlignContent::Start),
+            "flex-end" | "end" => set(&mut style.align_content, AlignContent::End),
+            "center" => set(&mut style.align_content, AlignContent::Center),
+            "space-between" => set(&mut style.align_content, AlignContent::SpaceBetween),
+            "space-around" => set(&mut style.align_content, AlignContent::SpaceAround),
+            "space-evenly" => set(&mut style.align_content, AlignContent::SpaceEvenly),
+            _ => false,
+        },
+        "order" => value.trim().parse::<i32>().ok().is_some_and(|v| set(&mut style.order, v)),
         // `gap: <row> [<column>]`：一列值时横纵相同，两列值时分别给 row/column。
         // `normal` 是初值，落到 `None`（不插缝）。
         "gap" => {
@@ -1074,7 +1052,8 @@ pub(super) fn apply(
         // quotes 折成字面字符（见 `computed::cascade`），这里先记下意图。
         "content" => apply_content(style, value),
         // ---- grid 定位（轨道定义 + 子项显式线号）----
-        "grid-template-columns" => apply_grid_tracks(style, value, own, root_px),
+        "grid-template-columns" => apply_grid_tracks(style, value, own, root_px, false),
+        "grid-template-rows" => apply_grid_tracks(style, value, own, root_px, true),
         "grid-column" => apply_grid_line(style, true, value),
         "grid-row" => apply_grid_line(style, false, value),
         "justify-self" => match value.to_ascii_lowercase().as_str() {

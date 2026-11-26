@@ -9,7 +9,7 @@ use std::ops::Range;
 use folio_core::content::format::css::computed::BorderStyle;
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::DecorPicture;
-use gpui_kit::{Hsla, SharedString, hsla};
+use gpui_kit::{Bounds, Hsla, Pixels, SharedString, hsla};
 
 use crate::ui::features::reader::model::chapter_layout::{Document, RowFragment};
 use crate::ui::features::reader::model::measure::FontCache;
@@ -24,7 +24,7 @@ use crate::ui::foundation::style::{desaturate, desaturate_author, run_color, run
 pub(in crate::ui::features::reader) use decor::full_page_picture;
 use decor::overscan_backdrop;
 pub use decor::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
-use decor_pipeline::place_decorations;
+use decor_pipeline::{place_decorations, screen_clip};
 use tiles::background_tiles;
 pub(in crate::ui::features::reader) use tiles::picture_fills_width;
 
@@ -45,32 +45,25 @@ pub struct VisibleImage {
     ///
     /// 三个用途：点开大图时从**这一张**开始、横滑切图认领这一笔、图上那格 `k/n` 角标。
     pub stack: Option<folio_core::layout::StackMark>,
-    /// 这张图的活儿：怎么取字节、按什么格式解、进图集占多少。
-    ///
-    /// **像素不在这里** —— 场景只负责「这一帧该摆哪张图」，解没解好由
-    /// [`crate::ui::features::reader::model::image_atlas::ImageAtlas`] 答（`view.rs` 在搭元素那一趟问它）。
-    /// 摆位用的是排版给的框，与字节无关，所以这一格给得起。
+    /// 这张图的活儿：怎么取字节、按什么格式解、进图集占多少。**像素不在这里** ——
+    /// 场景只负责「这一帧该摆哪张图」，解没解好由 [`image_atlas`] 答，摆位用排版给的框。
+    /// [`image_atlas`]: crate::ui::features::reader::model::image_atlas::ImageAtlas
     pub image: crate::ui::foundation::images::DecodeRequest,
-    /// 这张图是不是一条**脚注引用**的标记；是的话带上注文。
-    ///
-    /// 老书把脚注标记做成一张 10px 的「注」图（`蛇结` 就是），图外面套一条
-    /// `<a epub:type="noteref">`。文字命中碰不到这种标记（`<a>` 里没有一个可命中的
-    /// 字符），所以注文在这里解好带出来，绘制层点它时直接抬弹层，不再去开图片查看器。
+    /// 这张图是不是一条**脚注引用**的标记；是的话带上注文。老书把脚注标记做成一张
+    /// 10px 的「注」图（`蛇结`），外面套一条 `<a epub:type="noteref">`；文字命中碰不到
+    /// 它，所以注文在这里解好带出来，绘制层点它时直接抬弹层。
     pub footnote: Option<String>,
-    /// 这张图怎么在 `width × height` 这个盒里摆（CSS 的 `object-fit`）。
-    ///
-    /// 排版期只定盒；`cover` / `contain` 要的「按哪一块区域采样」在这一格。以前一条不认，
-    /// 修图书里 `width:100%; object-fit:cover` 的图会被拉成扁的（读者 2026-10-30 报的
-    /// 「图片显示效果」）。
+    /// 这张图怎么在 `width × height` 这个盒里摆（CSS 的 `object-fit`）。排版期只定盒；
+    /// `cover` / `contain` 要的采样区域在这一格（读者 2026-10-30 报的拉扁问题）。
     pub fit: crate::ui::foundation::images::ObjectFit,
-    /// 叠图切图那一笔里，这一张要平移多少（逻辑像素）；0 = 不动。
-    ///
-    /// 只有动画在跑时才非 0：旧图往手指那一侧滑走、新图从另一侧进来，两图都画，
-    /// 由 [`super::body::images::image_child`] 的裁切层把超出那一格的部分切掉。
+    /// 叠图切图时这一张的平移（逻辑像素）；0 = 不动。只有动画在跑时才非 0，
+    /// 由 [`super::body::images::image_child`] 的裁切层切掉超出那一格的部分。
     pub stack_slide: f32,
     /// 这一张是不是动画里「正在进来」的那一张。角标 `k/n` 只画在其中一张上，
     /// 免得动画那 180 ms 里屏上出现两个同样的角标。
     pub stack_incoming: bool,
+    /// 祖先 `overflow: hidden|clip` 的屏幕裁剪框；`None` = 不裁。
+    pub clip: Option<Bounds<Pixels>>,
 }
 
 /// 一屏（或一栏）要画的全部单元。
@@ -177,6 +170,9 @@ impl Scene {
             if at + layout.flow_thickness(line) < cull.start || at > cull.end {
                 continue;
             }
+            // CSS overflow 的裁剪框：排版后折一次，这里只翻成屏幕坐标。
+            if layout.line_clipped(ix) { continue; }
+            let clip = layout.line_clip(ix).map(|r| screen_clip(r, origin_y, vertical, slide, x, top));
             // 一叠图只画「现在这一张」那一格，其余各张整行跳过 —— 图与它的注都是
             // 那一叠第 k 格的行，所以切图时图注跟着一起换，不必另立一条规则。
             // 「看第几张」住界面（`Document::stack_current`）：它变了不许重排、不许改页数。
@@ -272,11 +268,8 @@ impl Scene {
                             .smoothing(unit.font_smoothing)
                             .opacity(unit.opacity)
                             .transform(unit.transform)
-                            .spacing(
-                                unit.letter_spacing,
-                                unit.justify,
-                                unit.justify_shift,
-                            ),
+                            .spacing(unit.letter_spacing, unit.justify, unit.justify_shift)
+                            .clipped_to(clip), // overflow 祖先的矩形裁剪（屏幕坐标）
                         );
                     }
                     RowFragment::Image(placed) => {
@@ -343,6 +336,7 @@ impl Scene {
                                 // `chapter_layout` 摆位时已经折过来），不再 `into` 一次。
                                 fit: placed.fit,
                                 image,
+                                clip,
                                 stack: line.stack,
                                 stack_slide,
                                 stack_incoming,
@@ -452,6 +446,7 @@ pub(in crate::ui::features::reader) fn backdrop_decor(
         box_shadows: Vec::new(),
         outline: None,
         backdrop_blur: None,
+        clip: None,
     })
 }
 
@@ -532,6 +527,7 @@ mod tests {
             origin_rect: (12.0, y, 300.0, height),
             background: Some(Color(193, 204, 192, 255)),
             full_bleed: false,
+            clip: None,
             radius: [0.0; 4],
             border: [
                 (0.0, None, BorderStyle::None),
@@ -1116,6 +1112,7 @@ mod tests {
                     offset: 1.0,
                 }),
                 backdrop_blur: None,
+                clip: None,
             }],
             ..Default::default()
         };

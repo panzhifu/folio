@@ -1,14 +1,24 @@
+
+
 //! `ComputedStyle` 计算：单位换算、继承、ignored 计数、层叠端到端。
 //! 只依赖公开 API。选择器命中和 specificity / `!important` 的排序在 `css::tests`
+
 //! 已覆盖，这里验的是「拿到有序声明之后算得对不对」。
 
 use crate::css::computed::{
     BackgroundAttachment, BackgroundAxis, BackgroundClip, BackgroundEdge, BackgroundPosition,
     BackgroundSize, BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color,
-    ComputedStyle, DeclStatus, DecorationStyle, Direction, Display, Float, Hyphens, Length,
-    ListStyle, RubyAlign, RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak, WritingMode,
-    cascade, declaration_status,
+
+    ComputedStyle, DeclStatus, DecorationStyle, Direction, Display, Float, GridTrack, Hyphens,
+    Length, ListStyle, RubyAlign, RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak,
+    WritingMode, cascade, declaration_status,
 };
+
+mod flex_styles;
+mod grid_styles;
+mod new_styles;
+mod ruby;
+
 use crate::css::{Declaration, Origin, RuleSet};
 use crate::dom::{Dom, NodeId};
 
@@ -3553,12 +3563,11 @@ fn display_flex_is_a_real_container() {
 
 // ---- Flex 子集 + column-gap + 层叠（2026-11-23）----
 
-/// Flex 容器属性只收本子集支持的取值；越界值（`baseline` / `space-around` / `-reverse`）
-/// 整条作废计入 ignored，不能悄悄当初值。
+/// Flex 容器属性接住本子集的取值；真正越界的取值整条作废计入 ignored，不能悄悄当初值。
 #[test]
 fn flex_container_properties_accept_only_the_subset() {
     use crate::css::computed::declaration_status;
-    use crate::css::computed::{AlignItems, FlexDirection, FlexWrap, JustifyContent};
+    use crate::css::computed::{AlignContent, AlignItems, FlexDirection, FlexWrap, JustifyContent};
     use crate::css::{Declaration, Origin};
 
     let status = |property: &str, value: &str| {
@@ -3574,13 +3583,22 @@ fn flex_container_properties_accept_only_the_subset() {
     };
     for (property, value) in [
         ("flex-direction", "row"),
+        ("flex-direction", "row-reverse"),
         ("flex-direction", "column"),
+        ("flex-direction", "column-reverse"),
         ("flex-wrap", "wrap"),
         ("flex-wrap", "nowrap"),
         ("align-items", "stretch"),
         ("align-items", "center"),
+        ("align-items", "baseline"),
+        ("align-self", "baseline"),
         ("justify-content", "space-between"),
+        ("justify-content", "space-around"),
+        ("justify-content", "space-evenly"),
         ("justify-content", "center"),
+        ("align-content", "space-between"),
+        ("align-content", "space-evenly"),
+        ("order", "-2"),
         ("gap", "0.35em 0.65em"),
         ("column-gap", "0.5em"),
         ("flex", "0 1 34%"),
@@ -3595,9 +3613,11 @@ fn flex_container_properties_accept_only_the_subset() {
         );
     }
     for (property, value) in [
-        ("flex-direction", "row-reverse"),
-        ("align-items", "baseline"),
-        ("justify-content", "space-around"),
+        ("flex-direction", "row sideways"),
+        ("align-items", "baseline top"),
+        ("justify-content", "space-around-and-over"),
+        ("align-content", "stretchy"),
+        ("order", "1.5"),
         ("transform", "rotate(3deg)"),
     ] {
         assert_eq!(
@@ -3610,44 +3630,23 @@ fn flex_container_properties_accept_only_the_subset() {
     let page = page(
         "<div>块</div>",
         &[(
-            "div { display:flex; flex-direction:column; flex-wrap:wrap; \
-                   align-items:stretch; justify-content:center; gap:2px 4px; \
-                   opacity:0.5; transform:scale(2) }",
+            "div { display:flex; flex-direction:column-reverse; flex-wrap:wrap; \
+                   align-items:baseline; justify-content:space-evenly; align-content:center; order:-2; \
+                   gap:2px 4px; opacity:0.5; transform:scale(2) }",
             Origin::Author,
         )],
     );
     let s = style(&page, tag(&page, "div"));
-    assert_eq!(s.flex_direction, FlexDirection::Column);
+    assert_eq!(s.flex_direction, FlexDirection::ColumnReverse);
     assert_eq!(s.flex_wrap, FlexWrap::Wrap);
-    assert_eq!(s.align_items, AlignItems::Stretch);
-    assert_eq!(s.justify_content, JustifyContent::Center);
+    assert_eq!(s.align_items, AlignItems::Baseline);
+    assert_eq!(s.justify_content, JustifyContent::SpaceEvenly);
+    assert_eq!(s.align_content, AlignContent::Center);
+    assert_eq!(s.order, -2);
     assert_eq!(s.row_gap, Some(Length::Px(2.0)));
     assert_eq!(s.column_gap, Some(Length::Px(4.0)));
     assert_eq!(s.opacity, 0.5);
     assert!(s.transform.is_some());
-}
-
-/// `flex` 简写：`0 1 34%` 拆成 grow/shrink/basis；单值长度当 basis、单值数字当 grow。
-#[test]
-fn flex_shorthand_splits_into_grow_shrink_basis() {
-    let page = author(
-        "<i>a</i><i>b</i><i>c</i>",
-        "i:nth-child(1) { flex: 0 1 34% } \
-         i:nth-child(2) { flex: 2 } \
-         i:nth-child(3) { flex: 50px }",
-    );
-    let ids = tags(&page, "i");
-    let a = style(&page, ids[0]);
-    assert_eq!(a.flex_grow, 0.0);
-    assert_eq!(a.flex_shrink, 1.0);
-    assert_eq!(a.flex_basis, Some(Length::Percent(0.34)));
-    let b = style(&page, ids[1]);
-    assert_eq!(b.flex_grow, 2.0);
-    assert_eq!(b.flex_shrink, 1.0);
-    assert_eq!(b.flex_basis, None);
-    let c = style(&page, ids[2]);
-    assert_eq!(c.flex_grow, 1.0);
-    assert_eq!(c.flex_basis, Some(Length::Px(50.0)));
 }
 
 // ---- ruby 注音（2026-10-31）----
@@ -3726,5 +3725,3 @@ fn ruby_alignment_inherits_and_the_prefixed_aliases_fold_into_it() {
     );
     assert_eq!(bad.styled.ignored, 1, "`justify` 仍要计不认识");
 }
-mod new_styles;
-mod ruby;

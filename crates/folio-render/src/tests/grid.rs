@@ -114,3 +114,81 @@ fn grid_row_span_covers_two_rows() {
         "两行合起来要撑住跨行项：{container:?} {boxes:?}"
     );
 }
+
+/// 固定行高与行间距按模板落地，作者写的行不被内容顶高。
+#[test]
+fn grid_template_rows_set_fixed_row_heights() {
+    let (dom, laid) = typeset(
+        "<div class='g'><div>甲</div><div>乙</div></div>",
+        ".g { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 40px 80px; row-gap: 10px; height: 150px } .g > div { margin: 0 } .g > div:nth-child(2) { grid-row: 2 }",
+        200.0,
+    );
+    let grid = find(&dom, "div");
+    let boxes = child_boxes(&dom, &laid, grid);
+    assert_eq!(boxes.len(), 2);
+    assert!((boxes[0].3 - 40.0).abs() < 1.0, "第一行 40：{boxes:?}");
+    assert!(
+        (boxes[1].1 - boxes[0].1 - 50.0).abs() < 1.0,
+        "第二行起点 = 40 + row-gap：{boxes:?}"
+    );
+    assert!((boxes[1].3 - 80.0).abs() < 1.0, "第二行 80：{boxes:?}");
+}
+
+/// 行模板里的 `fr` 在有明确容器高时按比例分配。
+#[test]
+fn grid_template_rows_fr_tracks_split_the_container_height() {
+    let (dom, laid) = typeset(
+        "<div class='g'><div>甲</div><div>乙</div></div>",
+        ".g { display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr 2fr; height: 300px } .g > div { margin: 0 } .g { grid-column: 1 } .g > div:nth-child(1) { grid-column: 1; grid-row: 1 } .g > div:nth-child(2) { grid-column: 1; grid-row: 2 }",
+        200.0,
+    );
+    let grid = find(&dom, "div");
+    let boxes = child_boxes(&dom, &laid, grid);
+    assert_eq!(boxes.len(), 2);
+    assert!((boxes[0].3 - 100.0).abs() < 1.0, "1fr 行 100：{boxes:?}");
+    assert!((boxes[1].3 - 200.0).abs() < 1.0, "2fr 行 200：{boxes:?}");
+}
+
+/// 模板只写一行时，多出来的自动放置行按内容高，不继承模板长度。
+#[test]
+fn grid_rows_beyond_the_template_are_implicit_auto() {
+    let (dom, laid) = typeset(
+        "<div class='g'><div>甲</div><div>乙</div><div>丙</div></div>",
+        ".g { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 30px } .g > div { margin: 0 }",
+        200.0,
+    );
+    let grid = find(&dom, "div");
+    let boxes = child_boxes(&dom, &laid, grid);
+    assert_eq!(boxes.len(), 3);
+    assert!((boxes[0].3 - 30.0).abs() < 1.0, "模板第一行 30：{boxes:?}");
+    assert!(boxes[2].1 > boxes[0].1, "第三个换行：{boxes:?}");
+    assert!(
+        boxes[2].3 > 0.0 && boxes[2].3 < 30.0,
+        "隐式行按内容高：{boxes:?}"
+    );
+}
+
+/// 块级 grid 子项递归成内层网格：孙子按内层行/列落位。
+#[test]
+fn nested_grid_places_grandchildren_in_its_own_tracks() {
+    let (dom, laid) = typeset(
+        "<div class='g'><div class='i'><div class='a'>甲</div><div class='b'>乙</div></div><div>丙</div></div>",
+        ".g { display: grid; grid-template-columns: 1fr 1fr } .g > div { margin: 0 } .i { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 20px 20px } .i > div { margin: 0 }",
+        200.0,
+    );
+    let grid = dom
+        .elements()
+        .find(|(id, _)| dom.classes(*id).any(|c| c == "i"))
+        .unwrap()
+        .0;
+    let boxes = child_boxes(&dom, &laid, grid);
+    assert_eq!(boxes.len(), 2);
+    assert!(
+        (boxes[1].0 - boxes[0].0 - 50.0).abs() < 1.0,
+        "内层两列各半：{boxes:?}"
+    );
+    assert!(
+        boxes[1].1 == boxes[0].1,
+        "两个内层子项都在第一行（第一行两列）：{boxes:?}"
+    );
+}

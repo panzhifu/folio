@@ -2,9 +2,13 @@
 //!
 //! 从 `collect` 切出来只因为 collect.rs 贴着行数上限；`impl Ctx` 的方法仍是同一个
 //! `Ctx` 的方法。轨道求解与放置这两个纯数在 `layout::grid`，这一份只做「量、摆、收口」。
+//! 行轨道的尺寸求解与跨行配平在 `rows`，避免这里再贴上限。
+
+mod rows;
 
 use super::{AlignItems, Ctx, Display, NodeId, Positioning};
 use folio_format::css::computed::{GridTrack, JustifySelf};
+use rows::{Span, auto_row_sizes, row_offsets, solve_rows, span_height};
 
 impl<'a> Ctx<'a> {
     /// 摆一个网格容器（`display: grid`），返回边框盒高。
@@ -58,6 +62,12 @@ impl<'a> Ctx<'a> {
             tracks.push(GridTrack::Auto);
         }
         let columns = tracks.len();
+        let row_tracks: Vec<GridTrack> = style.grid_template_rows.to_vec();
+        let row_basis = style
+            .height
+            .and_then(|h| Self::definite(Some(h), cb_h))
+            .map(|px| style.content_size(px, pt + pb))
+            .unwrap_or(content_w);
         let spec: Vec<crate::grid::Item> = items
             .iter()
             .map(|&child| {
@@ -70,7 +80,8 @@ impl<'a> Ctx<'a> {
                 }
             })
             .collect();
-        let (cells, rows) = crate::grid::place(columns, &spec);
+        let (cells, placed_rows) = crate::grid::place(columns, &spec);
+        let rows = placed_rows.max(row_tracks.len());
         // `auto` 轨道取该列所有子项的最大内容宽；`widths` 之后再统一求解。
         let mut auto_widths = vec![0.0f32; columns];
         for (i, &child) in items.iter().enumerate() {
@@ -92,35 +103,21 @@ impl<'a> Ctx<'a> {
                 + col_gap * (end.saturating_sub(column + 1)) as f32
         };
         if self.light {
-            let mut row_h = vec![0.0f32; rows];
-            let mut spans: Vec<(usize, usize, f32)> = Vec::with_capacity(items.len());
+            let mut measured = Vec::with_capacity(items.len());
+            let mut spans = Vec::new();
             for (i, &child) in items.iter().enumerate() {
                 let (row, column) = cells[i];
                 let child_style = self.style_of(child);
                 let span = child_style.grid_row_span.max(1) as usize;
                 let cell_w = span_width(column, child_style.grid_column_span).max(1.0);
                 let height = self.block_light(child, cell_w, cell_w, None);
-                if span == 1 {
-                    row_h[row] = row_h[row].max(height);
-                }
-                spans.push((row, span, height));
-            }
-            // 跨行格：占住的几行不够高时把缺口均摊进去（与表格同一条近似）。
-            for (row, span, height) in spans {
-                if span <= 1 {
-                    continue;
-                }
-                let end = (row + span).min(rows);
-                let covered: f32 = row_h[row..end].iter().sum::<f32>()
-                    + row_gap * (end.saturating_sub(row + 1)) as f32;
-                let deficit = height - covered;
-                if deficit > 0.0 && end > row {
-                    let share = deficit / (end - row) as f32;
-                    for h in &mut row_h[row..end] {
-                        *h += share;
-                    }
+                measured.push((row, span, height));
+                if span > 1 {
+                    spans.push(Span::new(row, span, height));
                 }
             }
+            let auto_heights = auto_row_sizes(&row_tracks, rows, measured.into_iter());
+            let row_h = solve_rows(&row_tracks, rows, row_basis, row_gap, &auto_heights, &spans);
             let content_h = row_h.iter().sum::<f32>() + row_gap * (rows.saturating_sub(1)) as f32;
             return self.close_block(
                 index,
@@ -139,6 +136,7 @@ impl<'a> Ctx<'a> {
             align: AlignItems,
         }
         let mut placed: Vec<Placed> = Vec::with_capacity(items.len());
+        let mut measured = Vec::with_capacity(items.len());
         for (i, &child) in items.iter().enumerate() {
             let (row, column) = cells[i];
             let child_style = self.style_of(child);
@@ -166,6 +164,7 @@ impl<'a> Ctx<'a> {
             let line_start = self.lines.len();
             let block_start = self.blocks.len();
             let height = self.block(child, item_x, 0.0, item_w, item_w, None);
+            measured.push((row, child_style.grid_row_span.max(1) as usize, height));
             placed.push(Placed {
                 block_start,
                 block_end: self.blocks.len(),
@@ -177,40 +176,19 @@ impl<'a> Ctx<'a> {
                 align,
             });
         }
-        let mut row_h = vec![0.0f32; rows];
-        for slot in &placed {
-            if slot.row_span == 1 {
-                row_h[slot.row] = row_h[slot.row].max(slot.height);
-            }
-        }
-        for slot in &placed {
-            if slot.row_span <= 1 {
-                continue;
-            }
-            let end = (slot.row + slot.row_span).min(rows);
-            let covered: f32 = row_h[slot.row..end].iter().sum::<f32>()
-                + row_gap * (end.saturating_sub(slot.row + 1)) as f32;
-            let deficit = slot.height - covered;
-            if deficit > 0.0 && end > slot.row {
-                let share = deficit / (end - slot.row) as f32;
-                for h in &mut row_h[slot.row..end] {
-                    *h += share;
-                }
-            }
-        }
-        let mut row_y = vec![0.0f32; rows];
-        let mut cursor = 0.0f32;
-        for row in 0..rows {
-            row_y[row] = cursor;
-            cursor += row_h[row] + row_gap;
-        }
+        let auto_heights = auto_row_sizes(&row_tracks, rows, measured.into_iter());
+        let spans: Vec<Span> = placed
+            .iter()
+            .filter(|slot| slot.row_span > 1)
+            .map(|slot| Span::new(slot.row, slot.row_span, slot.height))
+            .collect();
+        let row_h = solve_rows(&row_tracks, rows, row_basis, row_gap, &auto_heights, &spans);
+        let row_y = row_offsets(&row_h, row_gap);
         for slot in placed {
             let align = slot.align;
-            let end = (slot.row + slot.row_span).min(rows);
-            let span_h: f32 = row_h[slot.row..end].iter().sum::<f32>()
-                + row_gap * (end.saturating_sub(slot.row + 1)) as f32;
+            let span_h = span_height(slot.row, slot.row_span, &row_h, row_gap);
             let align_dy = match align {
-                AlignItems::Start | AlignItems::Stretch => 0.0,
+                AlignItems::Start | AlignItems::Stretch | AlignItems::Baseline => 0.0,
                 AlignItems::End => span_h - slot.height,
                 AlignItems::Center => (span_h - slot.height) / 2.0,
             };

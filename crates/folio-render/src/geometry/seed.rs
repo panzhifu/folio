@@ -70,6 +70,9 @@ pub struct DecorSeed {
     /// 滤掉 —— 否则同一张画会在版心里再画一遍，位置还差着一个页眉与安全区。
     /// 判据与「这一章至少一屏高」那条同源（见 `layout_inner`）。
     pub full_bleed: bool,
+    /// 祖先 `overflow: hidden|clip` 给这一块的裁剪框（章内物理坐标）。
+    /// `None` = 不在任何 overflow 祖先里；块自己的 `overflow` 不裁自己的边框与底色。
+    pub clip: Option<crate::ClipRect>,
 }
 
 /// 一块背景图的一层：哪张图 + 怎么摆。全是 CSS 侧的原始数，一个像素结果都不带。
