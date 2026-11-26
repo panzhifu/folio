@@ -817,7 +817,7 @@ impl<'a> Collector<'a> {
         if run.text_combine != TextCombine::None && !self.in_note {
             combine::fold_pairs(
                 &mut self.widths,
-                self.text[start..].as_bytes(),
+                &self.text.as_bytes()[start..],
                 base,
                 run.font_size,
             );

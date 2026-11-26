@@ -31,7 +31,7 @@ pub(super) fn add_breaks(collected: &Collected, hard: &Range<usize>, breaks: &mu
     while i < hard.end {
         if bytes[i].is_ascii_digit() {
             run += 1;
-            if run % 2 == 0 && i + 1 < hard.end {
+            if run.is_multiple_of(2) && i + 1 < hard.end {
                 breaks.push(i + 1);
             }
             i += 1;
