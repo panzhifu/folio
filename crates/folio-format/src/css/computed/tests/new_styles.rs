@@ -256,6 +256,18 @@ fn text_combine_recognises_upright_and_webkit_names() {
         style(&page, tag(&page, "b")).text_combine,
         TextCombine::Digits(2)
     );
+    let page = author(
+        "<p>123</p><b>1234</b>",
+        "p { text-combine-upright: digits 3 } b { text-combine-upright: digits 4 }",
+    );
+    assert_eq!(
+        style(&page, tag(&page, "p")).text_combine,
+        TextCombine::Digits(3)
+    );
+    assert_eq!(
+        style(&page, tag(&page, "b")).text_combine,
+        TextCombine::Digits(4)
+    );
     assert_eq!(page.styled.ignored, 0);
 
     let bad = author("<p>x</p>", "p { text-combine-upright: digits 5 }");

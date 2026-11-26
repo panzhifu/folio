@@ -35,6 +35,7 @@ pub mod page;
 mod cache;
 mod collect;
 mod columns;
+pub(crate) mod combine_groups;
 mod flex;
 mod font;
 mod geometry;

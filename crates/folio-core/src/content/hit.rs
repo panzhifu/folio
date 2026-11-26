@@ -47,23 +47,28 @@ pub struct SelectionRect {
     pub height: f32,
 }
 
-/// 并格数字对里的第二位：前一片零宽、带交叉轴偏移、原文与第一位相邻。
+/// 并格数字组的最后一片：首片有宽度，后续片零宽、带交叉轴偏移、原文相邻。
 ///
 /// 并格是**一个视觉格**：命中只给「格前 / 格后」两个落点，选区也整格上色。
-/// 两位数字在竖排里左右并排，推进轴上的中点分不出它们，分开给落点只会选出半个字。
-fn combine_second(fragments: &[LineFragment], index: usize) -> Option<&LineRun> {
+/// 多位数字在竖排里左右并排，推进轴上的中点分不出它们，分开给落点只会选出半个字。
+fn combine_last(fragments: &[LineFragment], index: usize) -> Option<&LineRun> {
     let LineFragment::Text(first) = fragments.get(index)? else {
         return None;
     };
-    let LineFragment::Text(second) = fragments.get(index + 1)? else {
-        return None;
-    };
-    (first.cross_offset == 0.0
-        && second.cross_offset != 0.0
-        && second.width == 0.0
-        && first.node == second.node
-        && first.orig.end == second.orig.start)
-        .then_some(second)
+    let mut cursor = index + 1;
+    let mut last = None;
+    while let Some(LineFragment::Text(next)) = fragments.get(cursor)
+        && next.width == 0.0
+        && next.cross_offset != 0.0
+        && next.node == first.node
+        && last.map_or(first.orig.end == next.orig.start, |prev: &LineRun| {
+            prev.orig.end == next.orig.start
+        })
+    {
+        last = Some(next);
+        cursor += 1;
+    }
+    last
 }
 
 /// 屏幕/排版位置是否落在这行的 overflow 裁剪框里。
@@ -135,7 +140,7 @@ pub fn hit_test(
         let text = block.text.get(run.norm.clone()).unwrap_or("");
         let run_x = cursor + run.x_offset;
         // 并格数字对整格命中：格内只分前后，不在两位数字之间落插入点。
-        if let Some(second) = combine_second(&line.fragments, index)
+        if let Some(second) = combine_last(&line.fragments, index)
             && inline >= run_x
             && inline < run_x + run.width
         {
@@ -379,7 +384,7 @@ pub fn rects_for_range_in(
             // 与 hit_test 同套：起点按 run.width + x_offset，字缘优先 shaping。
             let run_x = cursor + run.x_offset;
             // 并格数字对是一个视觉格：选中任一位都给整格上色，不画半个字。
-            if let Some(second) = combine_second(&line.fragments, index)
+            if let Some(second) = combine_last(&line.fragments, index)
                 && let Some(first_at) = run_start
                 && let Some(second_at) = map
                     .chars_of_bytes(dom, second.node, second.orig.clone())

@@ -106,7 +106,7 @@ pub(super) fn parse_font_stretch(value: &str) -> Option<FontStretch> {
 
 /// `text-combine-upright` / `-webkit-text-combine`：`none | all | horizontal | digits <n>`。
 ///
-/// 一期只把连续两位 ASCII 数字并格；`digits 3/4` 先记下来，排版仍按两位。
+/// `digits <n>` 按 n 位成组（2–4）；`all`/`horizontal` 沿用两位并格的兼容口径。
 pub(super) fn parse_text_combine(value: &str) -> Option<TextCombine> {
     let value = value.trim().to_ascii_lowercase();
     if value == "none" {

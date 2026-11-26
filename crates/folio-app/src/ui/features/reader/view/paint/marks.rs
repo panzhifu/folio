@@ -84,7 +84,7 @@ pub(in crate::ui::features::reader) fn wave_half_waves(width: f32) -> usize {
 ///
 /// 定在 7 是照字下的空间来的：正文行高约 30、基线下那一段只有几像素，波长再短就成了
 /// 一片糊，再长则一条划线凑不出两个波、读起来像一条歪线。
-const WAVE_LENGTH: f32 = 7.0;
+pub(in crate::ui::features::reader) const WAVE_LENGTH: f32 = 7.0;
 /// 波浪线离中线最远多远（单侧振幅）。
 const WAVE_AMPLITUDE: f32 = 1.6;
 /// 波浪线那块盒子的总高 = 峰峰值。几何那一层（`view/body.rs`）按它摆盒子，

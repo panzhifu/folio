@@ -4,11 +4,12 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::collect::{Collected, DEFAULT_STYLE, IMAGE_GLYPH, ImageAtom, Piece};
+use super::combine_groups;
 use super::font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap};
 use super::geometry::{ImageRun, LineFragment, LineRun};
 use super::ports::{ImageProvider, Measure, image_size};
 use folio_format::css::computed::{
-    ComputedStyle, GeneratedContent, Hyphens, InlineVAlign, RubyPosition, StyledDom, TextCombine,
+    ComputedStyle, GeneratedContent, Hyphens, InlineVAlign, RubyPosition, StyledDom,
 };
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
@@ -16,12 +17,7 @@ mod combine;
 mod text_ops;
 use text_ops::{small_caps_upper, transform_text};
 
-/// `font-variant: small-caps` 的小写字号比例。
-///
-/// 0.8 是各家排版系统常用的那档（TeX 的 `\scshape` 与浏览器合成 small-caps 都在
-/// 0.7–0.8 之间）。整段乘这个数而不是逐字分档：逐字分档要把一个文本 piece 拆成
-/// 「本来大写 / 本来小写」两段、各自一份宽度与行盒，收益是首字母回到 1em ，
-/// 代价是收集、断行、命中三处都要多一套区间 —— 书名与人物名上不值得。
+/// `font-variant: small-caps` 的小写字号比例；整段乘这个数，不逐字分档。
 const SMALL_CAPS_SCALE: f32 = 0.8;
 
 /// 注音与基字之间的缝，按容器字号折算；0.08 em 是「贴字」那一档。
@@ -814,12 +810,15 @@ impl<'a> Collector<'a> {
             self.widths[base + offset] = w;
             prev = Some((base + offset, ch));
         }
-        if run.text_combine != TextCombine::None && !self.in_note {
-            combine::fold_pairs(
+        if let Some(size) = combine_groups::group_size(run.text_combine)
+            && !self.in_note
+        {
+            combine::fold_groups(
                 &mut self.widths,
                 &self.text.as_bytes()[start..],
                 base,
                 run.font_size,
+                size,
             );
         }
     }
@@ -835,9 +834,10 @@ impl<'a> Collector<'a> {
     ) {
         // 并格把每对第二字折进第一字：宽度已在 `push_widths` 并好，这里锚回原字。
         let run = self.arena.get(style);
-        if run.is_some_and(|run| run.text_combine != TextCombine::None) && norm.len() == orig.len()
+        if let Some(size) = run.and_then(|run| combine_groups::group_size(run.text_combine))
+            && norm.len() == orig.len()
         {
-            combine::push_pieces(self, node, norm, orig, style);
+            combine::push_pieces(self, node, norm, orig, style, size);
             return;
         }
         if norm.len() != orig.len() {

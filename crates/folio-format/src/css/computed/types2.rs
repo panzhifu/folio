@@ -39,15 +39,15 @@ pub enum FontStretch {
 
 /// `-webkit-text-combine` / `text-combine-upright`：竖排里把数字并进一格。
 ///
-/// 一期只把「连续两位 ASCII 数字」并成一格（`all` 与 `digits 2` 同解）；
-/// `digits 3/4` 保留枚举值，但排版层暂按两位处理。横排里整条不生效。
+/// 竖排里把连续数字并进一格：`all` 按两位，`digits 2/3/4` 按声明位数；
+/// 不足一组的尾部留在原格。Unicode 数字按字符边界成组，横排整条不生效。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextCombine {
     #[default]
     None,
     /// `all` / 旧 WebKit 的 `horizontal`：数字成对并格。
     All,
-    /// `digits <2-4>`；一期只兑现 2。
+    /// `digits <2-4>`：按声明位数成组。
     Digits(u8),
 }
 

@@ -1,7 +1,7 @@
 //! `columns` 块级多栏的端到端用例：两栏并排、栏缝、贪心配平进栏、栏间分隔线。
 //! 纯数（栏数解算与配平）的单测在 `columns.rs`，这一份钉的是「真排出两栏」。
 
-use super::{Mono, find, typeset};
+use super::{find, typeset};
 use folio_format::dom::NodeId;
 
 /// 四个 100 高的块装两栏：目标 200，前两个进第一栏、后两个进第二栏；

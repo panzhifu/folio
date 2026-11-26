@@ -152,3 +152,37 @@ fn text_combine_does_not_break_inside_a_pair() {
         laid.line_text(0)
     );
 }
+
+/// `digits 3/4` 与全角数字成组并排，不足一组的尾部留在原格。
+#[test]
+fn text_combine_groups_three_and_four_digits() {
+    use crate::LineFragment;
+    let widths_of = |laid: &crate::Layout| -> Vec<f32> {
+        laid.lines[0]
+            .fragments
+            .iter()
+            .filter_map(|frag| match frag {
+                LineFragment::Text(run) => Some(run.width),
+                _ => None,
+            })
+            .collect()
+    };
+    let css = "body { writing-mode: vertical-rl }                p { text-indent: 0; margin: 0; font-size: 20px; font-family: monospace;                    white-space: nowrap; text-combine-upright: digits 3 }";
+    let (_dom, laid) = typeset("<p>１２34</p>", css, 400.0);
+    let widths = widths_of(&laid);
+    assert_eq!(widths.len(), 4);
+    assert!(
+        widths[0] >= 20.0 && widths[1] == 0.0 && widths[2] == 0.0,
+        "前三位并一格：{widths:?}"
+    );
+    assert_eq!(widths[3], 10.0, "第四位不足一组，按单字原宽留在原格");
+
+    let css = "body { writing-mode: vertical-rl }                p { text-indent: 0; margin: 0; font-size: 20px; font-family: monospace;                    white-space: nowrap; text-combine-upright: digits 4 }";
+    let (_dom, laid) = typeset("<p>123456</p>", css, 400.0);
+    let widths = widths_of(&laid);
+    assert_eq!(
+        widths,
+        vec![40.0, 0.0, 0.0, 0.0, 10.0, 10.0],
+        "四位一组按最大字宽撑格，余两位不成组"
+    );
+}

@@ -28,7 +28,7 @@ use super::wrap::{
 };
 use folio_format::css::computed::{
     AlignItems, CellVAlign, Clear, ComputedStyle, Direction, Display, Float, Length, Positioning,
-    StyledDom, TextAlign, TextCombine, TextJustify, WordBreak,
+    StyledDom, TextAlign, TextJustify, WordBreak,
 };
 use folio_format::dom::{Dom, NodeId, NodeKind};
 
@@ -2277,8 +2277,8 @@ impl<'a> Ctx<'a> {
             // `word-break: break-all` 那一档同样要摘：它放开的是正文的断行机会，
             // 不是把注音与它的基字分家 —— 那样上一行只剩基字、下一行只剩注音。
             breaks.retain(|at| !collected.breaks_ruby(*at));
-            if style.text_combine != TextCombine::None {
-                combine::add_breaks(collected, &hard, &mut breaks);
+            if let Some(size) = super::combine_groups::group_size(style.text_combine) {
+                combine::add_breaks(collected, &hard, &mut breaks, size);
             }
             // `cap` 在整段里都不变，先把「有没有」问一次，别每字符问。
             let cap_norm = cap.as_ref().map(|dc| dc.norm.clone());

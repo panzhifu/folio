@@ -30,7 +30,7 @@ use crate::ui::features::reader::model::session::ReaderSession;
 
 mod decorations;
 pub(in crate::ui::features::reader) mod marks;
-pub(in crate::ui::features::reader) use marks::{Mark, WAVE_HEIGHT, paint_mark};
+pub(in crate::ui::features::reader) use marks::{Mark, WAVE_HEIGHT, WAVE_LENGTH, paint_mark, wave_half_waves};
 use decorations::{
     decoration_y, paint_emphasis, paint_rule, paint_shadows, rendering_mode, transformed_origin,
 };
