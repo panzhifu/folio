@@ -2,7 +2,7 @@
 
 #[cfg(any(target_os = "android", test))]
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use folio_core::ingest::external_source::ExternalSourceAccess;
@@ -180,6 +180,69 @@ pub(crate) fn source_access() -> Arc<dyn ExternalSourceAccess> {
     {
         Arc::new(NoExternalSources)
     }
+}
+
+/// 系统送进来的 intent 文档 URI（`ACTION_VIEW` / `ACTION_SEND`）落成 cache 里的临时
+/// 文件，交导入管线吃路径。授权只随进程存活，所以**一次读干净**最稳：`stat` 取
+/// display_name、`open` 开 fd、流式拷到盘上，不攒在内存里。
+///
+/// 目录 `intent-import-<序号>/<原名>`：`PathsSource::picked_temporary` 读完连目录
+/// 一起清，与选择器副本同一条口径。返回 `None` = 文档不存在（提供方明确说了）。
+#[cfg(target_os = "android")]
+pub(crate) fn import_uri_to_temp(uri: &str) -> io::Result<Option<PathBuf>> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let Some(metadata) = stat_uri(uri)? else {
+        return Ok(None);
+    };
+    let mut source = open_uri_fd(uri)?;
+    // display_name 可能带路径分隔符（恶意或奇葩提供方）：只取末段，取不到就给个中性名。
+    let name = Path::new(&metadata.display_name)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "document".to_owned());
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = cache_dir()?.join(format!("intent-import-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let temp = dir.join(name);
+    let mut out = std::fs::File::create(&temp)?;
+    std::io::copy(&mut source, &mut out)?;
+    Ok(Some(temp))
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn import_uri_to_temp(_uri: &str) -> std::io::Result<Option<PathBuf>> {
+    Ok(None)
+}
+
+/// 应用 cache 目录（临时副本落在这里，系统清 cache 时一并带走）。
+#[cfg(target_os = "android")]
+fn cache_dir() -> io::Result<PathBuf> {
+    use gpui_mobile::android::jni::{activity, get_string, with_env};
+    with_env(|env| {
+        let activity = activity(env)?;
+        let file = env
+            .call_method(
+                &activity,
+                ::jni::jni_str!("getCacheDir"),
+                ::jni::jni_sig!("()Ljava/io/File;"),
+                &[],
+            )
+            .and_then(|value| value.l())
+            .map_err(|_| "getCacheDir 无法递给系统".to_string())?;
+        let path = env
+            .call_method(
+                &file,
+                ::jni::jni_str!("getAbsolutePath"),
+                ::jni::jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )
+            .and_then(|value| value.l())
+            .map_err(|_| "cache path 无法递给系统".to_string())?;
+        Ok(PathBuf::from(get_string(env, &path)))
+    })
+    .map_err(io::Error::other)
 }
 
 #[cfg(target_os = "android")]

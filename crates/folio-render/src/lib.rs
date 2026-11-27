@@ -32,6 +32,8 @@
 pub mod fragment;
 pub mod page;
 
+mod audio_row;
+mod block_math;
 mod cache;
 mod collect;
 mod columns;
@@ -56,6 +58,7 @@ use folio_format::css::computed::{
 };
 use folio_format::dom::{Dom, NodeId};
 
+pub use audio_row::AudioRow;
 pub use cache::BlockCache;
 pub use font::{FontKey, RunStyle, StyleArena, StyleRef, cjk_latin_gap, has_cjk_latin_boundary};
 pub use geometry::{
@@ -135,6 +138,7 @@ fn layout_inner(
         blocks: Vec::new(),
         lines: Vec::new(),
         column_rules: Vec::new(),
+        audio_rows: Vec::new(),
         cache,
         style_hash: hashes.as_deref(),
         floats: Vec::new(),
@@ -279,6 +283,20 @@ fn layout_inner(
         }
     }
     out.column_rules = ctx.column_rules;
+    // 音频行短表与栏线同一刀投影：命中与绘制读这一份，竖排若不投影就会落在块表里
+    // 旧坐标上（静默错位）。横排原样带过。
+    if flow != WritingMode::HorizontalTb {
+        let strip = height;
+        let flip = flow == WritingMode::VerticalRl;
+        for row in &mut ctx.audio_rows {
+            let (x, y, w, h) = (row.x, row.y, row.width, row.height);
+            row.x = if flip { strip - (y + h) } else { y };
+            row.y = x;
+            row.width = h;
+            row.height = w;
+        }
+    }
+    out.audio_rows = ctx.audio_rows;
     // `overflow` 的裁剪框与样式同源，排完折一次；之后命中/选区/绘制只读这张表。
     out.fold_clips(styles);
     // 层叠序：每条行沿 owner 的祖先链找最近的层叠上下文，取 z。绘制侧按它重排谁盖住谁；

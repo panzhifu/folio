@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 简化的笔记页（lucide notebook-pen 的取形）：只给启动器当单色小图标。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path
+        android:pathData="M13.5,4.5L19.5,10.5M5,20L5.5,16L16.5,5C17.3,4.2 18.7,4.2 19.5,5C20.3,5.8 20.3,7.2 19.5,8L8.5,19L5,20Z"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="2" android:strokeLineCap="round" android:strokeLineJoin="round" />
+</vector>

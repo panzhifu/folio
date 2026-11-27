@@ -59,23 +59,19 @@ impl AppShell {
         let entering_quiet = boss_hide
             || matches!(event, stealth_service::StealthEvent::Toggle)
                 && !stealth_service::is_quiet(cx);
-        if boss_hide {
-            if let Some(layer) = self.reading.as_ref() {
-                layer.page.update(cx, |page, cx| page.flush_position(cx));
-            }
+        if boss_hide && let Some(layer) = self.reading.as_ref() {
+            layer.page.update(cx, |page, cx| page.flush_position(cx));
         }
-        if entering_quiet {
-            if let Some(layer) = self.reading.as_ref() {
-                layer.page.update(cx, |page, cx| {
-                    // 浮层一层层收：图片查看器、脚注、目录、设置、顶栏底栏各有自己的
-                    // 收场顺序，这里只重复走公开的 `dismiss_chrome`，不另排一套。
-                    for _ in 0..12 {
-                        if !page.dismiss_chrome(cx) {
-                            break;
-                        }
+        if entering_quiet && let Some(layer) = self.reading.as_ref() {
+            layer.page.update(cx, |page, cx| {
+                // 浮层一层层收：图片查看器、脚注、目录、设置、顶栏底栏各有自己的
+                // 收场顺序，这里只重复走公开的 `dismiss_chrome`，不另排一套。
+                for _ in 0..12 {
+                    if !page.dismiss_chrome(cx) {
+                        break;
                     }
-                });
-            }
+                }
+            });
         }
         stealth_service::dispatch_with_window(event, cx);
     }

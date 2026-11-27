@@ -5,6 +5,7 @@ mod atoms;
 mod columns_layout;
 mod combine;
 mod grid_layout;
+mod images;
 mod table_layout;
 
 use std::ops::Range;
@@ -12,8 +13,9 @@ use std::sync::LazyLock;
 
 use unicode_linebreak::linebreaks;
 
+use super::audio_row;
+use super::block_math::{collapse_margins, definite};
 use super::cache::{BlockCache, BlockKey, CachedBlock};
-pub(crate) use atoms::{PlacedFloat, Slot, bleeds_wide, fills_the_screen, first_letter_norm, has_image, picture_src, single_image, svg_aspect, text_len_in};
 use super::flex::{align_content_offset, order_modified_len};
 use super::font::{RunStyle, StyleArena, StyleRef};
 use super::geometry::{
@@ -25,6 +27,10 @@ use super::table;
 use super::wrap::{
     DropCap, Insets, LineAcc, LinePlace, LinePlan, Sizes, collect, hanging_width, hangs_at_end,
     hard_lines, hyphen_break_banned, orig_of, scan_by_char, scan_by_word, trim_end_spaces,
+};
+pub(crate) use atoms::{
+    PlacedFloat, Slot, bleeds_wide, fills_the_screen, first_letter_norm, has_image, picture_src,
+    single_image, svg_aspect, text_len_in,
 };
 use folio_format::css::computed::{
     AlignItems, CellVAlign, Clear, ComputedStyle, Direction, Display, Float, Length, Positioning,
@@ -74,6 +80,9 @@ pub(super) struct Ctx<'a> {
     pub(super) blocks: Vec<BlockBox>,
     pub(super) lines: Vec<LineBox>,
     pub(super) column_rules: Vec<crate::geometry::ColumnRule>,
+    /// 音频行短表：全量路径注册（量高那趟只累计高，不进表）。与块表同一批搬进
+    /// [`Layout`](crate::geometry::Layout)。
+    pub(super) audio_rows: Vec<crate::audio_row::AudioRow>,
     /// 块级缓存；`None` = 不做块级复用（[`layout`] 的默认路径）。
     pub(super) cache: Option<&'a mut BlockCache>,
     /// 每节点的子树样式哈希，与 `cache` 同生共死（见 [`subtree_style_hash`]）。
@@ -252,33 +261,6 @@ impl<'a> Ctx<'a> {
         &self.dom.get(node).children
     }
 
-    /// 作者写了尺寸就用它，没写给 `None`。`height` 那一族认 px 与**有基准的**百分比：
-    /// 百分比折自包含块的**高**，而流式排版里父块的高常由内容算出来 —— CSS 在同一条
-    /// 规则下也判 `auto`，所以「没写过」与「写了 `50%` 而上游没有既定高」是同一个数。
-    /// 基准从 [`LayoutOptions::page_height`] 一路传下来，判据写在那一格的注释上。
-    ///
-    /// 只给流内块级盒用。替换元素（`<img>` / `<svg>`）走
-    /// [`super::ports::image_size`]，那条路里百分比折得动（基准是图的可用宽）。
-    pub(super) fn definite(length: Option<Length>, cb_h: Option<f32>) -> Option<f32> {
-        match length {
-            Some(Length::Px(v)) => Some(v.max(0.0)),
-            Some(Length::Percent(p)) => cb_h.map(|basis| (p * basis).max(0.0)),
-            _ => None,
-        }
-    }
-
-    /// 相邻两个竖外边距折叠成一段净空（CSS 2.1 §10.3.4）。
-    ///
-    /// 规范那三档合成一个式子就够了：**最大正数 + 最小负数**。两个正数得较大值
-    /// （段间距不显松靠的就是这一档），一正一负得两者之和，两个负数得较负的那个。
-    ///
-    /// `0` 是这个式子的恒等元，所以调用点用 `prev_bottom = 0.0` 起手就等价于
-    /// 「前面没有兄弟」；从前这里写的是 `if prev_bottom > 0.0`，负下边距会同时踩中
-    /// 「没有前驱」和「夹回 0」两个坑 —— 换成一趟加法就没这两件事了。
-    pub(super) fn collapse_margins(top: f32, bottom: f32) -> f32 {
-        top.max(bottom).max(0.0) + top.min(bottom).min(0.0)
-    }
-
     /// 流内块级盒的横向求解（CSS 2.1 §10.3.3），返回 `(左边距, 边框盒宽)`。
     ///
     /// `avail` 是包含块内容宽，也是 `width`/`margin`/`padding` 百分比的折算基准。规则：
@@ -372,11 +354,11 @@ impl<'a> Ctx<'a> {
         // 时那一格里已经含上下的边框与内边距。`pad_border` 就是调用点那一对 `pt + pb`，
         // 由调用方传进来 —— 这一格自己不算边距，是为了不与「哪几条边算进去」再有一份定义。
         let fold = |px: f32| style.content_size(px, pad_border);
-        let mut h = Self::definite(style.height, cb_h).map_or(inner, fold);
-        if let Some(max_h) = Self::definite(style.max_height, cb_h) {
+        let mut h = definite(style.height, cb_h).map_or(inner, fold);
+        if let Some(max_h) = definite(style.max_height, cb_h) {
             h = h.min(fold(max_h));
         }
-        if let Some(min_h) = Self::definite(style.min_height, cb_h) {
+        if let Some(min_h) = definite(style.min_height, cb_h) {
             h = h.max(fold(min_h));
         }
         h
@@ -394,7 +376,7 @@ impl<'a> Ctx<'a> {
         cb_h: Option<f32>,
         pad_border: f32,
     ) -> Option<f32> {
-        Self::definite(style.height, cb_h).map(|px| style.content_size(px, pad_border))
+        definite(style.height, cb_h).map(|px| style.content_size(px, pad_border))
     }
 
     /// 摆放 `container` 的流内子内容。`x`/`y` 是其内容盒左上角（绝对），返回内容高度。
@@ -414,80 +396,6 @@ impl<'a> Ctx<'a> {
             self.dom.tag_name(node),
             Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6")
         )
-    }
-
-    /// 这一块是不是一个「图单元」：恰好一张图，外加最多一段**短图注**。
-    ///
-    /// 与 [`single_image`] 的分别是后者只认「一个字的字都没有」那一档，而多看/掌阅那族
-    /// 导出的画廊 cell 长这样（《诡秘之主》ffwp000.xhtml「诡秘地理日志」连着九个）：
-    ///
-    /// ```html
-    /// <div class="duokan-image-gallery-cell">
-    ///   <img src="../Images/xm001.jpg"/><p class="tpcrb"><b>灾祸之城</b></p>
-    /// </div>
-    /// ```
-    ///
-    /// 图旁边站着一段注，`single_image` 当场回 `None` —— 这本书的画廊因此从来没叠过，
-    /// 一张注一块地排成一条长带。
-    ///
-    /// **注写在图前也算**（《哈利·波特全集》art.xhtml 的画廊就是
-    /// `<p>美版系列封面</p><img>`）：位置不参与判定，只认「一张图 + 最多一段不超字的注」。
-    /// 摆的时候由 [`Ctx::children`] 把注挪到图后（这一叠的下面），见 [`Ctx::caption_last`]。
-    fn image_unit(&self, node: NodeId) -> Option<NodeId> {
-        self.image_parts(node).map(|(img, _)| img)
-    }
-
-    /// 同 [`Self::image_unit`]，把那段图注也交出来（没有注就是 `None`）。
-    fn image_parts(&self, node: NodeId) -> Option<(NodeId, Option<NodeId>)> {
-        if self.dom.is_element(node, "img") {
-            return Some((node, None));
-        }
-        let mut img: Option<NodeId> = None;
-        let mut caption: Option<NodeId> = None;
-        for &child in self.dom.get(node).children.iter() {
-            let n = self.dom.get(child);
-            if n.kind == NodeKind::Text && n.text.trim().is_empty() {
-                continue; // 标签之间的换行
-            }
-            if let Some(found) = single_image(self.dom, child) {
-                if img.replace(found).is_some() {
-                    return None; // 两张图 → 这是图文混排的一块，不是「图 + 注」
-                }
-                continue;
-            }
-            let style = self.style_of(child);
-            // 图注那一格：块级、不含图、不含标题、字数在 `STACK_CAPTION_MAX` 以内。
-            // 超字数就当成「图后面紧跟的一段正文」，整块不进叠（宁严不宽）。
-            //
-            // **不要求注已经见过图**：注写在图前是同一件事（哈利波特那本就是这样）。
-            let words = text_len_in(self.dom, child);
-            if caption.is_some()
-                || has_image(self.dom, child)
-                || self.is_inline_flow(child, style)
-                || self.is_heading(child)
-                || words == 0
-                || words > STACK_CAPTION_MAX
-            {
-                return None;
-            }
-            caption = Some(child);
-        }
-        img.map(|img| (img, caption))
-    }
-
-    /// 这一块的图注写在图**前**时交回那个孩子（叠图那一趟把它挪到队尾用）。
-    ///
-    /// 「前」按孩子顺序算，不按图的节点位置：图可能裹在一层 `<div>` 里，那一层才是它的
-    /// 位置。注本来就在图后的（诡秘那族）回 `None`，那一趟连缓存都照走。
-    fn caption_before_image(&self, node: NodeId) -> Option<NodeId> {
-        let (img, caption) = self.image_parts(node)?;
-        let caption = caption?;
-        let kids = self.children_of(node);
-        let cap_at = kids.iter().position(|kid| *kid == caption)?;
-        let img_at = kids
-            .iter()
-            .position(|kid| single_image(self.dom, *kid) == Some(img))?;
-        (cap_at < img_at).then_some(caption)
     }
 
     /// 一个图单元里那张图的**显示尺寸**，与画出来那一格同源（判据见 [`Self::picture_box`]）。
@@ -600,7 +508,9 @@ impl<'a> Ctx<'a> {
                 self.absolute.push((child, cursor));
                 continue;
             }
-            if self.is_inline_flow(child, style) {
+            // 音频行虽然 UA 默认标成 inline，但它要进块表（audio_row::register），
+            // 行内判断放它过关；块级支路里在浮动盒之前接住它。
+            if self.is_inline_flow(child, style) && !audio_row::is_row(self, child) {
                 pending.push(child);
                 continue;
             }
@@ -639,13 +549,21 @@ impl<'a> Ctx<'a> {
                 mt
             };
             // 兄弟之间折叠取较大值而不是相加：这是段间距不显松的唯一原因。负数那
-            // 三档（一正一负求和、两负取较负）见 [`Self::collapse_margins`]，`0` 是
+            // 三档（一正一负求和、两负取较负）见 [`collapse_margins`]，`0` 是
             // 它的恒等元，所以「前面没有兄弟」这一档不必再单独判。
-            cursor += Self::collapse_margins(mt, prev_bottom);
+            cursor += collapse_margins(mt, prev_bottom);
             // `clear` 把这一块整块推到那一侧浮动盒的下缘之下。净空算的是**边框**的位置，
             // 所以推完之后前面那段折叠的右边距不再起作用。
             if let Some(clear_to) = self.clear_bottom(style.clear) {
                 cursor = cursor.max(clear_to);
+            }
+            // 内嵌音频：占一条固定高的块级行（见 `audio_row` 模块；样子由 app 叠加画）。
+            // 必须在浮动盒之前接住：量高那一趟（children_light）音频也不进浮动表，
+            // 两趟口径一致；UA 把音频默认标成 inline，行内判断已经放它过了关。
+            if audio_row::is_row(self, child) {
+                cursor += audio_row::register(self, child, x, cursor, width);
+                prev_bottom = 0.0;
+                continue;
             }
             // 浮动盒：离开常规流。摆在当前游标那一档的侧边，**不**推进 `cursor`，
             // 于是后面每一段都从同一处起排、只是行带被它折窄。认不出宽度就落回常规流。
@@ -1060,15 +978,32 @@ impl<'a> Ctx<'a> {
             if matches!(style.position, Positioning::Absolute | Positioning::Fixed) {
                 continue;
             }
-            // 外边距一律带符号照算，与 `children` 同一条口径（判据见
-            // [`Self::solve_block_width`] 那一段）。
+            // 行内孩子（文本节点、inline 元素）与全量趟同一条口径：整段冲成匿名块时
+            // **不付块外边距** —— 文本节点继承的是所在块的 margin，逐个付一遍就是
+            // 双份；音频行与文字混排的那一章，两趟的高就差出一个段距。
+            let inline_child = self.is_inline_flow(child, style) && !audio_row::is_row(self, child);
             let ml = style.margin_left.resolve(width);
             let mr = style.margin_right.resolve(width);
             let mt = style.margin_top.resolve(width);
             let mb = style.margin_bottom.resolve(width);
-            cursor += Self::collapse_margins(mt, prev_bottom);
-            if let Some(clear_to) = self.clear_bottom(style.clear) {
-                cursor = cursor.max(clear_to);
+            if !inline_child {
+                cursor += collapse_margins(mt, prev_bottom);
+                if let Some(clear_to) = self.clear_bottom(style.clear) {
+                    cursor = cursor.max(clear_to);
+                }
+            }
+            // 音频行：量高这一趟与全量同一条式子。
+            if audio_row::is_row(self, child) {
+                cursor += audio_row::ROW_HEIGHT;
+                prev_bottom = 0.0;
+                continue;
+            }
+            if inline_child {
+                // 匿名行内容不付外边距（见上）；付过的地方也不带进下一个块
+                //（全量趟冲完匿名块同样把 `prev_bottom` 清零）。
+                cursor += self.block_light(child, width, width, container_h);
+                prev_bottom = 0.0;
+                continue;
             }
 
             // 浮动盒：量它的高（里面看不见外面的浮动表），但**不推进** `cursor`。
@@ -1318,7 +1253,7 @@ impl<'a> Ctx<'a> {
                 })
                 .collect();
             let line_cross_max = line_heights.iter().copied().fold(0.0f32, f32::max);
-            let align_available = Self::definite(style.height, cb_h)
+            let align_available = definite(style.height, cb_h)
                 .map(|h| style.content_size(h, pt + pb))
                 .unwrap_or(content_w);
             let (lead_cross, extra_cross, stretch_lines) = if lines.len() > 1 {
@@ -1592,7 +1527,10 @@ impl<'a> Ctx<'a> {
     fn has_block_children(&self, node: NodeId) -> bool {
         self.children_of(node).iter().any(|&child| {
             let style = self.style_of(child);
-            style.display != Display::None && !self.is_inline_flow(child, style)
+            // 音频行是块级盒：UA 默认把它标成 inline，但占位行只有走块路径才进块表
+            //（判据见 `audio_row` 模块头）。
+            style.display != Display::None
+                && (audio_row::is_row(self, child) || !self.is_inline_flow(child, style))
         })
     }
 

@@ -6,6 +6,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -81,6 +82,32 @@ public class GpuiActivity extends GpuiInputActivity {
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
 
         super.onCreate(savedInstanceState);
+
+        // Cold start with an "open with Folio" intent: register the URI so the transient
+        // grant admits it (see FolioSourceAccess INTENT_URIS). The data URI itself reaches
+        // Rust through GpuiDeepLink.getInitialLink (deeplink install), the SEND stream
+        // through the same fallback.
+        rememberIntentUris(getIntent());
+    }
+
+    /** Register every document URI an intent hands us: its data and its EXTRA_STREAM. */
+    private static void rememberIntentUris(Intent intent) {
+        if (intent == null) return;
+        FolioSourceAccess.rememberIntentUri(intent.getData());
+        FolioSourceAccess.rememberIntentUri(streamOf(intent));
+    }
+
+    /** The EXTRA_STREAM document of an ACTION_SEND share, or null. */
+    static Uri streamOf(Intent intent) {
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) return null;
+        if (Build.VERSION.SDK_INT >= 33) {
+            return intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri.class);
+        }
+        // Pre-T getParcelableExtra(String) is the only shape; the raw-type call is the
+        // documented fallback.
+        @SuppressWarnings({"unchecked", "deprecation"})
+        Uri stream = (Uri) intent.getParcelableExtra(Intent.EXTRA_STREAM);
+        return stream;
     }
 
     /**
@@ -137,8 +164,9 @@ public class GpuiActivity extends GpuiInputActivity {
     @Override
     protected void onDestroy() {
         FolioSpeech.shutdownAll();
-        // Release media session when activity is destroyed.
-        GpuiMediaSession.release();
+        // Tear the listen (TTS) foreground service down with the activity: app exit must
+        // not leave a media notification hanging with no session behind it.
+        FolioSpeechService.stop(this);
         super.onDestroy();
     }
 
@@ -155,12 +183,28 @@ public class GpuiActivity extends GpuiInputActivity {
         super.onNewIntent(intent);
         setIntent(intent);
 
+        // Register first: the URI's transient grant is only useful while we hold it, and
+        // the Rust side may stat/open the document the moment the queue is drained.
+        rememberIntentUris(intent);
+
         Uri data = intent.getData();
         if (data != null) {
             String url = data.toString();
             Log.i("GpuiActivity", "onNewIntent deeplink: " + url);
             try {
                 nativeOnDeepLink(url);
+            } catch (UnsatisfiedLinkError e) {
+                Log.w("GpuiActivity", "nativeOnDeepLink not available yet");
+            }
+        }
+        // "Share to Folio" carries the document in EXTRA_STREAM, not in the data slot;
+        // forward it on the same channel — the Rust side routes content:// into the
+        // import queue (services::intent_import) and folio:// into the cloud callback.
+        Uri stream = streamOf(intent);
+        if (stream != null && (data == null || !stream.equals(data))) {
+            Log.i("GpuiActivity", "onNewIntent shared document: " + stream);
+            try {
+                nativeOnDeepLink(stream.toString());
             } catch (UnsatisfiedLinkError e) {
                 Log.w("GpuiActivity", "nativeOnDeepLink not available yet");
             }

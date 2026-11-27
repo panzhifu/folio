@@ -38,7 +38,23 @@ pub fn install() {
 }
 
 /// 平台层入口：把一条 URL 收下。队列没建过也照收（`slot()` 会就地建）。
+///
+/// 这里也是**入站 intent 的分流点**：深链通道（`getInitialLink` / `nativeOnDeepLink`）
+/// 对任意 data URL 都不过滤地送到这一条上。`content://` / `file://` 是文件管理器
+/// 「用 Folio 打开」或「分享到 Folio」带来的文档 URI，归导入那条队列
+/// （[`super::intent_import`]）；`folio://` 的回跳仍归云盘。分流判据只写在这一处，
+/// 快捷方式（`folio://action/…`）跟着同一把刀走。
 pub fn deliver(url: &str) {
+    if url.starts_with("content://") || url.starts_with("file://") {
+        super::intent_import::deliver(url);
+        return;
+    }
+    // 快捷方式（长按图标）的动作：`folio://action/read|notes` 归路由那条队列，
+    // 回跳（`folio://aliyun/…`）仍归云盘。
+    if url.starts_with("folio://action/") {
+        super::routing::deliver(url);
+        return;
+    }
     match slot().lock() {
         Ok(mut queue) => {
             // 只留最近几条：一个坏循环把队列撑大没有意义，而正常一次授权只有一条。

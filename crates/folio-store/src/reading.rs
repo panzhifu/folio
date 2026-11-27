@@ -265,6 +265,21 @@ impl Store {
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
+
+    /// 最近在读的那本书（按最后一次阅读会话的时间）；从没读过回 `None`。
+    ///
+    /// 长按图标的「继续阅读」走这一条：不需要列任何清单，一张会话表的最后一条就是答案。
+    pub fn latest_read_book(&self) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn.prepare(
+            "SELECT book_id FROM reading_sessions ORDER BY started_at DESC, id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query([])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row.get(0)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 /// `(此刻的连续天数, 窗口内最长的一段)`，都按**有读**的天算。

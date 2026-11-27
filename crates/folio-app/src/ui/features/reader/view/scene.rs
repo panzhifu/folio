@@ -17,14 +17,14 @@ use crate::ui::features::reader::model::session::StackMotionView;
 use crate::ui::features::reader::view::paint::GlyphRun;
 
 mod decor;
-mod decor_pipeline;
+pub(in crate::ui::features::reader) mod decor_pipeline;
 mod tiles;
 use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::{desaturate, desaturate_author, run_color, run_color_link};
 pub(in crate::ui::features::reader) use decor::full_page_picture;
 use decor::overscan_backdrop;
 pub use decor::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
-use decor_pipeline::{place_decorations, screen_clip};
+use decor_pipeline::{VisibleAudio, place_decorations, screen_clip};
 use tiles::background_tiles;
 pub(in crate::ui::features::reader) use tiles::picture_fills_width;
 
@@ -72,6 +72,7 @@ pub struct Scene {
     pub runs: Vec<GlyphRun>,
     pub images: Vec<VisibleImage>,
     pub decorations: Vec<BlockDecor>,
+    pub audios: Vec<VisibleAudio>,
     /// 这一叠里**下一张**的图（不在屏上，只为让它提前解码）。
     ///
     /// 叠图横滑切一张时，新那一张的字节第一次才去解：大图（1000×1778 那种封面）
@@ -140,8 +141,9 @@ impl Scene {
         // 块级装饰与行一样按可见区间裁：只在 cull 覆盖到的盒子上花钱。
         let __t = crate::ui::features::reader::model::perf::Timer::start();
         // 装饰表随排版换代折好；每帧只裁可见带、加平移、落主题前景。
-        let decorations = place_decorations(
+        let (decorations, audios) = place_decorations(
             document.decor_seeds(),
+            &layout.audio_rows,
             if vertical {
                 (strip - cull.end, strip - cull.start)
             } else {
@@ -171,8 +173,12 @@ impl Scene {
                 continue;
             }
             // CSS overflow 的裁剪框：排版后折一次，这里只翻成屏幕坐标。
-            if layout.line_clipped(ix) { continue; }
-            let clip = layout.line_clip(ix).map(|r| screen_clip(r, origin_y, vertical, slide, x, top));
+            if layout.line_clipped(ix) {
+                continue;
+            }
+            let clip = layout
+                .line_clip(ix)
+                .map(|r| screen_clip(r, origin_y, vertical, slide, x, top));
             // 一叠图只画「现在这一张」那一格，其余各张整行跳过 —— 图与它的注都是
             // 那一叠第 k 格的行，所以切图时图注跟着一起换，不必另立一条规则。
             // 「看第几张」住界面（`Document::stack_current`）：它变了不许重排、不许改页数。
@@ -355,6 +361,7 @@ impl Scene {
             runs,
             images,
             decorations,
+            audios,
         };
         if ink {
             scene.desaturate();
@@ -552,8 +559,9 @@ mod tests {
     /// 已经折好的 `currentColor`（那条有色边框）不许被主题覆盖，画法原样带过去。
     #[test]
     fn a_seed_is_placed_with_the_translations_and_the_theme() {
-        let decor = place_decorations(
+        let (decor, _) = place_decorations(
             &[seed(40.0, 60.0)],
+            &[],
             (0.0, 700.0),
             100.0,
             false,
@@ -616,8 +624,9 @@ mod tests {
     /// 窗外的一条不产生绘制单元。
     #[test]
     fn a_seed_outside_the_visible_band_is_dropped() {
-        let decor = place_decorations(
+        let (decor, _) = place_decorations(
             &[seed(40.0, 60.0), seed(900.0, 60.0)],
+            &[],
             (0.0, 700.0),
             0.0,
             false,
@@ -640,8 +649,9 @@ mod tests {
     /// 纸底色之上，读者看到的是裁成章高一条的复制品（2026-11-02 真机）。
     #[test]
     fn the_taken_over_seed_is_dropped_by_index_not_by_flag() {
-        let decor = place_decorations(
+        let (decor, _) = place_decorations(
             &[seed(40.0, 60.0), seed(120.0, 60.0)],
+            &[],
             (0.0, 700.0),
             0.0,
             false,
@@ -665,8 +675,9 @@ mod tests {
     #[test]
     fn a_tall_box_starting_far_above_the_band_is_still_painted() {
         let parent = seed(0.0, 5000.0);
-        let decor = place_decorations(
+        let (decor, _) = place_decorations(
             &[parent],
+            &[],
             (4000.0, 4700.0),
             0.0,
             false,
@@ -977,23 +988,22 @@ mod tests {
     /// 空表（这一章没有一处带装饰）必须给空，而不是给出一条零尺寸的东西。
     #[test]
     fn an_empty_table_paints_nothing() {
-        assert!(
-            place_decorations(
-                &[],
-                (0.0, 700.0),
-                0.0,
-                false,
-                0.0,
-                0.0,
-                0.0,
-                black(),
-                &images(),
-                None,
-                false,
-                &[],
-            )
-            .is_empty()
+        let (decor, _) = place_decorations(
+            &[],
+            &[],
+            (0.0, 700.0),
+            0.0,
+            false,
+            0.0,
+            0.0,
+            0.0,
+            black(),
+            &images(),
+            None,
+            false,
+            &[],
         );
+        assert!(decor.is_empty());
     }
 
     /// 滚动档那条「宽度铺满就贴顶」的判据：封面那种竖图在手机屏的章框里是**宽度先

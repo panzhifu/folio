@@ -7,8 +7,7 @@ use std::sync::Arc;
 use super::collect::IMAGE_GLYPH;
 use super::font::RunStyle;
 use folio_format::css::computed::{
-    ObjectFit,
-    BackgroundAttachment, BackgroundClip, ComputedStyle, Display, StyledDom, TextAlign, WritingMode,
+    BackgroundAttachment, BackgroundClip, Display, ObjectFit, StyledDom, TextAlign, WritingMode,
 };
 use folio_format::dom::NodeId;
 use folio_format::metrics::Metric;
@@ -16,6 +15,7 @@ use folio_format::metrics::Metric;
 mod clip;
 mod seed;
 pub use clip::ClipRect;
+use seed::neighbour_cell;
 pub use seed::{ColumnRule, DecorPicture, DecorSeed};
 
 /// 行盒里的一段连续同样式文本，同时带着两套坐标。
@@ -245,6 +245,8 @@ pub struct Layout {
     pub lines: Vec<LineBox>,
     pub width: f32,
     pub height: f32,
+    /// 音频行短表（[`AudioRow`](crate::AudioRow)）：命中与绘制读这一份，不扫块表。
+    pub audio_rows: Vec<crate::AudioRow>,
     /// 这一章是「整幅底图封面」：根上是 `cover` + 两轴 `no-repeat` 的整幅底图、作者用
     /// `height` / `min-height` 要它满一页、章里又没有正文。
     ///
@@ -282,82 +284,6 @@ pub struct Layout {
 /// 把**逻辑横排**长条整体投影成竖排物理坐标。断行、基线、shaping、命中
 /// (`Measure::byte_at_x` / `char_edges`) 都只认「沿内联轴的纯量」，在逻辑空间里本来就对；
 /// 让 `collect` 直接按竖轴摆就得改引擎里的 x/y、app 三处读 `glyph.position` 的地方。
-/// 投影只在这里发生一次。
-///
-/// **代价要说清，这一条不是免费的**：盒模型那几族边是**物理**的
-/// （`margin-top` / `padding-left` / `border[上右下左]`），转置会把它们摆到另一条边上。
-/// CSS Writing Modes 那张 logical→physical 映射表还没接，所以竖排里
-/// 「段落之间的上下留白」会变成「列与列之间的留白」，而作者写给**行**的 `margin-bottom`
-/// 会横过来。段落分开的那个方向在竖排里恰好就是列间，所以多数中文竖排本看着是对的；
-/// 一条式子内缩进的物理边（如表格、`hr`）会错到另一侧去。显式记进降级清单，别当它不存在。
-fn transposed(
-    blocks: Vec<BlockBox>,
-    mut lines: Vec<LineBox>,
-    width: f32,
-    height: f32,
-    mode: WritingMode,
-) -> (Vec<BlockBox>, Vec<LineBox>, f32, f32) {
-    // 长条沿块轴的总长 = 逻辑高；一列的长 = 逻辑宽。物理那两条边因此互换。
-    let strip = height;
-    // `vertical-rl` 的列从右往左堆：块轴反着走，所以起点要从右缘翻面数。
-    let flip = mode == WritingMode::VerticalRl;
-    // 逻辑 (x=沿字, y=沿列堆, w=沿字长, h=列厚) → 物理那四格。
-    // `baseline` 不动：它存的始终是「沿块轴从**起点边**算进去的深度」，
-    // 起点边在 rl 是列的右缘、在 lr 是左缘 —— 落地成物理 x 是 [`Layout::cross_baseline`] 的事。
-    let map = |x: f32, y: f32, w: f32, h: f32| -> (f32, f32, f32, f32) {
-        (if flip { strip - (y + h) } else { y }, x, h, w)
-    };
-    for line in &mut lines {
-        let (x, y, w, h) = map(line.x, line.y, line.width, line.height);
-        line.x = x;
-        line.y = y;
-        line.width = w;
-        line.height = h;
-    }
-    let blocks = blocks
-        .into_iter()
-        .map(|mut b| {
-            let (x, y, w, h) = map(b.x, b.y, b.width, b.height);
-            b.x = x;
-            b.y = y;
-            b.width = w;
-            b.height = h;
-            b
-        })
-        .collect();
-    (blocks, lines, strip, width)
-}
-
-/// 同一张塌陷表里挨着我某一侧的邻格，`side` 按 `[上, 右, 下, 左]`。
-///
-/// 判据是**几何**的，不是 DOM 父子：`decor_seeds` 手上只有块表，而格子的边框盒在排版期
-/// 已按列宽、行高摆好 ——「右边那一格」就是 `x` 恰落在我 `x + width` 上、且与我同一行的那块。
-/// 用几何而不是 DOM，块缓存命中的那条路也对：缓存里存的就是块表。
-fn neighbour_cell<'a>(
-    blocks: &[BlockBox],
-    styles: &'a StyledDom,
-    index: usize,
-    side: usize,
-) -> Option<&'a ComputedStyle> {
-    const TOL: f32 = 0.5;
-    let me = &blocks[index];
-    blocks.iter().enumerate().find_map(|(other_index, other)| {
-        if other_index == index || !other.border_box {
-            return None;
-        }
-        let style = styles.get(other.node)?;
-        if style.display != Display::TableCell || !style.border_collapse {
-            return None;
-        }
-        let touches = match side {
-            0 => ((other.y + other.height) - me.y).abs() < TOL && (other.x - me.x).abs() < TOL,
-            1 => (other.x - (me.x + me.width)).abs() < TOL && (other.y - me.y).abs() < TOL,
-            2 => (other.y - (me.y + me.height)).abs() < TOL && (other.x - me.x).abs() < TOL,
-            _ => ((other.x + other.width) - me.x).abs() < TOL && (other.y - me.y).abs() < TOL,
-        };
-        touches.then_some(style)
-    })
-}
 
 impl Layout {
     /// 组装排版结果：竖排先把两张表整体投影成物理坐标，然后折「行 → 块」那张表，
@@ -396,6 +322,7 @@ impl Layout {
             line_z: Vec::new(),
             column_rules: Vec::new(),
             line_clips: Vec::new(),
+            audio_rows: Vec::new(),
         };
         // 叠放性最后才折：那条判据问的是「沿推进轴的底边」，而那两个入口是 `Layout` 的
         // 方法（竖排的起点要按长条总长翻面，那份信息在 `self` 上）。
@@ -917,3 +844,5 @@ impl LayoutOptions {
         }
     }
 }
+
+use crate::block_math::transposed;

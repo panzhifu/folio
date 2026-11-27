@@ -5,10 +5,10 @@
 //! `chrome` 里判，两块弹层开没开在它们自己的实体里判，这里只画。
 
 use crate::ui::components::{PillSlider, THUMB_INSET, TopBar};
+use crate::ui::features::reader::ReadingPageEvent;
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::session::ReaderSession;
 use crate::ui::features::reader::view::bands;
-use crate::ui::features::reader::ReadingPageEvent;
 use crate::ui::host::has_window_chrome;
 use crate::ui::services::l10n::{tf, tr};
 use gpui_kit::assets::IconName;

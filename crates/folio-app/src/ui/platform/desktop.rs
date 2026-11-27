@@ -23,8 +23,9 @@ pub fn run_desktop() {
     }
 
     gpui_kit::application()
-        // 默认图标包不含 library/book/circle-user 等，换 AllAssets 才拿得到全套 Lucide 图标。
-        .with_assets(gpui_kit::assets::AllAssets)
+        // 图标子集（folio 用到的 + gpui-kit 组件默认名单兜底），不再嵌全部 1830 个
+        // lucide svg —— 名单见 platform::icons。
+        .with_assets(super::icons::FolioAssets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             // 替换gpui 默认的「不发请求」的 client，方便后续进行同步

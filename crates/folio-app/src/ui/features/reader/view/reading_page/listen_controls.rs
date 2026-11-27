@@ -430,3 +430,56 @@ mod tests {
         assert_eq!(rewind_target(&sentences, 99, 5.0, 4.0), None);
     }
 }
+
+/// 听书遥控（通知 / 锁屏 / 耳机线控）的传输命令，这一页分流：上下句要页上的跟读
+/// 脚本（[`listen_step`]），播停与收摊转会话。命令词表在 `services::speech_remote`；
+/// 外壳在渲染帧里从队列取走（`AppShell::render`），入口是 `ReadingPage` 的薄转发。
+pub(in crate::ui::features::reader) fn apply_commands(
+    page: &mut ReadingPage,
+    commands: &[&str],
+    cx: &mut Context<ReadingPage>,
+) {
+    for command in commands {
+        match *command {
+            "next" => listen_step(page, 1, cx),
+            "previous" => listen_step(page, -1, cx),
+            _ => page
+                .reader
+                .update(cx, |reader, cx| reader.apply_remote_speech(&[command], cx)),
+        }
+    }
+    cx.notify();
+}
+
+/// 上一句 / 下一句：按**这一章**的文稿走一步。到头就停在头尾。
+///
+/// 只把「念哪一句」交出去，不动列表：文稿那一面的居中与滚动在听书浮层里按正在念的
+/// 那一句算，这里再滚一次就是把同一个决定做两遍。让位那格要清掉 —— 读者按下一句
+/// 就是要让屏跟着走，不是还在自己翻。
+pub(in crate::ui::features::reader) fn listen_step(
+    page: &mut ReadingPage,
+    delta: isize,
+    cx: &mut Context<ReadingPage>,
+) {
+    let Some((chapter, range)) = page.reader.read(cx).speech_range() else {
+        return;
+    };
+    let Some(script) = page.listen_script.clone() else {
+        return;
+    };
+    if script.chapter != chapter {
+        return;
+    }
+    let Some(ix) = sentence_index(&script.sentences, range.start) else {
+        return;
+    };
+    let last = script.sentences.len().saturating_sub(1) as isize;
+    let target = (ix as isize + delta).clamp(0, last) as usize;
+    if target == ix {
+        return;
+    }
+    let want = script.sentences[target].chapter.clone();
+    page.listen_manual_at = None;
+    page.reader
+        .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
+}

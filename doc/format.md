@@ -90,6 +90,12 @@ pub struct Resource { pub href: String, pub kind: ResourceKind, pub size: Option
 签名是 `Vec<Resource>` 而不是 `&[Resource]`（清单不落库、不驻留，现取现合成），
 `images` 表 / `chapters.images_json` / `fixed_json` 那些已落库的形状一格没动；
 「章内图片引用指向清单」、落表迁移与 `&[Resource]` 签名留在阶段二。
+**作者样式表装配（2026-11-28 起）**：清单样式与章内 `<style>` 进层叠前，每份文件
+经 `css::expand_css_imports` 展开 `@import` —— 路径按**引用者**的目录折成容器路径、
+递归展开（环与深度封顶、防环的 seen 一份书用到底），被引文件的 `url()` 按它自己的
+目录折；媒体条件收下不判（与 `@supports` 同口径），远程目标与读不到的语句原样留下
+（路径仍折好），解析器照旧计 ignored，css-gap 的明细表看得见。章内 `<style>` 的
+`@import` 不展开（`chapter_style_rules` 手上没有容器），仍由解析器计 ignored。
 
 ### 5. chapter_text / page_image — 获取书籍内容
 

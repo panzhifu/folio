@@ -4,8 +4,11 @@
 
 use std::sync::Arc;
 
+use crate::BlockBox;
+use folio_format::css::computed::StyledDom;
 use folio_format::css::computed::{
-    BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color, ShadowLayer,
+    BackgroundPosition, BackgroundRepeat, BackgroundSize, BorderStyle, Color, ComputedStyle,
+    Display, ShadowLayer,
 };
 /// 一块要画的装饰的**输入**：几何 + CSS 侧的颜色，主题色一格都没落地。
 ///
@@ -103,4 +106,35 @@ pub struct ColumnRule {
     pub height: f32,
     pub color: Option<Color>,
     pub style: BorderStyle,
+}
+
+/// 同一张塌陷表里挨着我某一侧的邻格，`side` 按 `[上, 右, 下, 左]`。
+///
+/// 判据是**几何**的，不是 DOM 父子：`decor_seeds` 手上只有块表，而格子的边框盒在排版期
+/// 已按列宽、行高摆好 ——「右边那一格」就是 `x` 恰落在我 `x + width` 上、且与我同一行的那块。
+/// 用几何而不是 DOM，块缓存命中的那条路也对：缓存里存的就是块表。
+pub(crate) fn neighbour_cell<'a>(
+    blocks: &[BlockBox],
+    styles: &'a StyledDom,
+    index: usize,
+    side: usize,
+) -> Option<&'a ComputedStyle> {
+    const TOL: f32 = 0.5;
+    let me = &blocks[index];
+    blocks.iter().enumerate().find_map(|(other_index, other)| {
+        if other_index == index || !other.border_box {
+            return None;
+        }
+        let style = styles.get(other.node)?;
+        if style.display != Display::TableCell || !style.border_collapse {
+            return None;
+        }
+        let touches = match side {
+            0 => ((other.y + other.height) - me.y).abs() < TOL && (other.x - me.x).abs() < TOL,
+            1 => (other.x - (me.x + me.width)).abs() < TOL && (other.y - me.y).abs() < TOL,
+            2 => (other.y - (me.y + me.height)).abs() < TOL && (other.x - me.x).abs() < TOL,
+            _ => ((other.x + other.width) - me.x).abs() < TOL && (other.y - me.y).abs() < TOL,
+        };
+        touches.then_some(style)
+    })
 }

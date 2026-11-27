@@ -31,8 +31,8 @@ use crate::ui::features::reader::model::book_fonts::{BookFonts, FontLoadJob, Tex
 use crate::ui::features::reader::model::measure::GpuiMeasure;
 use crate::ui::foundation::images::ChapterImages;
 
+mod audio;
 mod row_unit;
-
 pub use row_unit::RowUnit;
 
 /// 打开统一文档接口；界面按 `kind()` 分流，不再按格式查 provider。

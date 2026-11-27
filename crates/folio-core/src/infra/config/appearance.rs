@@ -202,6 +202,8 @@ pub struct Appearance {
     pub auto_advance_speed: f32,
     /// 阅读亮度；None 跟随系统。经 host 调节，不参与排版失效键。
     pub brightness: Option<f32>,
+    /// 阅读层挂着时让屏幕常亮（窗口 flag，不参与排版）。听书时阅读层挂着，自动覆盖。
+    pub keep_screen_on: bool,
 }
 
 impl Appearance {
@@ -280,6 +282,8 @@ impl Default for Appearance {
             turn_duration: Self::TURN_DURATION_DEFAULT,
             highlight_style: AnnotationStyle::default(),
             brightness: None,
+            // 阅读时息屏比费电更恼人，默认常亮。
+            keep_screen_on: true,
         }
     }
 }

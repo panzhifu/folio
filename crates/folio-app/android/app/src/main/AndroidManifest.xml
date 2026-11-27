@@ -57,6 +57,16 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!--
+      听书（TTS）的后台保护三件套：前台服务本身（API 28 起普通 startForeground 就要这条）、
+      mediaPlayback 类型（API 34 起 FGS 类型必须声明且与 startForeground 一致）、
+      通知运行时权限（API 33 起 MediaStyle 通知不弹窗就看不见 —— 服务照跑、进程照保护，
+      只是锁屏控制没了，所以首次开播时向读者请求一次）。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- Camera feature (optional — app works without camera) -->
 
     <!-- Vulkan feature declaration.
@@ -109,8 +119,13 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/GpuiTheme"
-        android:enableOnBackInvokedCallback="true"
-    >
+        android:enableOnBackInvokedCallback="true">
+
+        <!-- 长按图标的静态快捷方式（继续阅读 / 笔记）：intent 是 folio://action/…，
+             见 res/xml/shortcuts.xml 与 services::routing。 -->
+        <meta-data
+            android:name="android.app.shortcuts"
+            android:resource="@xml/shortcuts" />
 
         <!--
           GpuiActivity extends NativeActivity and integrates the AndroidX
@@ -181,6 +196,61 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="folio" />
             </intent-filter>
+
+            <!-- 系统文件入口：文件管理器「用 Folio 打开」（ACTION_VIEW）。mimeType 白名单
+                 只列导入管线认得的格式族 —— 列 */* 会让每个文件的「打开方式」都出现 Folio，
+                 而点进来又导入不了，读者读到的是「这个应用坏了」。URI 只有临时授权，
+                 Java 侧在 intent 进来时登记进 FolioSourceAccess 的注册表后放行（冷启动的
+                 走 GpuiDeepLink.getInitialLink 同一条深链通道进 Rust）。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/x-mobipocket-ebook" />
+                <data android:mimeType="application/vnd.amazon.ebook" />
+                <data android:mimeType="application/vnd.amazon.mobi8-ebook" />
+                <data android:mimeType="application/x-fictionbook" />
+                <data android:mimeType="application/x-fictionbook+xml" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="application/rtf" />
+                <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/vnd.oasis.opendocument.text" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/vnd.comicbook-rar" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/x-cbr" />
+                <data android:mimeType="application/vnd.ms-htmlhelp" />
+                <data android:mimeType="application/x-chm" />
+            </intent-filter>
+
+            <!-- 「分享到 Folio」（ACTION_SEND）：文档在 EXTRA_STREAM 里，Java 侧取出来
+                 走同一条 content:// 通道。同一份 mimeType 白名单。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/x-mobipocket-ebook" />
+                <data android:mimeType="application/vnd.amazon.ebook" />
+                <data android:mimeType="application/vnd.amazon.mobi8-ebook" />
+                <data android:mimeType="application/x-fictionbook" />
+                <data android:mimeType="application/x-fictionbook+xml" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="application/rtf" />
+                <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/vnd.oasis.opendocument.text" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/vnd.comicbook-rar" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/x-cbr" />
+                <data android:mimeType="application/vnd.ms-htmlhelp" />
+                <data android:mimeType="application/x-chm" />
+            </intent-filter>
         </activity>
         <!-- GPUI's Android path prompt (cx.prompt_for_paths) starts this Activity by
              name via JNI. An unregistered Activity is an ActivityNotFoundException at
@@ -192,13 +262,6 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
         />
-        <!-- Transparent helper Activity for file/image picker results. -->
-        <activity
-            android:name="dev.gpui.mobile.GpuiPickerActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
-        />
-
         <!-- Transparent helper Activity for runtime permission requests. -->
         <activity
             android:name="dev.gpui.mobile.GpuiPermissionActivity"
@@ -206,11 +269,15 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
         />
 
-        <!-- Transparent helper Activity for biometric authentication (BiometricPrompt). -->
-        <activity
-            android:name="dev.gpui.mobile.GpuiAuthActivity"
+        <!-- 听书（TTS）的前台服务：mediaPlayback 类型保进程不被回收，MediaSession 管锁屏
+             与耳机键，MediaStyle 通知挂播放控制。Rust 侧经 platform::speech_remote_* 三条
+             静态入口驱动（FolioSpeechService.start/update/stop），传输命令经
+             nativeMediaAction 排队回 Rust（services::speech_remote）。exported=false：
+             只有本应用和系统（MediaSession）能碰到它。 -->
+        <service
+            android:name="dev.gpui.mobile.FolioSpeechService"
             android:exported="false"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:foregroundServiceType="mediaPlayback"
         />
 
         <!-- Shares a reader image out through a content:// URI. The bytes land in

@@ -23,5 +23,3 @@ fn grid_template_rows_are_parsed_and_counted() {
     assert_eq!(bad.styled.ignored, 1, "整条作废并留一条痕迹");
     assert!(style(&bad, tag(&bad, "div")).grid_template_rows.is_empty());
 }
-
-

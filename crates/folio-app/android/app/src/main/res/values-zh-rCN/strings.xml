@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_read">继续阅读</string>
+    <string name="shortcut_notes">笔记</string>
+</resources>

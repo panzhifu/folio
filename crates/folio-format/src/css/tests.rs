@@ -266,23 +266,31 @@ fn important_flag_is_recognised() {
 }
 
 #[test]
-fn unsupported_selector_discards_the_whole_rule_body() {
+fn state_pseudo_class_rules_are_kept_and_never_match() {
+    // 状态伪类 2026-11-28 起收认（见 `selector::PseudoClass`）：规则不再整块丢，
+    // 但静态阅读器没有这些状态，声明永不落到元素上。
+    let dom = Dom::parse(b"<p>x</p>");
     let set = rules("p:hover { color: red; font-size: 1px } p { color: blue }");
-    assert_eq!(set.rules.len(), 1, "带 :hover 的整条应被丢掉");
-    assert_eq!(set.rules[0].declarations[0].value, "blue");
-    assert_eq!(set.ignored, 2, "两条声明都该被计成被忽略");
+    assert_eq!(set.rules.len(), 2, "状态伪类收进来，不再整块丢");
+    assert_eq!(set.ignored, 0);
+    assert_eq!(
+        winner(&dom, &set, "color"),
+        "blue",
+        ":hover 永不命中，段落吃裸 p 的颜色"
+    );
 }
 
 /// 被整块丢掉的规则要留下原文：`ignored` 只有计数，`css-gap` 点名靠的是这一列。
 #[test]
 fn an_ignored_rule_keeps_its_source_for_the_probe() {
-    let set =
-        rules("p:hover { color: red; font-size: 1px } @keyframes spin { from { opacity: 0 } }");
+    let set = rules(
+        "p:focus-within { color: red; font-size: 1px } @keyframes spin { from { opacity: 0 } }",
+    );
     assert_eq!(set.ignored, 3, "两条声明 + 一条没有去处的 @ 规则");
     assert_eq!(set.ignored_rules.len(), 2, "按规则去重，不是按声明");
     let selector = &set.ignored_rules[0];
     assert_eq!(selector.kind, "selector");
-    assert_eq!(selector.prelude, "p:hover");
+    assert_eq!(selector.prelude, "p:focus-within");
     assert_eq!(selector.declarations, 2);
     assert!(
         selector.source.contains("color: red"),
@@ -607,4 +615,230 @@ fn supports_blocks_follow_declaration_support() {
         ["red", "green", "yellow", "cyan"],
         "and/or/not 与嵌套括号按条件求值；不成立块不留"
     );
+}
+
+// ---- @import 展开 ----
+
+use crate::css::expand_css_imports as expand_imports;
+
+/// 文件名 → 正文 的假容器。
+fn files_with<'a>(files: &'a [(&'a str, &'a str)]) -> impl FnMut(&str) -> Option<String> + 'a {
+    move |path| {
+        files
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(_, text)| (*text).to_string())
+    }
+}
+
+#[test]
+fn import_expands_url_and_string_forms() {
+    let files = [("styles/b.css", "p{color:green}")];
+    let mut read = files_with(&files);
+    for statement in ["@import url(\"b.css\")", "@import 'b.css'"] {
+        let out = expand_imports(
+            &format!("{statement};\np{{color:red}}"),
+            "styles/",
+            0,
+            &mut Default::default(),
+            &mut read,
+        );
+        assert!(!out.contains("@import"), "{statement} 的语句头要被换掉");
+        let set = rules(&out);
+        let colors: Vec<_> = set
+            .rules
+            .iter()
+            .filter_map(|r| r.declarations.iter().find(|d| d.property == "color"))
+            .map(|d| d.value.as_str())
+            .collect();
+        assert_eq!(colors, ["green", "red"], "{statement} 展开后被引规则先进来");
+    }
+}
+
+#[test]
+fn import_resolves_against_importer_dir_and_nested_files() {
+    // a 引 b（同目录），b 引 c（再下一层）；c 的 url() 按 c 自己的目录折。
+    let files = [
+        ("styles/a.css", "@import url(\"deep/b.css\");\n.a{}\n"),
+        (
+            "styles/deep/b.css",
+            "@import url(\"c.css\");\n.b{background:url(logo.png)}\n",
+        ),
+        ("styles/deep/c.css", ".c{}\n"),
+    ];
+    let mut read = files_with(&files);
+    let out = expand_imports(
+        "@import url(\"a.css\");",
+        "styles/",
+        0,
+        &mut Default::default(),
+        &mut read,
+    );
+    for marker in [".a{}", ".b{", "url(\"styles/deep/logo.png\")", ".c{}"] {
+        assert!(out.contains(marker), "嵌套展开应含 {marker}：{out}");
+    }
+    assert!(!out.contains("@import"), "两层嵌套都应换掉");
+}
+
+#[test]
+fn import_cycle_and_depth_stop_expansion() {
+    // 环：a→b→a。第二个 a 不再展开，也不死循环。
+    let files = [
+        ("a.css", "@import url(\"b.css\");\n.a{}\n"),
+        ("b.css", "@import url(\"a.css\");\n.b{}\n"),
+    ];
+    let mut read = files_with(&files);
+    let out = expand_imports(
+        "@import url(\"a.css\");",
+        "",
+        0,
+        &mut Default::default(),
+        &mut read,
+    );
+    assert!(
+        out.contains(".a{}") && out.contains(".b{}"),
+        "环上两份各进来一次：{out}"
+    );
+    assert_eq!(out.matches(".a{}").count(), 1, "环上的 a 只展开一次");
+
+    // 深度：4 层链在第 4 层停。
+    let files = [
+        ("l0.css", "@import url(\"l1.css\");\n.l0{}"),
+        ("l1.css", "@import url(\"l2.css\");\n.l1{}"),
+        ("l2.css", "@import url(\"l3.css\");\n.l2{}"),
+        ("l3.css", ".l3{}"),
+    ];
+    let mut read = files_with(&files);
+    let out = expand_imports(
+        "@import url(\"l0.css\");",
+        "",
+        0,
+        &mut Default::default(),
+        &mut read,
+    );
+    assert!(
+        out.contains(".l2{}") && !out.contains(".l3{}"),
+        "三跳封顶：l3 进不来：{out}"
+    );
+}
+
+#[test]
+fn import_remote_missing_and_condition_keep_honest() {
+    let files = [("styles/b.css", "p{color:green}")];
+    let text = concat!(
+        "@import url(https://example.com/x.css);\n",
+        "@import url(\"nope.css\");\n",
+        "@import url(\"b.css\") screen;\n",
+        "/* @import url(\"ghost.css\"); 注释里的不算 */\n",
+        "@importfoo p{}\n",
+    );
+    let mut read = files_with(&files);
+    let out = expand_imports(text, "styles/", 0, &mut Default::default(), &mut read);
+    assert!(
+        out.contains("@import url(https://example.com/x.css);"),
+        "远程原样留下"
+    );
+    assert!(
+        out.contains("@import url(\"styles/nope.css\");"),
+        "读不到的语句留下，路径照样折好：{out}"
+    );
+    assert!(out.contains("p{color:green}"), "带媒体条件的照常展开");
+    assert!(!out.contains("screen;"), "媒体条件收下不判，尾部剥掉");
+    assert!(
+        !out.contains("ghost.css"),
+        "注释里的 @import 不展开（注释与 absolutize 同一条：清掉）"
+    );
+    assert!(!out.contains("/*"), "注释不进输出，与 absolutize 口径一致");
+    assert!(out.contains("@importfoo"), "关键字的词边界不误匹配");
+}
+
+#[test]
+fn import_expansion_keeps_parser_behavior() {
+    // 展开后的文本走真解析：规则、@font-face 都要活着进来。
+    let files = [(
+        "styles/fonts.css",
+        "@font-face{font-family:'Custom';src:url(custom.ttf)}\n",
+    )];
+    let mut read = files_with(&files);
+    let out = expand_imports(
+        "@import url(\"fonts.css\");",
+        "styles/",
+        0,
+        &mut Default::default(),
+        &mut read,
+    );
+    let set = rules(&out);
+    assert_eq!(
+        set.font_faces.len(),
+        1,
+        "被引文件里的 @font-face 要进规则表：{out}"
+    );
+}
+
+// ---- 状态伪类与 -webkit-text-stroke（2026-11-28 收认）----
+
+fn first_tag(dom: &Dom, tag: &str) -> NodeId {
+    dom.elements()
+        .find(|(_, n)| {
+            n.tag
+                .as_ref()
+                .map(|tg| tg.local.as_str() == tag)
+                .unwrap_or(false)
+        })
+        .map(|(id, _)| id)
+        .expect("fixture 里要有这个标签")
+}
+
+#[test]
+fn pseudo_class_link_matches_anchors_and_beats_type() {
+    // `a:link` 命中带 href 的 <a>；specificity 按 class 档计，反序也盖住裸 `a`。
+    let dom = Dom::parse(b"<a href='x'>l</a>");
+    let set = rules("a:link { color: blue } a { color: red }");
+    let a = first_tag(&dom, "a");
+    let color = set
+        .matching_declarations(&dom, a)
+        .into_iter()
+        .rfind(|d| d.property == "color")
+        .map(|d| d.value.clone());
+    assert_eq!(
+        color.as_deref(),
+        Some("blue"),
+        ":link 的 class 档 specificity 盖住裸 a"
+    );
+}
+
+#[test]
+fn pseudo_class_link_never_hits_anchors_without_href_or_other_tags() {
+    let dom = Dom::parse(b"<a>s</a><p>p</p>");
+    let set = rules("a:link { color: blue }");
+    for (node, _) in dom.elements() {
+        assert!(
+            set.matching_declarations(&dom, node).is_empty(),
+            "无 href 的 <a> 与 <p> 都不吃 :link"
+        );
+    }
+}
+
+#[test]
+fn runtime_state_pseudo_classes_parse_but_never_match() {
+    let dom = Dom::parse(b"<a href='x'>l</a>");
+    let set = rules("a:visited { color: purple } a:hover { color: red }");
+    assert_eq!(set.rules.len(), 2, "两条都收进来，不再整块丢");
+    let a = first_tag(&dom, "a");
+    assert!(
+        set.matching_declarations(&dom, a).is_empty(),
+        "静态阅读器没有运行时状态，永不命中"
+    );
+}
+
+#[test]
+fn webkit_text_stroke_is_known_but_inert() {
+    use crate::css::computed::{DeclStatus, declaration_status};
+    let base = ComputedStyle::default();
+    let decl = crate::css::Declaration {
+        property: "-webkit-text-stroke".into(),
+        value: "-webkit-text".into(),
+        important: false,
+    };
+    assert_eq!(declaration_status(&decl, &base, 16.0), DeclStatus::Inert);
 }

@@ -18,6 +18,7 @@ use gpui_kit::{
 
 use crate::ui::features::reader::components::image_viewer::ImageViewer;
 use crate::ui::features::reader::model::annotations::Palette;
+use crate::ui::features::reader::model::audio::AudioState;
 use crate::ui::features::reader::model::book::Book;
 use crate::ui::features::reader::model::chapter_layout::{Document, Viewport};
 use crate::ui::features::reader::model::chrome;
@@ -30,6 +31,7 @@ use crate::ui::features::reader::model::session::{
 use crate::ui::features::reader::motion::turn_animation::{self, Sheet};
 use crate::ui::features::reader::view::bands;
 use crate::ui::features::reader::view::paint::GlyphsElement;
+use crate::ui::features::reader::view::scene::decor_pipeline::VisibleAudio;
 use crate::ui::features::reader::view::scene::{BlockDecor, Scene, VisibleImage};
 
 use super::a11y::spoken_lines;
@@ -38,7 +40,9 @@ use super::art::{
     scroll_art_pictures,
 };
 use super::capture::{CaptureView, flat_mesh_canvas};
-use super::decor::{decoration_child, decoration_ready};
+use super::decor::{
+    SceneDecorCapture, SceneDecorFacts, decoration_child, decoration_ready, paint_scene_audios,
+};
 use super::images::{
     ImageDrag, ImageTap, image_child, painted, painted_picture, picture_wants_preview, plain_image,
     stack_dots, stack_peek,
@@ -1783,26 +1787,31 @@ impl ReaderSession {
             }
             element.extend(scene.runs);
         }
+        // 事实与捕获副本两份调用共用（音频行与装饰同走捕获管线）。
+        let facts = SceneDecorFacts {
+            cut,
+            role,
+            capture_front,
+            back_copy,
+            incoming_copy,
+        };
+        let mut capture = SceneDecorCapture {
+            front_decor: &mut *front_decor,
+            back_children: &mut *back_children,
+            incoming_children: &mut *incoming_children,
+            front_missing: &mut *front_missing,
+            back_missing: &mut *back_missing,
+            incoming_missing: &mut *incoming_missing,
+        };
         paint_scene_decorations(
             &atlas,
             view,
             std::mem::take(&mut scene.decorations),
-            SceneDecorFacts {
-                cut,
-                role,
-                capture_front,
-                back_copy,
-                incoming_copy,
-            },
+            std::mem::take(&mut scene.audios),
+            &self.audio_state(),
+            &facts,
+            &mut capture,
             &mut *column,
-            SceneDecorCapture {
-                front_decor: &mut *front_decor,
-                back_children: &mut *back_children,
-                incoming_children: &mut *incoming_children,
-                front_missing: &mut *front_missing,
-                back_missing: &mut *back_missing,
-                incoming_missing: &mut *incoming_missing,
-            },
             cx,
         );
         let images = std::mem::take(&mut scene.images);
@@ -1946,7 +1955,8 @@ fn paint_picture_page(
             // 这一张是「铺满这一页的整页图」，不是哪一叠里的一张。
             stack: None,
             stack_slide: 0.0,
-            stack_incoming: false, clip: None,
+            stack_incoming: false,
+            clip: None,
         });
         if role.draws_main() && turn.is_none() {
             let size = if contain {
@@ -1969,25 +1979,6 @@ fn paint_picture_page(
     }
 }
 
-/// 一栏的装饰这一帧归谁、按哪条折线裁。
-struct SceneDecorFacts {
-    cut: Option<turn_animation::Cut>,
-    role: CaptureRole,
-    capture_front: bool,
-    back_copy: bool,
-    incoming_copy: bool,
-}
-
-/// 装饰要写的那几格捕获副本。
-struct SceneDecorCapture<'a> {
-    front_decor: &'a mut Vec<AnyElement>,
-    back_children: &'a mut Vec<AnyElement>,
-    incoming_children: &'a mut Vec<AnyElement>,
-    front_missing: &'a mut bool,
-    back_missing: &'a mut bool,
-    incoming_missing: &'a mut bool,
-}
-
 /// 块级装饰（`background-color`、`border`、`<hr>`）也跟着那张纸走：中心落在
 /// 裁掉那一侧就整块不画。字是逐点裁的，而一个装饰块是一个矩形、没有「裁一半」
 /// 的画法 —— 逐像素的多边形裁剪要的是 gpui 没有的东西（`ContentMask` 只有矩形）。
@@ -1999,9 +1990,11 @@ fn paint_scene_decorations(
     atlas: &Entity<ImageAtlas>,
     view: EntityId,
     decorations: Vec<BlockDecor>,
-    facts: SceneDecorFacts,
+    audios: Vec<VisibleAudio>,
+    audio_state: &AudioState,
+    facts: &SceneDecorFacts,
+    capture: &mut SceneDecorCapture<'_>,
     column: &mut Div,
-    capture: SceneDecorCapture<'_>,
     cx: &mut App,
 ) {
     let SceneDecorFacts {
@@ -2010,7 +2003,7 @@ fn paint_scene_decorations(
         capture_front,
         back_copy,
         incoming_copy,
-    } = facts;
+    } = *facts;
     let capturing = capture_front || back_copy || incoming_copy;
     for decor in decorations {
         // 背景图没全到就先把捕获副本标成不完整：缺一张的纹理一旦被记成
@@ -2051,6 +2044,7 @@ fn paint_scene_decorations(
         }
         column.extend(decoration_child(decor, atlas, view, cx));
     }
+    paint_scene_audios(audios, audio_state, facts, capture, column);
 }
 
 /// 一屏插图要的那几格只读输入（从 `RenderFrame` 里拆出来，避免整包借用打架）。

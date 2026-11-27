@@ -13,13 +13,13 @@ mod types;
 mod types2;
 mod types3;
 pub use cascade::cascade;
+use derived::first_strong_direction;
 pub(super) use known::KNOWN_UNIMPLEMENTED;
 pub use types::{
     BackgroundAttachment, BackgroundAxis, BackgroundEdge, BackgroundLayer, BackgroundPosition,
     BackgroundRepeat, BackgroundSize, BackgroundTile, BoxSizing, Clear, Float,
 };
 pub use types2::{
-
     BackgroundClip, BreakWhen, CellVAlign, Color, ColumnFill, ColumnSpan, Cursor, FontKerning,
     FontSmoothing, FontStretch, Hyphens, InlineVAlign, Length, Positioning, RubyAlign,
     RubyPosition, SvgLineCap, SvgLineJoin, SvgPaint, TextCombine, TextRendering, TextShadow,
@@ -203,20 +203,6 @@ impl WritingMode {
 /// （调用方留继承值 —— 「不知道」不等于「左」）。
 ///
 /// 「强方向」按 UAX #9 就是 Bidi_Class ∈ {L, R, AL}。两条容易踩的正好都在这里：
-/// **阿拉伯文与希伯来文是 `AL` 而不是 `R`**，只认 `R` 会把一整类 RTL 的书判成 LTR；
-/// **CJK 汉字的 Bidi_Class 是 `L`**，所以中文段落在第一个字就上定下来，不必扫完全文。
-///
-/// 表用 `unicode-bidi`（锁里本来就有那一份，理由写在根 `Cargo.toml`），自己不抄那七千行区间。
-pub(super) fn first_strong_direction(text: &str) -> Option<Direction> {
-    use unicode_bidi::BidiClass::{AL, L, R};
-    text.chars()
-        .find_map(|ch| match unicode_bidi::bidi_class(ch) {
-            L => Some(Direction::Ltr),
-            R | AL => Some(Direction::Rtl),
-            _ => None,
-        })
-}
-
 impl TextAlign {
     /// 折成物理一侧。只有 `Start` / `End` 跟着 `direction` 翻，其余原样。
     pub fn physical(self, dir: Direction) -> TextAlign {
@@ -914,14 +900,22 @@ impl Default for ComputedStyle {
             padding_right: Length::ZERO,
             display: Display::Block,
             flex_direction: FlexDirection::default(),
-            flex_wrap: FlexWrap::default(), align_items: AlignItems::default(), align_self: None,
-            justify_content: JustifyContent::default(), align_content: AlignContent::default(),
-            row_gap: None, column_gap: None,
-            column_count: None, column_width: None,
+            flex_wrap: FlexWrap::default(),
+            align_items: AlignItems::default(),
+            align_self: None,
+            justify_content: JustifyContent::default(),
+            align_content: AlignContent::default(),
+            row_gap: None,
+            column_gap: None,
+            column_count: None,
+            column_width: None,
             column_fill: ColumnFill::Balance,
             column_rule: BorderEdge::default(),
             column_span: ColumnSpan::default(),
-            flex_grow: 0.0, flex_shrink: 1.0, flex_basis: None, order: 0,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: None,
+            order: 0,
             z_index: 0,
             opacity: 1.0,
             paint_opacity: 1.0,
@@ -947,7 +941,8 @@ impl Default for ComputedStyle {
             text_transform: TextTransform::None,
             text_combine: TextCombine::None,
             text_size_adjust: None,
-            grid_template_columns: Arc::from(Vec::new()), grid_template_rows: Arc::from(Vec::new()),
+            grid_template_columns: Arc::from(Vec::new()),
+            grid_template_rows: Arc::from(Vec::new()),
             background_clip: BackgroundClip::BorderBox,
             background_origin: BackgroundClip::PaddingBox,
             grid_column_start: None,
@@ -1105,14 +1100,18 @@ impl std::hash::Hash for ComputedStyle {
         (self.flex_wrap as u8).hash(h);
         (self.align_items as u8).hash(h);
         self.align_self.map(|v| v as u8).hash(h);
-        (self.justify_content as u8).hash(h); (self.align_content as u8).hash(h);
-        opt_len(&self.row_gap, h); opt_len(&self.column_gap, h);
+        (self.justify_content as u8).hash(h);
+        (self.align_content as u8).hash(h);
+        opt_len(&self.row_gap, h);
+        opt_len(&self.column_gap, h);
         self.column_count.hash(h);
         opt_len(&self.column_width, h);
         (self.column_fill as u8, self.column_span as u8).hash(h);
         self.column_rule.width.to_bits().hash(h);
         (self.column_rule.style as u8, self.column_rule.color).hash(h);
-        f(self.flex_grow, h); f(self.flex_shrink, h); opt_len(&self.flex_basis, h);
+        f(self.flex_grow, h);
+        f(self.flex_shrink, h);
+        opt_len(&self.flex_basis, h);
         self.order.hash(h);
         self.z_index.hash(h);
         f(self.opacity, h);
@@ -1168,7 +1167,11 @@ impl std::hash::Hash for ComputedStyle {
         (self.text_transform as u8).hash(h);
         self.text_combine.hash(h);
         self.text_size_adjust.map(f32::to_bits).hash(h);
-        (self.grid_template_columns.len(), self.grid_template_rows.len()).hash(h); // grid 轨道长度
+        (
+            self.grid_template_columns.len(),
+            self.grid_template_rows.len(),
+        )
+            .hash(h); // grid 轨道长度
         (self.background_clip as u8).hash(h);
         self.backdrop_blur.map(f32::to_bits).hash(h);
         (self.background_origin as u8).hash(h);
@@ -1177,7 +1180,10 @@ impl std::hash::Hash for ComputedStyle {
         self.grid_row_start.hash(h);
         self.grid_row_span.hash(h);
         (self.justify_self as u8).hash(h);
-        let tracks = self.grid_template_columns.iter().chain(self.grid_template_rows.iter());
+        let tracks = self
+            .grid_template_columns
+            .iter()
+            .chain(self.grid_template_rows.iter());
         for track in tracks {
             match track {
                 GridTrack::Length(l) => {

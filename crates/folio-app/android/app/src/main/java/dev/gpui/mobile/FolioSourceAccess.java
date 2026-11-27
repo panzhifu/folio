@@ -15,8 +15,12 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 
 /** Device-local SAF access. The database owns source links, never this bridge. */
 public final class FolioSourceAccess {
@@ -107,8 +111,37 @@ public final class FolioSourceAccess {
         return uri != null && "content".equals(uri.getScheme())
                 && uri.getAuthority() != null && !uri.getAuthority().isEmpty();
     }
+
+    /**
+     * URIs this process received from ACTION_VIEW / ACTION_SEND intents ("open with Folio").
+     *
+     * <p>Intent-granted access is <b>transient</b>: it is valid for as long as the process
+     * lives, but it never shows up in {@link ContentResolver#getPersistedUriPermissions},
+     * which is all {@link #hasReadGrant} used to look at — so an "open with Folio" tap was
+     * always rejected with {@code permission_denied}. Intents register their URIs here on
+     * arrival ({@link GpuiActivity#rememberIntentUris}); reads admit registry members
+     * alongside persistably-granted ones. Bounded: intents arrive one at a time.</p>
+     */
+    private static final Set<Uri> INTENT_URIS = Collections.synchronizedSet(new LinkedHashSet<>());
+    private static final int INTENT_URI_CAP = 16;
+
+    /** Register a URI this process just received from an intent. Called on the main thread. */
+    public static void rememberIntentUri(Uri uri) {
+        if (!isContent(uri)) return;
+        synchronized (INTENT_URIS) {
+            INTENT_URIS.remove(uri);
+            INTENT_URIS.add(uri);
+            while (INTENT_URIS.size() > INTENT_URI_CAP) {
+                Iterator<Uri> it = INTENT_URIS.iterator();
+                it.next();
+                it.remove();
+            }
+        }
+    }
+
     private static boolean hasReadGrant(Context context, Uri uri) {
         if (!isContent(uri)) return false;
+        if (INTENT_URIS.contains(uri)) return true;
         for (UriPermission permission : context.getContentResolver().getPersistedUriPermissions()) {
             if (permission.isReadPermission() && uri.equals(permission.getUri())) return true;
         }

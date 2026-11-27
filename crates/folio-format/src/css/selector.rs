@@ -59,6 +59,20 @@ pub enum Simple {
         b: i32,
     },
     Lang(String),
+    PseudoClass(PseudoClass),
+}
+
+/// 单冒号**状态伪类**。静态阅读器没有「悬停过/访问过」这些运行时状态，收进来的
+/// 意义只在「选择器认识、规则不整块丢弃」——古登堡的书满篇 `a:link` / `a:visited`，
+/// 判不认识等于把作者的链接配色整块扔了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoClass {
+    /// `:link`：命中带 `href` 的 `<a>`。阅读器里的链接只有未访问态，`:visited`
+    /// 不单设一档（两档都收会让后写的 `:visited` 颜色盖掉全部链接）。
+    Link,
+    /// `:visited` / `:hover` / `:active` / `:focus`：需要运行时状态，静态阅读器
+    /// **永不命中**。声明进层叠但落不到元素上，宁缺毋滥。
+    Never,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,7 +133,8 @@ impl Compound {
                 | Simple::FirstChild
                 | Simple::LastChild
                 | Simple::NthChild { .. }
-                | Simple::Lang(_) => classes += 1,
+                | Simple::Lang(_)
+                | Simple::PseudoClass(_) => classes += 1,
                 Simple::Type(_) => types += 1,
                 Simple::Universal => {}
             }
@@ -175,6 +190,16 @@ impl Compound {
             Simple::Lang(prefix) => {
                 nearest_lang(dom, node).is_some_and(|l| lang_matches(&l, prefix))
             }
+            Simple::PseudoClass(PseudoClass::Link) => {
+                // 阅读器里的链接只有未访问态：带 `href` 的 `<a>` 就是 `:link`。
+                let is_anchor = dom
+                    .get(node)
+                    .tag
+                    .as_ref()
+                    .is_some_and(|tag| tag.local.as_str().eq_ignore_ascii_case("a"));
+                is_anchor && dom.attr(node, "href").is_some()
+            }
+            Simple::PseudoClass(PseudoClass::Never) => false,
         })
     }
 }
@@ -377,6 +402,11 @@ fn parse_simple(cur: &mut Cursor, first: char) -> Option<Simple> {
                     let arg = read_until(cur, ')')?;
                     let arg = arg.trim().trim_matches('"').trim_matches('\'').to_string();
                     (!arg.is_empty()).then_some(Simple::Lang(arg))
+                }
+                // 状态伪类：匹配口径见 [`PseudoClass`]。伪元素走双冒号那条路，这里不混。
+                "link" => Some(Simple::PseudoClass(PseudoClass::Link)),
+                "visited" | "hover" | "active" | "focus" => {
+                    Some(Simple::PseudoClass(PseudoClass::Never))
                 }
                 _ => None,
             }

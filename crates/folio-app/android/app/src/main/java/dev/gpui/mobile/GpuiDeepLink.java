@@ -12,7 +12,14 @@ public class GpuiDeepLink {
         if (intent == null) return null;
         String action = intent.getAction();
         Uri data = intent.getData();
-        if (data != null && (Intent.ACTION_VIEW.equals(action) || Intent.ACTION_MAIN.equals(action))) {
+        if (data == null && Intent.ACTION_SEND.equals(action)) {
+            // "Share to Folio" cold start: the document lives in EXTRA_STREAM, the data
+            // slot is empty. Same channel as the hot path (nativeOnDeepLink) — the Rust
+            // side routes content:// into the import queue.
+            data = GpuiActivity.streamOf(intent);
+        }
+        if (data != null && (Intent.ACTION_VIEW.equals(action) || Intent.ACTION_MAIN.equals(action)
+                || Intent.ACTION_SEND.equals(action))) {
             return data.toString();
         }
         return null;

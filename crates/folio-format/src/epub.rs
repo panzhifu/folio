@@ -1947,6 +1947,7 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
     // 读出来拼好 —— 那是测试与「我就是要全文」的调用方。
     let mut css_hrefs = Vec::new();
     let mut css = String::new();
+    let mut seen = std::collections::HashSet::new();
     for item in opf.items.iter().filter(|i| i.media_type == "text/css") {
         let name = resolve(&base_dir, &item.href);
         // `locate` 返回容器里**真实**那条目名（大小写与分隔符都可能和 OPF 写的不一样），
@@ -1959,11 +1960,11 @@ fn read_with_impl(path: &Path, with_text: bool, budget: ParseBudget) -> Result<(
         if !with_text {
             continue;
         }
-        let Some(text) = zip.read_text(&found) else {
-            continue;
-        };
-        css.push_str(&super::absolutize_css_urls(&text, &dir_of(&found)));
-        css.push('\n');
+        if let Some(text) = crate::css::imports::expand_manifest_entry(&mut zip, &found, &mut seen)
+        {
+            css.push_str(&text);
+            css.push('\n');
+        }
     }
 
     // 目录：EPUB3 靠 manifest 的 `properties="nav"` 认（nav 文档常常不在 spine 里），

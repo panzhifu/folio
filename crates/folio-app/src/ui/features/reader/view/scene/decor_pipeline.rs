@@ -5,13 +5,29 @@
 //! 「哪些块带装饰」已在排版换代的同一批里折好（`Layout::decor_seeds`）。
 
 use folio_core::content::format::css::computed::{BorderStyle, Color};
-use folio_core::layout::DecorSeed;
+use folio_core::content::format::resolve_href;
+use folio_core::layout::{AudioRow, DecorSeed};
 use gpui_kit::{Bounds, Hsla, Pixels, point, px, size};
 
 use super::tiles::background_tiles;
 use super::{BlockDecor, BlockOutline, BlockPicture, BlockShadow};
 use crate::ui::foundation::images::ChapterImages;
 use crate::ui::foundation::style::run_color;
+
+/// 可见范围内的一条音频行：几何由排版短表折好，播放状态由绘制侧现读会话
+///（改了不许重排，与「看第几张」同一口径）。
+#[derive(Debug)]
+pub struct VisibleAudio {
+    /// 相对本元素原点的左上角与尺寸（逻辑像素）。
+    pub x: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+    /// 折成容器路径的资源 href；播放状态的键，命中侧读同一份短表折出同一个值。
+    pub href: String,
+    /// 主题前景：按钮墨与进度条都从它落（不认作者颜色，音频行是 app 的控件）。
+    pub foreground: Hsla,
+}
 
 /// 把排版层的 `ClipRect` 折成屏幕框；平移规则与 `Scene::build` 里的 inline/cross 同源。
 ///
@@ -48,6 +64,8 @@ pub(in crate::ui::features::reader) fn screen_clip(
 /// 横排下那道竖带子等价于 `BlockDecor` 的左边界（`push_border(side=3)` 画的正好是
 /// `(x, top, width, height)` 那条带子）；竖排下排版侧已把它投影成横带，落在上边界
 /// （`side=0`）。复用边框那条路，省掉一族只画栏线的绘制原语。
+/// 八个实参里坐标那几条是一体的（栏带、原点、游标），分组反而打断折法的阅读顺序。
+#[allow(clippy::too_many_arguments)]
 fn place_column_rules(
     rules: &[folio_core::layout::ColumnRule],
     band: (f32, f32),
@@ -112,6 +130,8 @@ fn place_column_rules(
 #[allow(clippy::too_many_arguments)] // 九个都是「这一帧」的输入，包成结构体只是换个地方摆
 pub(in crate::ui::features::reader) fn place_decorations(
     seeds: &[DecorSeed],
+    // 音频行短表：命中与绘制读同一份（折算在本函数尾部，与装饰同一套平移）。
+    audio_rows: &[AudioRow],
     // 可见带，已经折到**盒子自己那一条被裁的轴**上：横排是 y 的一段，竖排是物理 x 的一段
     // （`Scene::build` 里从推进轴翻回来一次，这里不再各折一遍）。
     band: (f32, f32),
@@ -130,7 +150,7 @@ pub(in crate::ui::features::reader) fn place_decorations(
     picture_only_chapter: bool,
     // 多栏容器的栏间分隔线（排版侧已按块折好），与块装饰共用一张绘制表。
     column_rules: &[folio_core::layout::ColumnRule],
-) -> Vec<BlockDecor> {
+) -> (Vec<BlockDecor>, Vec<VisibleAudio>) {
     let mut out = Vec::new();
     for (index, seed) in seeds.iter().enumerate() {
         // 被背板接管的那一条自己不算；其余 `full_bleed` 的也跟着跳过是既有口径 ——
@@ -265,5 +285,32 @@ pub(in crate::ui::features::reader) fn place_decorations(
         top,
         foreground,
     ));
-    out
+    // 音频行：短表按可见带裁一刀，平移与装饰同一套；短表极短，线性扫就是正确的那一刀。
+    let audios = audio_rows
+        .iter()
+        .filter_map(|row| {
+            let (start, thick) = if vertical {
+                (row.x, row.width)
+            } else {
+                (row.y, row.height)
+            };
+            if start + thick < band.0 || start > band.1 {
+                return None;
+            }
+            let (left, top_px) = if vertical {
+                (x + row.x + slide, top + row.y)
+            } else {
+                (x + row.x, row.y - origin_y + top)
+            };
+            Some(VisibleAudio {
+                x: left,
+                top: top_px,
+                width: row.width,
+                height: row.height,
+                href: resolve_href(images.base_dir(), &row.src),
+                foreground,
+            })
+        })
+        .collect();
+    (out, audios)
 }

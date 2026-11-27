@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 长按图标的静态快捷方式。intent 带 folio://action/… 的 data：热路径走
+     GpuiActivity.onNewIntent → nativeOnDeepLink，冷启动走 GpuiDeepLink.getInitialLink，
+     Rust 侧 cloud_link::deliver 的入站分流把动作送进 services::routing，外壳渲染帧导航。 -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="read"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_read"
+        android:shortcutShortLabel="@string/shortcut_read"
+        android:shortcutLongLabel="@string/shortcut_read">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="folio://action/read"
+            android:targetPackage="dev.folio.reader"
+            android:targetClass="dev.gpui.mobile.GpuiActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="notes"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_notes"
+        android:shortcutShortLabel="@string/shortcut_notes"
+        android:shortcutLongLabel="@string/shortcut_notes">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="folio://action/notes"
+            android:targetPackage="dev.folio.reader"
+            android:targetClass="dev.gpui.mobile.GpuiActivity" />
+    </shortcut>
+</shortcuts>

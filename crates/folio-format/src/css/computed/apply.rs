@@ -27,7 +27,10 @@ use crate::css::value::{
 };
 
 #[inline]
-fn set<T: Copy>(slot: &mut T, value: T) -> bool { *slot = value; true }
+fn set<T: Copy>(slot: &mut T, value: T) -> bool {
+    *slot = value;
+    true
+}
 
 /// 返回 false 表示这条声明不认识（或值解析失败），由调用方计入 ignored。
 /// `root_px` 是根字号（rem 按它折）；`parent` 是 font-size 的相对基准（CSS 的规定）。
@@ -768,7 +771,11 @@ pub(super) fn apply(
             "space-evenly" => set(&mut style.align_content, AlignContent::SpaceEvenly),
             _ => false,
         },
-        "order" => value.trim().parse::<i32>().ok().is_some_and(|v| set(&mut style.order, v)),
+        "order" => value
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .is_some_and(|v| set(&mut style.order, v)),
         // `gap: <row> [<column>]`：一列值时横纵相同，两列值时分别给 row/column。
         // `normal` 是初值，落到 `None`（不插缝）。
         "gap" => {

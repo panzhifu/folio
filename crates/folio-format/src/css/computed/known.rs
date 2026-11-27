@@ -8,6 +8,11 @@
 /// （`width`、`text-decoration`、`float`），若按不支持计数，ignored 会被刷到
 /// 几百条，真正需要关注的「我们没预料到的写法」就淹没了。
 pub(crate) const KNOWN_UNIMPLEMENTED: &[&str] = &[
+    // `-webkit-text-stroke` 2026-11-28 收进来：Calibre 系工具给标题加描边
+    // （`-webkit-text-stroke: 1px black` 一类），AZW3 语料里 176 个元素身上都有。
+    // gpui 没有文字描边通道，一期不生效；收认的意义在「不把整块样式计成不认识」，
+    // 值再怪（样本书里就有 `-webkit-text-stroke: -webkit-text`）也不丢。
+    "-webkit-text-stroke",
     // `background` 简写 2026-10-14 起**接住了它里面的颜色**（见 `apply` 的 `background`
     // 那一臂）：出版书里「深色底块 + 白字标题」满地都是，只认 `background-color`
     // 会让这种标题变成白纸上的白字、整条标题消失。2026-10-23 这一轮把 `url(...)`

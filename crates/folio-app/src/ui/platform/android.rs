@@ -1,7 +1,6 @@
 //! Android 入口
 
 use gpui_kit::TextRenderingMode::Grayscale;
-use gpui_kit::assets::AllAssets;
 use gpui_kit::{App, Application};
 use gpui_mobile::android::jni;
 use std::fmt::Write as _;
@@ -74,9 +73,13 @@ fn android_main(app: android_activity::AndroidApp) {
     // 这里接一手送进队列（见 `services::cloud_link`）。装在 `run` 之前 —— 应用可能
     // 就是**被这条链接拉起**的，那一条要在第一帧之前就排上。
     crate::ui::services::cloud_link::install();
+    // 网络可用性监听（断→连补一次云盘同步）：boot 前装一次，进程活着就一直报。
+    register_network_watch();
     tracing::info!("android_main: creating GPUI Application");
     Application::with_platform(shared.into_rc())
-        .with_assets(AllAssets)
+        // 图标子集（folio 用到的 + gpui-kit 组件默认名单兜底），不再嵌全部 1830 个
+        // lucide svg —— 名单见 platform::icons。
+        .with_assets(super::icons::FolioAssets)
         .run(move |cx: &mut App| {
             tracing::info!("android_main: run callback — booting the app shell");
             // 启用灰度抗锯齿像素渲染
@@ -218,6 +221,30 @@ pub(crate) fn set_screen_brightness(value: Option<f32>) {
     }) {
         Ok(()) => tracing::debug!("set_screen_brightness: {wanted} 已递给系统"),
         Err(err) => tracing::warn!("set_screen_brightness: {err}"),
+    }
+}
+
+/// 阅读页挂着时让屏幕常亮（`on=false` 交还系统）。窗口 flag：不用权限、不动别的
+/// app，`FLAG_KEEP_SCREEN_ON` 的加减就是全部语义。形状照 [`set_screen_brightness`]：
+/// 递给 Java、它自己切回 UI 线程（窗口 flag 属于 UI 线程，理由同那一条），失败只写
+/// 日志 —— 亮不亮都是小事，不该把阅读页拖退。
+pub(crate) fn set_keep_screen_on(on: bool) {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("setKeepScreenOn"),
+            ::jni::jni_sig!("(Landroid/app/Activity;Z)V"),
+            &[JValue::Object(&act), JValue::Bool(on)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("set_keep_screen_on: {on} 已递给系统"),
+        Err(err) => tracing::warn!("set_keep_screen_on: {err}"),
     }
 }
 
@@ -602,4 +629,160 @@ fn system_property(key: &str) -> Option<String> {
     std::str::from_utf8(&value[..len as usize])
         .ok()
         .map(str::to_string)
+}
+
+// ── 网络监听（ConnectivityManager.NetworkCallback） ─────────────────────────
+
+/// 装网络可用性回调（boot 前调一次，见 `android_main`）：Java 侧一条
+/// `registerNetworkCallback`，转移经下面的 `nativeNetworkChange` 导出落进
+/// `services::net_watch`。失败只写日志 —— 少了这条监听只是恢复网络后要手动同步。
+pub(crate) fn register_network_watch() {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.GpuiSystemUi")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("registerNetworkCallback"),
+            ::jni::jni_sig!("(Landroid/app/Activity;)V"),
+            &[JValue::Object(&act)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("register_network_watch: 已装上"),
+        Err(err) => tracing::warn!("register_network_watch: {err}"),
+    }
+}
+
+/// Java → Rust：网络可用性变化（每张网各报一次，去重在 Rust 那侧的状态机里）。
+/// 与 `nativeMediaAction` 同一个形状。
+///
+/// # Safety
+/// 只能由 JVM 在持有有效 JNIEnv 的线程上调用。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_dev_gpui_mobile_GpuiSystemUi_nativeNetworkChange(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    available: ::jni::sys::jboolean,
+) {
+    crate::ui::services::net_watch::deliver(available);
+}
+
+// ── 听书前台服务（FolioSpeechService） ──────────────────────────────────────
+
+/// 听书开播 / 换句 / 暂停：把「在念什么」递给前台服务（`FolioSpeechService`）。
+/// 服务没起过就借这一条起（`startForegroundService` 幂等），起过了就刷新会话与通知。
+/// 副题截断在调用方（120 字），这里原样递。
+pub(crate) fn speech_remote_show(playing: bool, title: &str, subtitle: &str) {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.FolioSpeechService")?;
+        let title = env
+            .new_string(title)
+            .map_err(|_| "听书标题无法交给系统".to_string())?;
+        let subtitle = env
+            .new_string(subtitle)
+            .map_err(|_| "听书副题无法交给系统".to_string())?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("start"),
+            ::jni::jni_sig!("(Landroid/app/Activity;ZLjava/lang/String;Ljava/lang/String;)V"),
+            &[
+                JValue::Object(&act),
+                JValue::Bool(playing),
+                JValue::Object(&title),
+                JValue::Object(&subtitle),
+            ],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("speech_remote_show: playing={playing} 已递给系统"),
+        Err(err) => tracing::warn!("speech_remote_show: {err}"),
+    }
+}
+
+/// 听书收摊：停掉前台服务、撤掉通知与会话。失败只写日志 —— 通知多挂一会儿不是崩。
+pub(crate) fn speech_remote_hide() {
+    use ::jni::objects::JValue;
+    use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+    match with_env(|env| {
+        let act = activity(env)?;
+        let cls = find_app_class(env, "dev.gpui.mobile.FolioSpeechService")?;
+        env.call_static_method(
+            &cls,
+            ::jni::jni_str!("stop"),
+            ::jni::jni_sig!("(Landroid/app/Activity;)V"),
+            &[JValue::Object(&act)],
+        )
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }) {
+        Ok(()) => tracing::debug!("speech_remote_hide: 已递给系统"),
+        Err(err) => tracing::warn!("speech_remote_hide: {err}"),
+    }
+}
+
+/// 通知运行时权限（API 33+）：没授过就在**后台线程**问一次 —— fork 的权限同步 API
+/// 会等结果，在界面线程上等就是冻屏。授权前的首枚通知不显示（前台服务照跑、进程照
+/// 保护，锁屏控制等授权后才有）。一个进程只问一次：读者拒绝的话，每句朗读前都弹窗
+/// 就是骚扰。
+pub(crate) fn request_notifications() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REQUESTED: AtomicBool = AtomicBool::new(false);
+    if REQUESTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _ = std::thread::spawn(|| {
+        use ::jni::objects::JValue;
+        use gpui_mobile::android::jni::{activity, find_app_class, with_env};
+        let result = with_env(|env| {
+            let act = activity(env)?;
+            let cls = find_app_class(env, "dev.gpui.mobile.GpuiPermissions")?;
+            let permission = env
+                .new_string("android.permission.POST_NOTIFICATIONS")
+                .map_err(|_| "权限名无法交给系统".to_string())?;
+            env.call_static_method(
+                &cls,
+                ::jni::jni_str!("requestPermission"),
+                ::jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;)I"),
+                &[JValue::Object(&act), JValue::Object(&permission)],
+            )
+            .and_then(|value| value.i())
+            .map(|status| status as i64)
+            .map_err(|err| err.to_string())
+        });
+        match result {
+            Ok(status) => tracing::info!("request_notifications: 权限状态 {status}"),
+            Err(err) => tracing::warn!("request_notifications: {err}"),
+        }
+    });
+}
+
+/// Java → Rust：通知 / 锁屏 / 耳机上的传输键（"play" / "pause" / "stop" / "next" /
+/// "previous"）。JNI 按类名解析这个符号；命令排队进 `services::speech_remote`，外壳
+/// 渲染帧取走。与 fork `jni.rs` 里 `nativeOnDeepLink` 同一个形状：原始指针进来、
+/// `with_env` 包一层、字符串落队。
+///
+/// # Safety
+/// 只能由 JVM 在持有有效 JNIEnv 的线程上调用，`action` 必须是合法的 jstring。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn Java_dev_gpui_mobile_FolioSpeechService_nativeMediaAction(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    action: *mut std::ffi::c_void,
+) {
+    let action_raw = action as ::jni::sys::jobject;
+    let _ = gpui_mobile::android::jni::with_env(|env| {
+        let obj = unsafe { ::jni::objects::JObject::from_raw(env, action_raw) };
+        let command = gpui_mobile::android::jni::get_string(env, &obj);
+        // 字符串落地即放手：JObject 归 JNI 调用帧所有，不能活过这一段。
+        drop(obj);
+        crate::ui::services::speech_remote::deliver(&command);
+        Ok(())
+    });
 }

@@ -15,6 +15,7 @@
 //! 下沉之后书内搜索（folio-search）与字体装载（folio-fonts）才能站在它上面而不必
 //! 咬住 folio-core。
 
+mod author_css;
 mod book;
 
 pub use book::BookDocument;

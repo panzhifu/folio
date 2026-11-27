@@ -8,6 +8,9 @@
 
 pub(in crate::ui::features::reader) mod ai;
 pub(in crate::ui::features::reader) mod annotations;
+pub(in crate::ui::features::reader) mod audio;
+#[cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))]
+pub(in crate::ui::features::reader) mod audio_desktop;
 pub(in crate::ui::features::reader) mod book;
 pub(in crate::ui::features::reader) mod book_fonts;
 pub(in crate::ui::features::reader) mod bookmarks;
@@ -23,6 +26,7 @@ pub(in crate::ui::features::reader) mod links;
 pub(in crate::ui::features::reader) mod measure;
 pub(in crate::ui::features::reader) mod memory;
 pub(in crate::ui::features::reader) mod page_geometry;
+pub(in crate::ui::features::reader) mod page_types;
 pub(in crate::ui::features::reader) mod paging;
 pub(in crate::ui::features::reader) mod perf;
 pub(in crate::ui::features::reader) mod position;
@@ -31,6 +35,7 @@ pub(in crate::ui::features::reader) mod reading_time;
 pub(in crate::ui::features::reader) mod rules_draft;
 pub(in crate::ui::features::reader) mod session;
 pub(in crate::ui::features::reader) mod speech;
+pub(in crate::ui::features::reader) mod speech_remote;
 pub(in crate::ui::features::reader) mod speech_routing;
 pub(in crate::ui::features::reader) mod swipe;
 pub(in crate::ui::features::reader) mod toc;

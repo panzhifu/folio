@@ -19,21 +19,21 @@ use folio_core::content::format::css::computed::{
 use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode, cjk_latin_gap};
 use gpui_kit::{
-    App, Bounds, ContentMask, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, LayoutId, Length, LineLayout, Pixels, Point,
-    SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle, WeakEntity, Window, black,
-    fill, point, px, relative, size,
+    App, Bounds, ContentMask, Element, ElementId, Font, GlobalElementId, Hsla, InspectorElementId,
+    LayoutId, Length, LineLayout, Pixels, Point, SharedString, StrikethroughStyle, Style, TextRun,
+    UnderlineStyle, WeakEntity, Window, black, fill, point, px, relative, size,
 };
 
 use crate::ui::features::reader::components::selection::{self, SelectionVisual};
 use crate::ui::features::reader::model::session::ReaderSession;
 
+mod bold;
 mod decorations;
 pub(in crate::ui::features::reader) mod marks;
-pub(in crate::ui::features::reader) use marks::{Mark, WAVE_HEIGHT, WAVE_LENGTH, paint_mark, wave_half_waves};
 use decorations::{
     decoration_y, paint_emphasis, paint_rule, paint_shadows, rendering_mode, transformed_origin,
 };
+pub(in crate::ui::features::reader) use marks::{Mark, WAVE_HEIGHT, paint_mark};
 
 /// 一条已经定好位置的 run，等于 `folio_core::layout::LineRun` 的绘制侧投影。
 /// `x` / `baseline` 相对本元素原点（行框左上角，未滚动时就是版心左上角）。
@@ -541,36 +541,6 @@ pub(in crate::ui::features::reader) fn shape(window: &Window, run: &GlyphRun) ->
 /// 把一条 run 画出来：几何取自 shaping 表（没有就当场 shape 一次），再逐字形
 /// `paint_glyph`。
 ///
-/// 假粗体：700 已传进 `Font`，但 fontdb 只挑同族最接近的真实面；家族只有 400 时
-/// 700 仍落回 400 —— 浏览器会做合成粗体，gpui 不做。判据是「700 与 400 resolve 到
-/// 同一个 FontId」：同一个面就叠印一遍，真有粗体面时那一格不同，绝不重复画。
-fn needs_synthetic_bold(window: &Window, font: &Font, cache: &mut HashMap<Font, bool>) -> bool {
-    if font.weight.0 < 600.0 {
-        return false;
-    }
-    if let Some(known) = cache.get(font) {
-        return *known;
-    }
-    let normal = Font {
-        weight: FontWeight::NORMAL,
-        ..font.clone()
-    };
-    let bold_id = window.text_system().resolve_font(font);
-    let normal_id = window.text_system().resolve_font(&normal);
-    let needed = wants_synthetic_bold_when(font, bold_id == normal_id);
-    cache.insert(font.clone(), needed);
-    needed
-}
-
-/// 请求了粗体，而且这个家族只有 regular 那一面。
-fn wants_synthetic_bold_when(font: &Font, same_face: bool) -> bool {
-    wants_synthetic_bold(font) && same_face
-}
-
-fn wants_synthetic_bold(font: &Font) -> bool {
-    font.weight.0 >= 600.0
-}
-
 /// 走一遍这一条 run 的字形，按阅读序算好每个字的**物理位置**（相对元素原点），
 /// 对每个「折页之后还留着」的字调用 `emit`，返回画了几个字。
 ///
@@ -677,7 +647,7 @@ fn paint_run(
     // 基线在侧轴上的位置），经 `project` 才知道各落在物理的哪根轴上。
     let flow = run.flow;
     let (run_inline, run_cross) = flow.project(run.x, run.baseline);
-    let embolden = needs_synthetic_bold(window, &run.font, synthetic_bold);
+    let embolden = bold::needs_synthetic_bold(window, &run.font, synthetic_bold);
     let __t_glyph = crate::ui::features::reader::model::perf::Timer::start();
     let glyphs = for_each_glyph(run, &shaped, |x, y, shaped_run, glyph| {
         let at = point(origin.x + px(x), origin.y + px(y));
@@ -787,8 +757,12 @@ mod tests {
     //!
     //! 点名导入而不是 `use super::*`：`gpui_kit` 转出整个 `gpui`，里面有个叫 `test` 的属性宏，
     //! glob 会让 `#[test]` 递归展开成它。
+    use super::bold::wants_synthetic_bold_when;
     use super::decorations::shadow_copies;
-    use super::{WAVE_LENGTH, decoration_y, wants_synthetic_bold_when, wave_half_waves};
+    use super::{
+        decoration_y,
+        marks::{WAVE_LENGTH, wave_half_waves},
+    };
     use folio_core::content::format::css::computed::TextShadow;
     use gpui_kit::{Font, FontWeight, Pixels, px};
 

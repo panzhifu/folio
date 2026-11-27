@@ -3,18 +3,21 @@
 use std::sync::Arc;
 
 use crate::ui::features::reader::motion::turn_animation;
+use crate::ui::features::reader::view::body::paper::CaptureRole;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::StyledExt as _;
 
 use super::images::painted_picture;
 use crate::ui::features::reader::model::image_atlas::ImageAtlas;
+use crate::ui::features::reader::view::scene::decor_pipeline::VisibleAudio;
 use crate::ui::features::reader::view::scene::{
     BlockDecor, BlockOutline, BlockPicture, BlockShadow,
 };
 use folio_core::content::format::css::computed::BorderStyle;
 use gpui_kit::{
-    AnyElement, App, Background, BoxShadow, Corners, Entity, EntityId, Hsla, IntoElement,
+    AnyElement, App, Background, BoxShadow, Corners, Div, Entity, EntityId, Hsla, IntoElement,
     ParentElement as _, PathBuilder, Pixels, Point, RenderImage, Styled, Window, div, img, point,
-    px,
+    px, relative, svg,
 };
 
 /// 把要盖在纸上的那一个多边形填进场景。顶点已经带在元素坐标里（与字形的 `run.x` /
@@ -581,4 +584,126 @@ mod tests {
         assert_eq!(out[1].blur_radius, px(0.0), "负模糊归 0");
         assert!(out[1].inset);
     }
+}
+
+/// 一栏的音频播放行：实时层与三份捕获副本同装饰那条路 —— 翻页烘焙时行也要在纹理里，
+/// 否则折走的纸上有字没按钮。播放状态由调用方从会话本体现取一份快照递进来（渲染期间
+/// 不能再 read 同一实体，回归门抓过那一次双重租借）。
+/// 一栏的装饰这一帧归谁、按哪条折线裁。字段对音频绘制开放（音频行与装饰同走
+/// 捕获管线）；原来在 `reflowable.rs`，随音频绘制一起搬到这一间。
+pub(crate) struct SceneDecorFacts {
+    pub(crate) cut: Option<turn_animation::Cut>,
+    pub(crate) role: CaptureRole,
+    pub(crate) capture_front: bool,
+    pub(crate) back_copy: bool,
+    pub(crate) incoming_copy: bool,
+}
+
+/// 装饰要写的那几格捕获副本。字段同上。
+pub(crate) struct SceneDecorCapture<'a> {
+    pub(crate) front_decor: &'a mut Vec<AnyElement>,
+    pub(crate) back_children: &'a mut Vec<AnyElement>,
+    pub(crate) incoming_children: &'a mut Vec<AnyElement>,
+    pub(crate) front_missing: &'a mut bool,
+    pub(crate) back_missing: &'a mut bool,
+    pub(crate) incoming_missing: &'a mut bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_scene_audios(
+    audios: Vec<VisibleAudio>,
+    state: &crate::ui::features::reader::model::audio::AudioState,
+    facts: &SceneDecorFacts,
+    capture: &mut SceneDecorCapture<'_>,
+    column: &mut Div,
+) {
+    for row in audios {
+        let child = || audio_row_child(&row, state);
+        if facts.capture_front {
+            capture.front_decor.push(child());
+        }
+        if facts.back_copy {
+            capture.back_children.push(child());
+        }
+        if facts.incoming_copy {
+            capture.incoming_children.push(child());
+        }
+        if !facts.role.draws_main() {
+            continue;
+        }
+        if facts
+            .cut
+            .is_some_and(|cut| !cut.keeps(row.x + row.width * 0.5, row.top + row.height * 0.5))
+        {
+            continue;
+        }
+        column.extend(Some(child()));
+    }
+}
+
+/// 一条音频播放行的样子：左侧播放/暂停按钮，右侧一条进度。
+///
+/// 点击不挂在这里 —— 点行走正文的 `on_body_tap`（块盒命中，[`ReaderSession::toggle_audio_at`]），
+/// 这一层只画；元素不带监听，击打穿透给正文那层。颜色全部落主题前景：音频行是 app 的
+/// 控件，不认作者颜色。播放状态与这条行对不上（没播过这条）时画静止的按钮、零进度。
+fn audio_row_child(
+    row: &VisibleAudio,
+    state: &crate::ui::features::reader::model::audio::AudioState,
+) -> AnyElement {
+    let is_current = state.current.as_deref() == Some(row.href.as_str());
+    let playing = is_current && state.playing;
+    let fraction = if is_current {
+        state
+            .duration
+            .filter(|duration| duration.as_secs_f32() > 0.0)
+            .map(|duration| (state.position.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0))
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let fg = row.foreground;
+    // 两档浅色都从前景落：底盒与按钮一档、进度槽一档，水墨模式随主题已经去过饱和。
+    let plate = fg.opacity(0.10);
+    let soft = fg.opacity(0.18);
+    div()
+        .absolute()
+        .left(px(row.x))
+        .top(px(row.top))
+        .w(px(row.width))
+        .h(px(row.height))
+        .bg(plate)
+        .corner_radii(Corners::all(px(10.0)))
+        .flex()
+        .items_center()
+        .px(px(12.0))
+        .gap(px(10.0))
+        .child(
+            div()
+                .size(px(28.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(soft)
+                .child(
+                    svg()
+                        .path(if playing {
+                            IconName::Pause.path()
+                        } else {
+                            IconName::Play.path()
+                        })
+                        .size(px(14.0))
+                        .text_color(fg),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .h(px(3.0))
+                .rounded_full()
+                .bg(soft)
+                .overflow_hidden()
+                .child(div().h_full().w(relative(fraction)).bg(fg).rounded_full()),
+        )
+        .into_any_element()
 }

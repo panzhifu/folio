@@ -1,5 +1,3 @@
-
-
 //! `ComputedStyle` 计算：单位换算、继承、ignored 计数、层叠端到端。
 //! 只依赖公开 API。选择器命中和 specificity / `!important` 的排序在 `css::tests`
 
@@ -8,7 +6,6 @@
 use crate::css::computed::{
     BackgroundAttachment, BackgroundAxis, BackgroundClip, BackgroundEdge, BackgroundPosition,
     BackgroundSize, BackgroundTile, BorderEdge, BorderStyle, BoxSizing, BreakWhen, Clear, Color,
-
     ComputedStyle, DeclStatus, DecorationStyle, Direction, Display, Float, GridTrack, Hyphens,
     Length, ListStyle, RubyAlign, RubyPosition, StyledDom, TextAlign, TextJustify, WordBreak,
     WritingMode, cascade, declaration_status,

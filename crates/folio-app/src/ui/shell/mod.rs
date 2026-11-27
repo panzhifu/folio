@@ -1150,7 +1150,11 @@ impl AppShell {
     ) -> AnyElement {
         let width = f32::from(window.viewport_size().width).max(1.0);
         let (shift, alpha) = layer_offset(sample.phase, sample.progress, width);
-        let alpha = if stealth_service::is_quiet(cx) { 0.0 } else { alpha };
+        let alpha = if stealth_service::is_quiet(cx) {
+            0.0
+        } else {
+            alpha
+        };
         // 捕获层要按最终位置烘页：把外壳这一帧的横移交给正文，正文用 `-shift` 抵消。
         //
         // 只在**进场**那一段交：退场那一段整层同时在淡出（`alpha` 从 1 走到 0，见
@@ -1457,7 +1461,7 @@ impl Render for AppShell {
                 crate::ui::platform::set_screen_brightness(brightness);
             });
         }
-        self.was_active = active;
+        navigation::inbound::inbound(self, window, cx); // 入站钩子 + was_active 结账
 
         // 欢迎页先于主界面：书库位置没确认前，导航与内容都不画，整屏让给欢迎页。
         // 安全区照样扣（顶/底都 pad）：移动端手势条与状态栏是系统的地盘，不是应用 chrome。

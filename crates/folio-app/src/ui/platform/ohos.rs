@@ -24,13 +24,13 @@ pub extern "C" fn ohos_napi_init(
         // 图标会是一片空白，而且是静默的空白。走 `install_with_assets` 而不是在
         // 下面的闭包里想办法：`Application::with_assets` 消费的是 builder 本身，
         // 而闭包只拿到 `&mut App`（与 Android 臂的 `start_with_assets` 同一条理由）。
-        // `AllAssets` 是编译期嵌进 `.so` 的那一份（rust-embed），所以鸿蒙这边不需要
-        // 再去接 ArkTS 的 rawfile / resourceManager。
+        // 图标子集（folio 用到的 + gpui-kit 组件默认名单兜底）是编译期嵌进 `.so`
+        // 的那一份（宏逐个嵌字节），鸿蒙这边不需要再接 ArkTS 的 rawfile。
         gpui_mobile::ohos::napi::install_with_assets(
             env,
             exports,
             "folio_app",
-            gpui_kit::assets::AllAssets,
+            super::icons::FolioAssets,
             Box::new(|cx: &mut App| {
                 // 与 iOS 同一条：在模块初始化回调里读配置 + 装日志，再把配置交给 `boot`。
                 if !super::restore::activate() {

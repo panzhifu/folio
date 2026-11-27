@@ -5,7 +5,7 @@
 //! 纯数（栏数解算与贪心配平）在 `layout::columns`，这一份只做「量、摆、收口」。
 
 use super::super::columns;
-use super::{Ctx, Display, NodeId, PlacedFloat, Positioning, Slot, attr_count};
+use super::{Ctx, Display, NodeId, PlacedFloat, Positioning, Slot, attr_count, collapse_margins};
 use crate::geometry::ColumnRule;
 use crate::wrap::Insets;
 use folio_format::css::computed::{ColumnFill, ColumnSpan, ComputedStyle};
@@ -237,7 +237,7 @@ impl<'a> Ctx<'a> {
             let mut prev_bottom = 0.0f32;
             for &ui in col {
                 let unit = &mut units[ui];
-                cy += Self::collapse_margins(unit.mt, prev_bottom);
+                cy += collapse_margins(unit.mt, prev_bottom);
                 let dy = y0 + cy;
                 for line in &mut self.lines[unit.lines.0..unit.lines.1] {
                     line.x += dx;
@@ -274,7 +274,7 @@ impl<'a> Ctx<'a> {
             let mut prev_bottom = 0.0f32;
             for &ui in col {
                 let s = self.style_of(kids[ui]);
-                h += Self::collapse_margins(s.margin_top.resolve(col_w), prev_bottom) + weights[ui];
+                h += collapse_margins(s.margin_top.resolve(col_w), prev_bottom) + weights[ui];
                 prev_bottom = s.margin_bottom.resolve(col_w);
             }
             content_h = content_h.max(h);

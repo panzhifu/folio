@@ -598,6 +598,11 @@ impl ReadingPage {
         cx.emit(ReadingPageEvent::Closed);
     }
 
+    /// 听书遥控（通知 / 锁屏 / 耳机线控）的传输命令转给 [`listen_controls`]。
+    pub fn apply_speech_commands(&mut self, commands: &[&str], cx: &mut Context<Self>) {
+        listen_controls::apply_commands(self, commands, cx);
+    }
+
     /// 正文上的一击：先让选中说话（拖选松手的豁免、选中的清除/菜单回开），
     /// 再按分区照结果动。见 [`chrome::Chrome::handle_body_tap`] 与
     /// `selection.rs` 的 `tap_with_selection`。
@@ -621,6 +626,12 @@ impl ReadingPage {
         // 豁免仍在 `tap_on_body` 里判过）。
         if self.reader.update(cx, |reader, cx| {
             reader.open_footnote_at(window, cx, position)
+        }) {
+            return;
+        }
+        // 音频行优先于链接：播放行本身是控件（点它是暂停/续播或换曲），不是「跳 href」。
+        if self.reader.update(cx, |reader, cx| {
+            reader.toggle_audio_at(window, cx, position)
         }) {
             return;
         }
@@ -794,35 +805,6 @@ impl ReadingPage {
             self.listen_open = false;
             cx.notify();
         }
-    }
-
-    /// 上一句 / 下一句：按**这一章**的文稿走一步。到头就停在头尾。
-    ///
-    /// 只把「念哪一句」交出去，不动列表：文稿那一面的居中与滚动在 [`Self::listen_overlay`]
-    /// 里按正在念的那一句算，这里再滚一次就是把同一个决定做两遍。让位那格要清掉 ——
-    /// 读者按下一句就是要让屏跟着走，不是还在自己翻。
-    fn listen_step(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some((chapter, range)) = self.reader.read(cx).speech_range() else {
-            return;
-        };
-        let Some(script) = self.listen_script.clone() else {
-            return;
-        };
-        if script.chapter != chapter {
-            return;
-        }
-        let Some(ix) = sentence_index(&script.sentences, range.start) else {
-            return;
-        };
-        let last = script.sentences.len().saturating_sub(1) as isize;
-        let target = (ix as isize + delta).clamp(0, last) as usize;
-        if target == ix {
-            return;
-        }
-        let want = script.sentences[target].chapter.clone();
-        self.listen_manual_at = None;
-        self.reader
-            .update(cx, |reader, cx| reader.speak_from(chapter, want, cx));
     }
 
     /// 缓存书封面和标题，随阅读页释放。
@@ -1330,7 +1312,7 @@ impl ReadingPage {
                     .accessibility_label(prev_label)
                     .disabled(!can_prev)
                     .on_click(move |_, _, cx| {
-                        page_prev.update(cx, |this, cx| this.listen_step(-1, cx))
+                        page_prev.update(cx, |this, cx| listen_controls::listen_step(this, -1, cx))
                     }),
             )
             .child(
@@ -1359,7 +1341,7 @@ impl ReadingPage {
                     .accessibility_label(next_label)
                     .disabled(!can_next)
                     .on_click(move |_, _, cx| {
-                        page_next.update(cx, |this, cx| this.listen_step(1, cx))
+                        page_next.update(cx, |this, cx| listen_controls::listen_step(this, 1, cx))
                     }),
             );
 
@@ -2131,7 +2113,11 @@ impl Render for ReadingPage {
             .id("reader-page")
             .size_full()
             .relative()
-            .bg(if quiet { paper.bg.opacity(0.0) } else { paper.bg })
+            .bg(if quiet {
+                paper.bg.opacity(0.0)
+            } else {
+                paper.bg
+            })
             .text_color(paper.fg)
             .child(column);
         // 目录那一屏最后挂：`anchored` 层按登记的先后决定谁在上面，它盖的是整块窗口，

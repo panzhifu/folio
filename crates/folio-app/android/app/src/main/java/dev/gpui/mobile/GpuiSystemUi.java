@@ -273,6 +273,74 @@ public final class GpuiSystemUi {
         });
     }
 
+    /**
+     * Keep the screen awake while the reader layer is mounted (and hand it back when not).
+     *
+     * <p>{@link WindowManager.LayoutParams#FLAG_KEEP_SCREEN_ON} is a window flag: it needs no
+     * permission, touches nobody else's app, and clearing it returns the decision to the
+     * system. Window flags live on the UI thread for the same reason as
+     * {@link #setWindowBrightness} — same shape, same failure policy.</p>
+     *
+     * <p>Called by Rust, from any thread.</p>
+     */
+    public static void setKeepScreenOn(Activity activity, boolean on) {
+        if (activity == null) return;
+        final boolean wanted = on;
+        activity.runOnUiThread(() -> {
+            try {
+                Window window = activity.getWindow();
+                if (wanted) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                }
+            } catch (Exception e) {
+                // A refused keep-screen-on must not take the reader's page down with it.
+                android.util.Log.w("GpuiSystemUi", "setKeepScreenOn failed", e);
+            }
+        });
+    }
+
+    /**
+     * Watch network availability for the whole process. Transitions (not per-network
+     * events — several transports can coexist) land in Rust via
+     * {@link #nativeNetworkChange}, where the net watch service de-duplicates them and
+     * triggers a cloud re-sync when connectivity returns.
+     *
+     * <p>Registered once at boot; a lost process takes its callback with it, so there is
+     * nothing to unregister. Failures are logged, never thrown — a missed watch only
+     * means the next manual sync happens a bit later.</p>
+     *
+     * <p>Called by Rust, from any thread.</p>
+     */
+    public static void registerNetworkCallback(Activity activity) {
+        if (activity == null) return;
+        try {
+            android.net.ConnectivityManager manager = (android.net.ConnectivityManager)
+                    activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) return;
+            android.net.NetworkRequest request = new android.net.NetworkRequest.Builder()
+                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+            manager.registerNetworkCallback(request, new android.net.ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(android.net.Network network) {
+                    nativeNetworkChange(true);
+                }
+
+                @Override
+                public void onLost(android.net.Network network) {
+                    nativeNetworkChange(false);
+                }
+            });
+        } catch (Exception e) {
+            android.util.Log.w("GpuiSystemUi", "registerNetworkCallback failed", e);
+        }
+    }
+
+    /** Rust side net watch: a network availability transition. JNI resolves the symbol. */
+    private static native void nativeNetworkChange(boolean available);
+
     private static void apply(Activity activity, boolean immersive) {
         Window window = activity.getWindow();
         View decor = window.getDecorView();

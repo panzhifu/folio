@@ -137,6 +137,18 @@ pub(in crate::ui::features::settings) fn layout_page(cx: &App) -> Page {
                     .keywords(&["image", "图片", "缩放", "铺满", "出血"]),
                 ],
             ),
+            group(
+                tr(cx, "group.screen"),
+                vec![
+                    Row::toggle(
+                        tr(cx, "field.keep_screen_on"),
+                        |cx| ConfigHolder::appearance(cx).keep_screen_on,
+                        |val, cx| ConfigHolder::edit_appearance(cx, |p| p.keep_screen_on = val),
+                    )
+                    .description(tr(cx, "field.keep_screen_on.desc"))
+                    .keywords(&["screen", "awake", "keep", "常亮", "息屏", "锁屏", "听书"]),
+                ],
+            ),
         ],
     )
 }

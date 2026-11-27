@@ -6,7 +6,7 @@
 
 mod rows;
 
-use super::{AlignItems, Ctx, Display, NodeId, Positioning};
+use super::{AlignItems, Ctx, Display, NodeId, Positioning, definite};
 use folio_format::css::computed::{GridTrack, JustifySelf};
 use rows::{Span, auto_row_sizes, row_offsets, solve_rows, span_height};
 
@@ -65,7 +65,7 @@ impl<'a> Ctx<'a> {
         let row_tracks: Vec<GridTrack> = style.grid_template_rows.to_vec();
         let row_basis = style
             .height
-            .and_then(|h| Self::definite(Some(h), cb_h))
+            .and_then(|h| definite(Some(h), cb_h))
             .map(|px| style.content_size(px, pt + pb))
             .unwrap_or(content_w);
         let spec: Vec<crate::grid::Item> = items

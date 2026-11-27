@@ -2,6 +2,8 @@
 //!
 //! 从 `computed.rs` 切出来只因为那个文件贴着行数上限；`impl` 仍在同一 crate 内。
 
+use super::Direction;
+
 use super::{BackgroundLayer, ComputedStyle, FontKerning, TextRendering};
 
 impl ComputedStyle {
@@ -39,4 +41,21 @@ impl ComputedStyle {
         }
         out
     }
+}
+
+/// 一段文本的第一个**强方向**字符定全段方向；没有强字符回 `None`（交给上层按
+/// 文档语言兜底）。
+///
+/// **阿拉伯文与希伯来文是 `AL` 而不是 `R`**，只认 `R` 会把一整类 RTL 的书判成 LTR；
+/// **CJK 汉字的 Bidi_Class 是 `L`**，所以中文段落在第一个字就上定下来，不必扫完全文。
+///
+/// 表用 `unicode-bidi`（锁里本来就有那一份，理由写在根 `Cargo.toml`），自己不抄那七千行区间。
+pub(super) fn first_strong_direction(text: &str) -> Option<Direction> {
+    use unicode_bidi::BidiClass::{AL, L, R};
+    text.chars()
+        .find_map(|ch| match unicode_bidi::bidi_class(ch) {
+            L => Some(Direction::Ltr),
+            R | AL => Some(Direction::Rtl),
+            _ => None,
+        })
 }

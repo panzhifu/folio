@@ -36,7 +36,7 @@ pub(in crate::ui::features::reader) struct Speech {
     engine: Option<Engine>,
     /// None = 未准备或正在初始化。
     available: Option<bool>,
-    state: Listen,
+    pub(in crate::ui::features::reader) state: Listen,
     speaking_since: Option<Instant>,
     /// 归一到 1× 的实测字/秒；切换声音后失效。
     chars_per_sec: Option<f32>,
@@ -234,6 +234,7 @@ impl ReaderSession {
             });
         }
         self.speech.state = Listen::Idle;
+        self.sync_speech_remote();
     }
 
     pub(in crate::ui::features::reader) fn on_speech_event(
@@ -318,6 +319,7 @@ impl ReaderSession {
             self.speech.state = Listen::Paused { chapter, range };
             // 暂停的那段不算进这一句的实测时长：恢复时 `speak_sentence` 会重新记起点。
             self.speech.speaking_since = None;
+            self.sync_speech_remote();
         }
     }
 
@@ -383,6 +385,7 @@ impl ReaderSession {
                 pitch: settings.pitch,
             });
             self.speech.speaking_since = None;
+            self.sync_speech_remote();
         }
         cx.notify();
     }
@@ -461,13 +464,6 @@ impl ReaderSession {
             return;
         };
         self.speak_sentence(chapter, range, cx);
-    }
-}
-
-impl Drop for ReaderSession {
-    /// 离开阅读页 = 停听 + 落库。谁在念跟着那一屏走，不跟着进程走。
-    fn drop(&mut self) {
-        self.stop_speech();
     }
 }
 

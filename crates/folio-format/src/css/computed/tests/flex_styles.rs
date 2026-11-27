@@ -24,4 +24,3 @@ fn flex_shorthand_splits_into_grow_shrink_basis() {
     assert_eq!(c.flex_grow, 1.0);
     assert_eq!(c.flex_basis, Some(Length::Px(50.0)));
 }
-

@@ -7,6 +7,7 @@
 pub(in crate::ui::features::shelf) mod book_info;
 mod covers;
 pub(in crate::ui::features::shelf) mod grid;
+pub(in crate::ui::features::shelf) mod intent_import;
 pub(in crate::ui::features::shelf) mod network_import;
 pub(in crate::ui::features::shelf) mod scan;
 pub(in crate::ui::features::shelf) mod sheets;
@@ -2040,6 +2041,8 @@ impl Render for ShelfView {
         if !self.import_log_loaded {
             self.load_import_log(cx);
         }
+        // intent 送进来的文件入口（「用 Folio 打开」/「分享到 Folio」）：队列排空即导入。
+        intent_import::run(cx);
         // 上传实体是全进程那一份：换了这一屏实例、或后台那趟在别处发起，这一帧第一次
         // 看到它时挂上观察，完成时才有一次重画把「正在传」换成结果。
         if self._upload_watch.is_none()

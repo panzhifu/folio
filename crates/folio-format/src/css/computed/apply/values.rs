@@ -420,8 +420,11 @@ pub(super) fn apply_grid_tracks(
     rows: bool,
 ) -> bool {
     if value.trim().eq_ignore_ascii_case("none") {
-        if rows { style.grid_template_rows = Arc::from(Vec::new()); }
-        else { style.grid_template_columns = Arc::from(Vec::new()); }
+        if rows {
+            style.grid_template_rows = Arc::from(Vec::new());
+        } else {
+            style.grid_template_columns = Arc::from(Vec::new());
+        }
         return true;
     }
     let tokens = split_value_tokens(value.trim());
@@ -442,7 +445,9 @@ pub(super) fn apply_grid_tracks(
         if low.starts_with("minmax(") && low.ends_with(')') {
             let inner = &low[7..low.len() - 1];
             let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
-            if parts.len() != 2 { return false; }
+            if parts.len() != 2 {
+                return false;
+            }
             let min = edge_length(parts[0], own, root_px, false).unwrap_or(Length::Px(0.0));
             // max 一侧可能是 `1fr` / `max-content` / 普通长度。
             if let Some(fr) = parts[1]
@@ -468,8 +473,11 @@ pub(super) fn apply_grid_tracks(
             None => return false,
         }
     }
-    if rows { style.grid_template_rows = Arc::from(tracks); }
-    else { style.grid_template_columns = Arc::from(tracks); }
+    if rows {
+        style.grid_template_rows = Arc::from(tracks);
+    } else {
+        style.grid_template_columns = Arc::from(tracks);
+    }
     true
 }
 
@@ -477,7 +485,9 @@ pub(super) fn apply_grid_tracks(
 /// 只收正整数与 `span`；负线号与 `auto` 之外的自动关键字判不认识。
 pub(super) fn apply_grid_line(style: &mut ComputedStyle, column: bool, value: &str) -> bool {
     let parts: Vec<&str> = value.split('/').map(str::trim).collect();
-    if parts.is_empty() || parts.len() > 2 { return false; }
+    if parts.is_empty() || parts.len() > 2 {
+        return false;
+    }
     let mut start: Option<u16> = None;
     let mut span: u16 = 1;
     let first = parts[0].to_ascii_lowercase();

@@ -110,7 +110,9 @@ fn parses_the_supported_forms() {
 fn rejects_constructs_outside_the_subset() {
     // 清单外的构造必须整条作废，不能部分生效。
     for text in [
-        "p:hover",
+        // `:hover` 2026-11-28 起收认（状态伪类，永不命中）；`focus-within`
+        // 这类组合型伪类仍是清单外。
+        "p:focus-within",
         "div::first-line",
         "a:not(b)",
         "p > ",

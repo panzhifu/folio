@@ -29,6 +29,9 @@ pub mod ohos;
 // 纯函数与测试在桌面也要跑。
 pub mod system_fonts;
 
+// 图标子集（见模块头）：三端入口的 with_assets 都拿这一份。
+pub mod icons;
+
 // 读者自装字体（下载 / 导入）的重注册：boot 时照配置清单把字节灌回文本系统，
 // 会话内装完一份也走这一脚。与 system_fonts 同一条不分档的理由。
 mod android_sources;
@@ -36,7 +39,7 @@ mod android_sources;
 mod android_speech;
 mod restore;
 pub mod user_fonts;
-pub(crate) use android_sources::{source_access, source_for_pick};
+pub(crate) use android_sources::{import_uri_to_temp, source_access, source_for_pick};
 pub(crate) use restore::CAN_QUIT_FOR_RESTORE;
 
 // ── 移动三端共用的启动 ────────────────────────────────────────────────────────
@@ -352,6 +355,48 @@ pub(crate) fn set_screen_brightness(value: Option<f32>) {
 
 #[cfg(not(target_os = "android"))]
 pub(crate) fn set_screen_brightness(_value: Option<f32>) {}
+
+/// 阅读层挂着时让屏幕常亮（`on=false` 交还系统）。
+///
+/// - **Android**：递给 `GpuiSystemUi.setKeepScreenOn`（窗口 flag `FLAG_KEEP_SCREEN_ON`，
+///   不用权限；前后台切换会重建窗口，flag 会丢，所以外壳每次回前台都重递一遍）。
+/// - **桌面 / iOS / HarmonyOS**：桌面没有息屏问题，iOS 的口是整机 idle timer（动了会
+///   带走读者的系统设置），这一版都不接管。听书与内嵌音频播放时阅读层挂着，自动覆盖。
+#[cfg(target_os = "android")]
+pub(crate) fn set_keep_screen_on(on: bool) {
+    android::set_keep_screen_on(on);
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn set_keep_screen_on(_on: bool) {}
+
+/// 听书开播 / 换句 / 暂停：把「在念什么」递给前台服务 —— Android 上那是进程保护 +
+/// 锁屏控制的全部来路；其它平台没有这一层，安静不做。
+#[cfg(target_os = "android")]
+pub(crate) fn speech_remote_show(playing: bool, title: &str, subtitle: &str) {
+    android::speech_remote_show(playing, title, subtitle);
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn speech_remote_show(_playing: bool, _title: &str, _subtitle: &str) {}
+
+/// 听书收摊：停服务、撤通知。非安卓 no-op。
+#[cfg(target_os = "android")]
+pub(crate) fn speech_remote_hide() {
+    android::speech_remote_hide();
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn speech_remote_hide() {}
+
+/// 通知运行时权限（API 33+）没授过就问一次。非安卓没有运行时通知权限这一档。
+#[cfg(target_os = "android")]
+pub(crate) fn request_notifications() {
+    android::request_notifications();
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn request_notifications() {}
 
 /// 这一端的「界面亮度」是被**背光**压暗的，还是该由应用自己压一层黑。
 ///

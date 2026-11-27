@@ -302,41 +302,23 @@ impl Document for BookDocument {
     }
 
     fn stylesheet(&self) -> String {
-        let ContentRef::Reflow(flow) = self.content() else {
-            // 定版式没有作者样式表。
-            return String::new();
-        };
-        if !flow.css.is_empty() {
-            // 文本就在手上（`read` 全文路径、`from_content`、旧库兜底）—— 直接用。
-            return flow.css.clone();
-        }
-        if flow.css_hrefs.is_empty() {
-            return String::new();
-        }
+        // 装配口径（清单优先、每份用自己的目录折、`@import` 展开）在
+        // `author_css::assemble` 那一份里；这里只交出容器读取的两条路。
+        let content = self.content();
         let Some((provider, path)) = self.container() else {
-            // 清单在、容器不在：与取不到章正文同一表现 —— 没有作者样式，正文照排。
+            let ContentRef::Reflow(flow) = content else {
+                return String::new();
+            };
+            if !flow.css.is_empty() {
+                return flow.css.clone();
+            }
             tracing::warn!(
                 "document: 作者样式 {} 份取不到（容器不在）",
                 flow.css_hrefs.len()
             );
             return String::new();
         };
-        let mut css = String::new();
-        for href in &flow.css_hrefs {
-            // 与取图同一条：容器先试（几份样式表共用一次打开），再退回 provider。
-            let text = self
-                .shared()
-                .and_then(|container| container.read_text(href))
-                .or_else(|| provider.entry_text(path, href));
-            let Some(text) = text else {
-                tracing::debug!("document: 样式表 {href} 不在容器里，跳过");
-                continue;
-            };
-            // 每份用它自己的目录解 `url()` —— 拼接之前做，基准才不会串。
-            css.push_str(&crate::absolutize_css_urls(&text, &crate::dir_of(href)));
-            css.push('\n');
-        }
-        css
+        super::author_css::assemble(&content, self.shared(), provider, path)
     }
 
     fn font_charset(&self) -> &[u32] {

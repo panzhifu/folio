@@ -134,7 +134,11 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
-            isMinifyEnabled = false
+            // R8 收紧 dex：JNI 反射的类靠 proguard-rules.pro 的 keep 名单活下来（名单
+            // 与 Rust 侧 find_app_class 的字符串一一对应，漏一个就是运行时 ClassNotFound）。
+            // shrinkResources 顺带剥掉没被引用的资源。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -225,12 +229,11 @@ android {
 }
 
 dependencies {
-    // AndroidX core for NotificationCompat (used by GpuiNotifications)
+    // AndroidX core for NotificationCompat (used by FolioSpeechService)
     implementation("androidx.core:core:1.12.0")
     // AndroidX SplashScreen compat (used by GpuiActivity to hold splash until native init)
     implementation("androidx.core:core-splashscreen:1.0.1")
-    // AndroidX Biometric for BiometricPrompt (used by GpuiAuthActivity)
-    implementation("androidx.biometric:biometric:1.1.0")
-    // AndroidX Media for MediaSessionCompat (used by GpuiMediaSession for system controls)
+    // AndroidX Media for MediaSessionCompat + MediaStyle (used by FolioSpeechService;
+    // 锁屏与通知上的听书控制都从它来。biometric 已随 GpuiAuthActivity 删除。)
     implementation("androidx.media:media:1.7.1")
 }

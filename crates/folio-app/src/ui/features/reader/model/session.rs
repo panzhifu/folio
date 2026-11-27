@@ -32,42 +32,14 @@ use crate::ui::features::reader::model::fixed_zoom::{
 };
 use crate::ui::features::reader::model::measure::FontCache;
 use crate::ui::features::reader::model::page_geometry::{ChromeBands, PageBox, PageInsets};
+pub(in crate::ui::features::reader) use crate::ui::features::reader::model::page_types::{
+    BackCommit, CaptureCommit, CurlMesh, IncomingCommit,
+};
 use crate::ui::features::reader::model::paging::AutoState;
 use crate::ui::features::reader::model::turn::TurnIntent;
 use crate::ui::features::reader::motion::turn_animation::Area;
 use crate::ui::host::device_family;
 use crate::ui::services::config::ConfigHolder;
-
-/// 仿真翻页那张页面网格的顶点与索引。
-///
-/// 它们只由页宽页高决定 —— 翻页进度改的是 uniform，顶点一个都不动。所以按尺寸缓存一份：
-/// 每帧重造是 9409 个顶点加 55296 个索引（近 1 MB）的分配与拷贝，全在 `render()` 里跑，
-/// 而算出来的字节和上一帧一模一样。
-#[derive(Clone)]
-pub(in crate::ui::features::reader) struct CurlMesh {
-    pub(in crate::ui::features::reader) width: f32,
-    pub(in crate::ui::features::reader) height: f32,
-    pub(in crate::ui::features::reader) vertices: Arc<[gpui_kit::PageCurlVertex]>,
-    pub(in crate::ui::features::reader) indices: Arc<[u32]>,
-}
-
-/// 「哪一帧把完整页框交给了捕获 pass」这一格：`(章号, 页号)` + 那一刻的窗口尺寸（逻辑像素）。
-///
-/// 键与尺寸要一起比，所以合成一个类型：页号章号在分屏 / 折叠展开 / surface 重建后一个字不动，
-/// 只有尺寸这一格拦得住那张被裁过的纹理。
-pub(in crate::ui::features::reader) type CaptureCommit = ((usize, usize), (f32, f32));
-
-/// 背面那张纹理里躺着的是哪一格：`(章号, 页号, 物理栏)` + 那一刻的窗口尺寸。
-///
-/// 比正面那一格多出**栏**：双页折页揭起来那张纸的背面是目标跨页的另一半，同一个页号在
-/// 往前翻与往回翻时要的是左右两栏里不同的那一栏（栏号是物理的，RTL 的书与逻辑序相反）。
-pub(in crate::ui::features::reader) type BackCommit = ((usize, usize, usize), (f32, f32));
-
-/// 进场页那张纹理里躺着的是哪一格：`(章号, 页号)` + 那一刻的窗口尺寸。
-///
-/// 口径同 [`CaptureCommit`]。只服务平摊翻页（左右平移 / 上下平移 / 覆盖）：那一族没有
-/// 背面与栏可言，进场页整张进纹理，键不需要栏那一格。
-pub(in crate::ui::features::reader) type IncomingCommit = ((usize, usize), (f32, f32));
 
 /// 视图现在拿的是什么内容。
 pub enum Source {
@@ -600,6 +572,10 @@ pub struct ReaderSession {
     /// 引擎句柄、可用性与播放状态。引擎本身是进程级单例（`folio_core::speech::engine`），
     /// 这里持的是它的克隆；开书时 `speech_attach` 挂上，离开阅读页时 `Drop` 停掉。
     pub(in crate::ui::features::reader) speech: crate::ui::features::reader::model::speech::Speech,
+
+    /// 播放/暂停/进度（内嵌音频；点击音频行切换、离页停，读写与收尾在 `model/audio.rs`）。
+    pub(in crate::ui::features::reader) audio:
+        crate::ui::features::reader::model::audio::AudioPlayer,
 }
 
 /// 按章缓存的解锚结果：章下标 →（这批结果出自哪一代排版，区间表）。
@@ -843,6 +819,7 @@ impl ReaderSession {
             reading_last_activity: 0,
             reading_clock: None,
             speech: crate::ui::features::reader::model::speech::Speech::default(),
+            audio: crate::ui::features::reader::model::audio::AudioPlayer::new(),
         }
     }
 
@@ -1049,6 +1026,7 @@ impl ReaderSession {
             reading_last_activity: 0,
             reading_clock: None,
             speech: crate::ui::features::reader::model::speech::Speech::default(),
+            audio: crate::ui::features::reader::model::audio::AudioPlayer::new(),
         };
         // 屏上要有读者划过的痕迹，就得先知道库里有哪些。开书这一条路（`with_document`）
         // 与换书那一条（`open_book`）都要过一遍，漏一处就是「重开书批注不见了」。

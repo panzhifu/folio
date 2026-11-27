@@ -122,4 +122,3 @@ fn paint_wave(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
         window.paint_path(built, color);
     }
 }
-

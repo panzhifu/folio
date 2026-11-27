@@ -1,26 +1,12 @@
 # android+relr 压缩动态重定位，并保留 API 26 loader 识别的 Android 标签。
-# 仅作用于 Android 目标，不能放进会影响宿主构建脚本的 build.rustflags。
+# force-unwind-tables=no：release 是 panic=abort，unwind 表（.eh_frame ≈7MB）只为崩溃
+# 回溯服务——去掉省 ~16% APK；代价是真崩溃时 tombstone 只剩地址，要复现就把这一格
+# 临时删掉再出包。仅作用于 Android 目标，不能放进会影响宿主构建脚本的 build.rustflags。
 [target.aarch64-linux-android]
-rustflags = ["-C", "link-arg=-Wl,--pack-dyn-relocs=android+relr"]
-
-# Local validation of the upgraded gpui-folio fork. Remove this block after the
-# branch is published and the workspace manifests point at the new revision.
-[patch.crates-io]
-gpui-pre = { path = "target/scratch/gpui-folio-0314/gpui-pre" }
-gpui-pre-wgpu = { path = "target/scratch/gpui-folio-0314/gpui-pre-wgpu" }
-gpui-pre-platform = { path = "target/scratch/gpui-folio-0314/gpui-pre-platform" }
-gpui-pre-apple = { path = "target/scratch/gpui-folio-0314/gpui-pre-apple" }
-gpui-pre-windows = { path = "target/scratch/gpui-folio-0314/gpui-pre-windows" }
-
-[patch."https://github.com/longbridge/gpui-kit.git"]
-gpui-base = { path = "target/scratch/gpui-kit-local/crates/base" }
-gpui-component = { path = "target/scratch/gpui-kit-local/crates/component" }
-gpui-component-macros = { path = "target/scratch/gpui-kit-local/crates/component-macros" }
-gpui-kit = { path = "target/scratch/gpui-kit-local/crates/kit" }
-gpui-kit-assets = { path = "target/scratch/gpui-kit-local/crates/assets" }
-
-[patch."https://github.com/panzhifu/gpui-mobile"]
-gpui-pre-mobile = { path = "target/scratch/mobile-upgrade" }
+rustflags = [
+    "-C", "link-arg=-Wl,--pack-dyn-relocs=android+relr",
+    "-C", "force-unwind-tables=no",
+]
 
 [alias]
 xtask = "run --quiet -p folio-xtask --"

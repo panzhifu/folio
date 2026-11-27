@@ -22,6 +22,7 @@
 
 mod bottom_bar;
 mod fold;
+pub(in crate::ui::shell) mod inbound;
 mod selection_bar;
 mod side_nav;
 mod surface;
