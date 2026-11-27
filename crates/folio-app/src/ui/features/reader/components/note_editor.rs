@@ -27,12 +27,13 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::popover::{Popover, PopoverState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, Context, Entity, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px,
+    ParentElement, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, Window, div, px,
 };
 
 use crate::ui::features::reader::model::annotations::MarkedRow;
@@ -57,8 +58,10 @@ pub(in crate::ui::features::reader) struct NoteEditor {
     /// `None` = 保存时才落一条新的。类型是 [`MarkedRow`] 而不是 `(id, 颜色)` 那一对：
     /// `update_annotation` 整条覆盖，少带一格就悄悄把读者另一格改的东西退回默认档。
     pub(in crate::ui::features::reader) annotation: Option<MarkedRow>,
-    /// 选中文字的开头一段（最多 160 字）。打开时取一次，不跟着每帧重切。
+    /// 选中的完整原文。打开时取一次；长段在下方有界滚动区里展开，不截断。
     pub(in crate::ui::features::reader) excerpt: SharedString,
+    /// 原文区的滚动位置。句柄跟随便签存活，不能每帧重造。
+    pub(in crate::ui::features::reader) excerpt_scroll: ScrollHandle,
     /// 三角对准的那一像素（窗口坐标里的横向，开这张卡时从菜单拍下来的快照）。
     /// `None` = 首帧还没量到菜单，渲染那一头兜底居中。
     pub(in crate::ui::features::reader) anchor_x: Option<f32>,
@@ -81,6 +84,7 @@ impl ReaderSession {
         let editor = self.note_editor.as_ref()?;
         let input = editor.input.clone();
         let excerpt = editor.excerpt.clone();
+        let excerpt_scroll = editor.excerpt_scroll.clone();
         let reader = cx.entity().clone();
         let scrim_reader = reader.clone();
         let can_save =
@@ -151,7 +155,15 @@ impl ReaderSession {
                                         .min_h(px(0.)),
                                 )
                                 .content(move |_, _, cx| {
-                                    note_card(&reader, &input, &excerpt, can_save, width, cx)
+                                    note_card(
+                                        &reader,
+                                        &input,
+                                        &excerpt,
+                                        &excerpt_scroll,
+                                        can_save,
+                                        width,
+                                        cx,
+                                    )
                                 }),
                         )
                         .into_any_element(),
@@ -174,6 +186,7 @@ fn note_card(
     reader: &Entity<ReaderSession>,
     input: &Entity<TextareaState>,
     excerpt: &SharedString,
+    excerpt_scroll: &ScrollHandle,
     can_save: bool,
     width: Pixels,
     cx: &mut Context<PopoverState>,
@@ -220,14 +233,18 @@ fn note_card(
         .when(!excerpt.is_empty(), |this| {
             this.child(
                 div()
+                    .id("reader-note-excerpt")
+                    .track_scroll(excerpt_scroll)
                     .w_full()
-                    .max_h(px(58.0))
-                    .overflow_hidden()
+                    .max_h(px(96.0))
+                    .overflow_y_scroll()
+                    .vertical_scrollbar(excerpt_scroll)
                     .border_l_2()
                     .border_color(border)
                     .pl_2()
+                    .pr_1()
+                    .py_1()
                     .text_sm()
-                    .line_clamp(2)
                     .text_color(muted)
                     .child(excerpt.clone()),
             )

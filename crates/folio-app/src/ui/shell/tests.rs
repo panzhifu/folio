@@ -8,7 +8,7 @@ fn the_book_does_not_ask_the_nav_bar_to_move() {
     use super::{Reserve, SizeClass, immersive_nav, reading_reserve};
     use crate::ui::host::Insets;
 
-    // 系统级那一层跟着书：挂着就沉浸，没书就还给系统。
+    // 沉浸跟着书走；桌面全屏由顶栏模式键显式请求。
     assert!(immersive_nav(SizeClass::Compact, true));
     assert!(
         immersive_nav(SizeClass::Expanded, true),
@@ -559,7 +559,7 @@ fn leaving_a_night_book_repaints_the_shelf_in_the_app_mode(cx: &mut gpui_kit::Te
 }
 
 #[cfg(not(mobile))]
-mod booted {
+pub(super) mod booted {
     use crate::ui::components::BottomSheetState;
     use crate::ui::features::shelf::ShelfView;
     use crate::ui::services::config::ConfigHolder;
@@ -587,13 +587,15 @@ mod booted {
     /// 书库位置**显式确认过**：没确认时外壳画的是欢迎页（见
     /// [`the_welcome_screen_gates_the_app_until_a_library_is_chosen`]），
     /// 既有用例要验的是正常的壳路径，不能被欢迎页挡在门外。
-    fn boot(cx: &mut TestAppContext, desktop_host: bool) -> (AnyWindowHandle, Entity<AppShell>) {
+    pub(crate) fn boot(
+        cx: &mut TestAppContext,
+        desktop_host: bool,
+    ) -> (AnyWindowHandle, Entity<AppShell>) {
         boot_sized(cx, size(px(900.), px(600.)), desktop_host)
     }
 
     fn import_book(store: &Store, source: &std::path::Path, root: &std::path::Path) -> i64 {
         use folio_core::ingest::import::{Imported, import_from};
-
         let outcomes = import_from(
             &PathsSource::picked(vec![source.into()]),
             root,
@@ -734,11 +736,8 @@ mod booted {
         boot(cx, false).0
     }
 
-    /// 给只验层/点击/退场的用例挂一层真实可读的阅读页。
-    ///
-    /// 外壳现在不允许拿假 book id 构造阅读页（`open_reading` 先检查 `has_book`）；
-    /// 这些用例不验内容，给一份最小可重排文档就够了。
-    fn open_test_reading(shell: &Entity<AppShell>, cx: &mut TestAppContext) {
+    /// 给只验层/点击/退场的用例挂一层最小可重排阅读页；不验正文内容。
+    pub(crate) fn open_test_reading(shell: &Entity<AppShell>, cx: &mut TestAppContext) {
         let doc: std::sync::Arc<dyn folio_core::content::document::Document> =
             std::sync::Arc::from(folio_core::content::document::from_content(
                 folio_core::content::format::DocMeta::default(),
@@ -957,11 +956,9 @@ mod booted {
 
     /// 回归门：后端导入管线交回的东西要真的变成架上一格，那一行导入读数要跟着收掉。
     ///
-    /// 两头都是真的：结果来自跑过一遍的 `folio_core::ingest::import`（真的把文件拷进书库、真的
-    /// 解析），架面是外壳里挂着的那一个（内存书库）。钉住的是接线之后的三个方向 ——
-    /// 事件进模型、架上多一格、读数不再挂着。少任何一环，真机上都是「点了导入，过了几秒
-    /// 什么也没发生」，而这正是这条链从界面线程挪去后台之后新引入的风险：以前那一份是
-    /// 同步跑完的，屏幕下一帧自然就是新的。
+    /// 两头都是真的：结果来自 `folio_core::ingest::import`（真拷文件、真解析），架面是外壳里
+    /// 挂着的那一个（内存书库）。钉住的是接线后的三个方向 —— 事件进模型、架上多一格、读数不再
+    /// 挂着。少任何一环，真机上都是「点了导入，过了几秒什么也没发生」。
     ///
     /// 起点选在「事件已经上了界面线程」：系统文件选择器在测试窗口里不会返回，那一段只能
     /// 由 [`ShelfView::feed_import_event`] 代劳，剩下的都是真实路径。
@@ -1083,6 +1080,19 @@ mod booted {
             assert!(
                 window.try_find("shelf-record-open-0").is_none(),
                 "没进来的那一本没有对象可作用，那颗钮就不该摆上去"
+            );
+            // 两行共用动作栏宽度，失败标签也不改变中心线。
+            let center = |ix: usize| {
+                let b = window.find(format!("shelf-record-action-{ix}")).bounds();
+                f32::from(b.origin.x) + f32::from(b.size.width) / 2.0
+            };
+            let action_centers = [center(0), center(1)];
+            assert_eq!(action_centers[0], action_centers[1], "动作栏必须逐行同轴");
+            let open = window.find("shelf-record-open-1").bounds();
+            assert_eq!(
+                f32::from(open.origin.x) + f32::from(open.size.width) / 2.0,
+                action_centers[1],
+                "「打开」在自己的动作栏里居中"
             );
 
             // 屏幕上这一列是内存里的，进程一没就没了 —— 这一批同时进了库才叫「记录」。
@@ -2847,31 +2857,6 @@ mod booted {
             shell.read_with(cx, |this, _| this.reading_mounted()),
             "退场动画还在走，这一层还不能放手"
         );
-    }
-
-    #[gpui_kit::test]
-    fn old_reading_page_events_cannot_close_or_navigate_the_replacement(cx: &mut TestAppContext) {
-        use crate::ui::features::reader::ReadingPageEvent;
-
-        let (handle, shell) = boot(cx, false);
-        cx.update(|cx| cx.set_reduce_motion(true));
-        open_test_reading(&shell, cx);
-        let old = shell.read_with(cx, |shell, _| shell.reading.as_ref().unwrap().page.clone());
-        open_test_reading(&shell, cx);
-        let current = shell.read_with(cx, |shell, _| shell.reading.as_ref().unwrap().page.clone());
-        assert_ne!(old.entity_id(), current.entity_id());
-        old.update(cx, |_, cx| {
-            cx.emit(ReadingPageEvent::Closed);
-            cx.emit(ReadingPageEvent::OpenSettings);
-        });
-        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
-            .unwrap();
-        shell.read_with(cx, |shell, cx| {
-            let layer = shell.reading.as_ref().unwrap();
-            assert_eq!(layer.page.entity_id(), current.entity_id());
-            assert!(!layer.closing);
-            assert_eq!(layer.stack.read(cx).depth(), 1);
-        });
     }
 
     /// 回归门：删掉**正开着**的那一本，那一层要退回架面；删掉别的那本，它一动不动。

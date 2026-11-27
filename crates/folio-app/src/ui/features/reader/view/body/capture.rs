@@ -232,14 +232,6 @@ impl Element for CaptureLayer {
     }
 }
 
-impl IntoElement for CaptureLayer {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 /// [`CaptureLayer`] 的构造口。`layer` 只能是 1 或 2 —— 0 是主场景，没有要夹的东西。
 pub(in crate::ui::features::reader) fn capture_layer(
     layer: u8,

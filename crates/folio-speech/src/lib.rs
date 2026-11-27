@@ -7,6 +7,8 @@ mod worker;
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub use engine::{Engine, engine, install_backend, prewarm, shutdown};
 pub use model::{

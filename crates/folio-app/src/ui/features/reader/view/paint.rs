@@ -20,7 +20,7 @@ use folio_core::infra::metrics::Metric;
 use folio_core::layout::{Justify, JustifyMode, cjk_latin_gap};
 use gpui_kit::{
     App, Bounds, ContentMask, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Length, LineLayout, Pixels, Point,
+    InspectorElementId, LayoutId, Length, LineLayout, Pixels, Point,
     SharedString, StrikethroughStyle, Style, TextRun, UnderlineStyle, WeakEntity, Window, black,
     fill, point, px, relative, size,
 };
@@ -386,7 +386,7 @@ impl Element for GlyphsElement {
             }
             __shape_ns.set(__shape_ns.get() + __t.ns());
         }
-        window.paint_layer(bounds, |window| {
+        window.paint_layer(|window| {
             for run in &self.runs {
                 let __t = crate::ui::features::reader::model::perf::Timer::start();
                 let mut paint = |window: &mut Window| {
@@ -420,14 +420,6 @@ impl Element for GlyphsElement {
             );
         }
         selection::paint_handles(&self.selection, bounds.origin, window);
-    }
-}
-
-impl IntoElement for GlyphsElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

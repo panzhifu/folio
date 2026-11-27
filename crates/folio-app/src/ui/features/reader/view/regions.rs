@@ -7,15 +7,16 @@
 use crate::ui::components::{PillSlider, THUMB_INSET, TopBar};
 use crate::ui::features::reader::model::chrome;
 use crate::ui::features::reader::model::session::ReaderSession;
-
 use crate::ui::features::reader::view::bands;
+use crate::ui::features::reader::ReadingPageEvent;
+use crate::ui::host::has_window_chrome;
 use crate::ui::services::l10n::{tf, tr};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::slider::{Slider, SliderState};
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt as _, ThemeMode,
-    ThemeStyled as _, h_flex, v_flex,
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, StyledExt as _, TITLE_BAR_HEIGHT,
+    ThemeMode, ThemeStyled as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -34,7 +35,11 @@ impl ReadingPage {
     ///
     /// 目录不摆在这一条上：两个档位都从底栏那格「目录」（[`Self::entry_row`]）开，
     /// 抽屉自己带关闭键，点遮罩、按返回也都收得掉 —— 顶栏不再多一颗只做同一件事的开关。
-    pub(in crate::ui::features::reader) fn top_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(in crate::ui::features::reader) fn top_bar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let page = cx.entity().clone();
         // 书签开关两端都在：钉的是「正在读的这一处」，与目录、设置那类入口不同类 ——
         // 它是有状态的开关（钉着 / 没钉），所以吃 `selected`。判据在会话里
@@ -55,15 +60,51 @@ impl ReadingPage {
             .accessibility_label(bookmark_label)
             .on_click(move |_, _, cx| bookmark_page.update(cx, |this, cx| this.toggle_bookmark(cx)))
             .into_any_element();
-        TopBar::new("reader-top-bar")
-            .overlay(self.top_inset)
+        let fullscreen = if has_window_chrome() {
+            // 桌面顶栏这颗切真全屏和窗口小屏：真全屏时自绘顶栏不可见，退出按 Esc。
+            let fullscreen_page = cx.entity().clone();
+            let fullscreen_on = window.is_fullscreen();
+            let fullscreen_label = tr(cx, "reader.fullscreen");
+            Some(
+                Button::new("reader-fullscreen-toggle")
+                    .ghost()
+                    .small()
+                    .tooltip(fullscreen_label.clone().to_string())
+                    .accessibility_label(fullscreen_label)
+                    .child(Icon::new(if fullscreen_on {
+                        IconName::Minimize2
+                    } else {
+                        IconName::Maximize2
+                    }))
+                    .on_click(move |_, _, cx| {
+                        fullscreen_page.update(cx, |_, cx| {
+                            cx.emit(ReadingPageEvent::SetFullscreen(!fullscreen_on))
+                        })
+                    })
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        // 小屏阅读时顶栏从自绘标题栏下面起，左边那一段是拖窗热区，别让返回键吞掉。
+        let top_inset = if has_window_chrome() && !window.is_fullscreen() {
+            self.top_inset - f32::from(TITLE_BAR_HEIGHT)
+        } else {
+            self.top_inset
+        }
+        .max(0.0);
+        let mut top_bar = TopBar::new("reader-top-bar")
+            .overlay(top_inset)
             .height(chrome::TOP_BAR_HEIGHT)
             .back_tooltip(tr(cx, "shelf.back"))
             .on_back(move |_, cx| {
                 page.update(cx, |this, cx| this.pop(cx));
             })
-            .child(bookmark)
-            .into_any_element()
+            .child(bookmark);
+        if let Some(fullscreen) = fullscreen {
+            top_bar = top_bar.child(fullscreen);
+        }
+        top_bar.into_any_element()
     }
 
     /// 底栏：一块卡片，从上到下是「状态行 + 进度行 + 一排入口」。

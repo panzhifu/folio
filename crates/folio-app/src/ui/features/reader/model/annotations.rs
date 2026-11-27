@@ -34,7 +34,7 @@ use folio_core::content::annotation::{ResolvedAnnotation, resolve_annotations};
 use folio_core::store::{ANNOTATION_COLORS, Annotation, AnnotationStyle};
 use gpui_kit::component::Theme;
 use gpui_kit::component::input::{InputEvent, TextareaState};
-use gpui_kit::{App, AppContext as _, Context, Hsla, Pixels, Point, Window};
+use gpui_kit::{App, AppContext as _, Context, Hsla, Pixels, Point, ScrollHandle, Window};
 
 use crate::ui::features::reader::components::note_editor::NoteEditor;
 use crate::ui::features::reader::components::selection;
@@ -505,20 +505,9 @@ impl ReaderSession {
             .and_then(|row| self.annotations.iter().find(|stored| stored.id == row.id))
             .map(|row| row.note.clone())
             .unwrap_or_default();
-        // 引文只留开头一段：选了一整章也能一秒画完，`line_clamp(2)` 之外的部分本来也看不见。
-        // 在这里取一次而不是每帧重切：便签压着时选区不会变。
-        let excerpt: String = self
-            .selected_text()
-            .map(|text| {
-                let mut chars = text.chars();
-                let head: String = chars.by_ref().take(160).collect();
-                if chars.next().is_some() {
-                    format!("{head}…")
-                } else {
-                    head
-                }
-            })
-            .unwrap_or_default();
+        // 引文留全文：便签给它的是一段有界滚动区，不再把 160 字之后截掉。
+        // 在这里取一次而不是每帧重取：便签压着时选区不会变。
+        let excerpt: String = self.selected_text().unwrap_or_default();
         let placeholder = tr(cx, "reader.note_placeholder");
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -538,6 +527,7 @@ impl ReaderSession {
             input,
             annotation: existing,
             excerpt: excerpt.into(),
+            excerpt_scroll: ScrollHandle::new(),
             anchor_x,
             _watch: watch,
         });

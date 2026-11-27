@@ -1,10 +1,6 @@
 //! 应用外壳：自适应导航（Material 3）+ 每个目的地一个返回栈 + 盖在最上面的一本打开的书。
-//!
-//! 这是两端**唯一**的根视图。它只关心四件事：当前是哪个目的地、导航栏长什么样、栈顶是哪个
-//! 页面、有没有一本开着读的书。平台特有的东西（安全区、输入法、正文字体）在 `super::host`，
-//! 阅读页的两种摆法在 `super::features`，外壳对两者都只给数、不写 `cfg(mobile)`。
-//!
-//! 路由用 gpui-base 的 [`NavStack`]：每个目的地一条栈，系统返回 = 当前栈 pop。
+//! 唯一根视图，管目的地、导航形态、栈顶页与阅读层；平台能力经 `host` 取得，不写 `cfg(mobile)`。
+//! 路由用 gpui-base 的 [`NavStack`]：每目的地一条栈，系统返回 = 当前栈 pop。
 //!
 //! **书不在那条栈上**：阅读层是根 div 的最后一个子元素，`inset_0` 盖住导航栏与架面。同一只
 //! 容器装两张页面时，导航栏收回来那一下必然挤到「退场还没走完」的那一张 —— 正文按窗口量、
@@ -43,10 +39,9 @@ use crate::ui::services::stealth as stealth_service;
 use crate::ui::services::storage;
 use navigation::{Destination, FoldTracker, SizeClass, navigation};
 
-// 系统返回。Android 上 gpui-mobile 把 `AKEYCODE_BACK`（含边缘滑动）与
-// `OnBackInvokedCallback` 都翻成 **escape**，所以绑住 escape 就接住了返回。
+// `OnBackInvokedCallback` 也翻成 escape，绑住它就接住返回。
 //
-// `VolumeUp` / `VolumeDown` 是音量键那两条（见 [`VolumeKey`]）：fork 把
+// `VolumeUp` / `VolumeDown` 是音量键（见 [`VolumeKey`]）：fork 把
 // `AKEYCODE_VOLUME_UP/DOWN` 翻成 `volumeup` / `volumedown` 两个键名，绑定名不能写成
 // 带连字符的 `volume-up` —— gpui 的 `Keystroke::parse` 会把连字符前面那段当修饰键读。
 //
@@ -64,7 +59,6 @@ actions!(
 );
 
 /// 一次音量键按下该去哪儿。
-///
 /// 判据只有一条，而它两边都错不起：有一本书正在被读时音量键是翻页，别处必须把这一按
 /// 还给系统去调音量（不然书架、设置里音量键直接成了死键）。抽成纯函数是因为翻页要走
 /// 阅读页、调音量要走 JNI，宿主测试里两样都摸不到，只有这条分流能被直接断言。
@@ -90,7 +84,7 @@ impl VolumeKey {
     }
 }
 
-/// 阅读层挂载期间保持沉浸，包含退场动画。
+/// 阅读层挂载时保留顶栏沉浸；桌面全屏由顶栏模式键显式请求。
 pub fn immersive_nav(_size: SizeClass, reading_mounted: bool) -> bool {
     reading_mounted
 }
@@ -336,35 +330,22 @@ pub struct AppShell {
     _lifecycle_watch: Subscription,
     /// 系统内存告警（Android `onTrimMemory`）：丢掉可重建的图像缓存。
     _memory_watch: Subscription,
-    /// 上一次涂到界面上的外观配置，**连同它解析出来的浅深**。渲染时比较这一对：只比配置
-    /// 的话，系统翻了面而偏好一个字没动，这一帧就永远不会重涂。
+    /// 上次外观配置及浅深；系统翻面也要重涂。
     applied: Option<(Appearance, ThemeMode)>,
-    /// 上一次已经同步给监听服务的 `library` 一节。配置观察者比较它，
-    /// 只有书库目录或监听那几项真的变了才重启监听。
+    /// 上次同步给监听服务的书库目录；只在监听字段变更时重启。
     watched_library: Library,
-    /// 待落盘的去抖任务。每来一次配置改动就换掉它（drop 即取消计时），
-    /// 安静 [`SAVE_DEBOUNCE`] 之后才真的写一次盘（§2.5）。
+    /// 去抖落盘：drop 取消，安静后写盘（§2.5）。
     _save_debounce: Option<Task<()>>,
-    /// 上一次向系统**要过**的全屏态（阅读页在最上面 = 要）。渲染时比较它。
-    ///
-    /// 要存这一份而不是每帧比 `window.is_fullscreen()`：桌面上那一档是异步生效的
-    /// （合成器 configure 回来才算数），比实际值会在等回执的那几帧里反复翻转窗口。
+    /// 桌面阅读想要的全屏态；默认小屏，顶栏模式键请求。
+    fullscreen_wanted: bool,
+    /// 最近递给系统的全屏态；`None` = 尚未递过。
     fullscreen_asked: Option<bool>,
-    /// 上一帧窗口活不活跃（在前台）。只为**回到前台的那一帧**留的：那一帧要把手上的
-    /// 意愿重递一次。
-    ///
-    /// 原因是 `fullscreen_asked` 记的是「我要过什么」，不是「系统现在是什么」——
-    /// 而这两件事会分家：Android 上退后台会把 surface 拆掉重建（`term_window` →
-    /// `InitWindow`，真机实测每次前后台都走一遍），系统也可能顺手把栏还原。不重递的
-    /// 话，读者带着阅读页回来会看见栏又露出来，而应用还以为藏着。
+    /// 上一帧是否活跃；回前台时重递全屏/亮度。
     was_active: bool,
-    /// 上一次已经递给系统的那一格背光（外层 `None` = 一次都没递过；`Some(None)` = 交还系统）。
-    /// 存这一份与 [`AppShell::fullscreen_asked`] 同一条理由：那一格是**发给系统的作用**，
-    /// 每帧递一遍等于每帧动一次背光。
+    /// 上次递给系统的背光；`None` = 未递，`Some(None)` = 交还系统。
     brightness_asked: Option<Option<f32>>,
-    /// 转场期间冻住的那对 chrome 状态。`None` = 没有在跑的转场，每帧现算。
-    ///
-    /// 为什么要冻：`NavStackState::pop` 一调，栈深**当场**就变了，而出场那一页还要挂满整个
+    /// 转场期间冻住的 chrome 状态；`None` = 没有转场，每帧现算。
+    /// 冻住是因为 `NavStackState::pop` 当场改栈深，而出场页还要挂满整个
     /// 转场（进度就是靠它每帧采样出来的）。于是导航栏在动画第 0 帧就回来，把正文容器挤掉
     /// 一段 —— 桌面上是侧栏那 96 宽。凡是把东西贴在容器边上的界面都会跟着跳一下。
     ///
@@ -684,6 +665,7 @@ impl AppShell {
             applied: None,
             watched_library: ConfigHolder::library(cx),
             _save_debounce: None,
+            fullscreen_wanted: false,
             fullscreen_asked: None,
             // `fullscreen_asked != Some(..)` 第一次递出去，不必这里再递一遍。
             was_active: true,
@@ -841,6 +823,12 @@ impl AppShell {
                     state.push(settings, NavMotion::Animated, cx)
                 });
             }
+            ReadingPageEvent::SetFullscreen(on) => {
+                self.fullscreen_wanted = !host::has_window_chrome() || on;
+                // 让渲染先把这次点击递给系统，再恢复用系统态纠正 Esc。
+                self.fullscreen_asked = None;
+                cx.notify();
+            }
         }
     }
 
@@ -858,6 +846,8 @@ impl AppShell {
             return;
         }
         layer.closing = true;
+        // 只改意图；`fullscreen_asked` 仍记着系统态，渲染时才真正退出。
+        self.fullscreen_wanted = false;
         // 刚结掉的那一段要出现在统计上：读者从阅读页切去「统计」看自己读了多久，
         // 那一屏拿的还是上一次进来的快照，就少算了刚才那几十分钟。
         self.stats.update(cx, |stats, cx| stats.refresh(cx));
@@ -1401,24 +1391,35 @@ impl Render for AppShell {
         if reading_sample.is_some_and(|sample| !sample.should_render()) {
             self.release_reading(cx);
         }
-        // 报给正文的那一条是顶上那一条（层自己让）加底下那一条（底栏与页脚自己让，见
-        // `reader::page` 的 `bottom_inset`）。同一个数还要给摆层用（[`reading_top_inset`]）。
+        // 全屏显式偏好：桌面默认小屏，Android 跟阅读层；真全屏时才收起标题栏。
+        let active = window.is_window_active();
+        let mut fullscreen = if !host::has_window_chrome() {
+            immersive
+        } else {
+            self.fullscreen_wanted
+        };
+        // Esc 可改系统态；与已应用状态不符时以系统为准。
+        if host::has_window_chrome()
+            && self.fullscreen_asked == Some(fullscreen)
+            && window.is_fullscreen() != fullscreen
+        {
+            self.fullscreen_wanted = window.is_fullscreen();
+            fullscreen = self.fullscreen_wanted;
+            self.fullscreen_asked = Some(fullscreen);
+        }
         let reading_top = reading_top_inset(&safe);
-        let reserve = reading_reserve(&safe);
-        let bottom_inset = safe.bottom;
         if let Some(layer) = self.reading.as_ref() {
             layer.page.update(cx, |page, cx| {
-                page.set_reserve(reserve, cx);
-                page.set_top_inset(reading_top, cx);
-                page.set_bottom_inset(bottom_inset, cx);
+                page.set_reserve(reading_reserve(&safe), cx);
+                let top = if host::has_window_chrome() && !fullscreen {
+                    reading_top + f32::from(gpui_kit::component::TITLE_BAR_HEIGHT)
+                } else {
+                    reading_top
+                };
+                page.set_top_inset(top, cx);
+                page.set_bottom_inset(safe.bottom, cx);
             });
         }
-
-        // 系统级那一层也跟着沉浸：桌面上窗口真全屏、Android 上把状态栏与导航栏都藏掉，
-        // 应用内那层（侧栏 / 自绘标题栏）在 `body` 里收。只在**期望变了**或**回到前台**
-        // 的那一帧动手，两条理由分别见 [`AppShell::fullscreen_asked`] 与
-        // [`AppShell::was_active`]。
-        let active = window.is_window_active();
         // 离开前台之前把这一屏的位置结掉。滚动那条路已经不写库了（为什么，见
         // `ReaderSession::persist_if_moved` 那段），而 Android 一切后台，进程什么时候
         // 被回收不由我们说 —— 这是最后一个可靠的机会。桌面上这一条也成立：窗口被别的
@@ -1433,14 +1434,14 @@ impl Render for AppShell {
                 page.update(cx, |page, cx| page.flush_position(cx));
             });
         }
-        if self.fullscreen_asked != Some(immersive) || (active && !self.was_active) {
-            self.fullscreen_asked = Some(immersive);
+        if self.fullscreen_asked != Some(fullscreen) || (active && !self.was_active) {
+            self.fullscreen_asked = Some(fullscreen);
             // 不就地递：`render` 按约定只算画面，而这一条是发给系统的作用。挪到
             // `defer` 里，它跑在**本帧效果循环的末尾** —— 那时第一帧已经画完、窗口挂好，
             // 而视图的借用也都还回去了。（不是「`open_main_window` 返回之后」：实测它仍在那
             // 句日志前几十微秒，只是不再夹在渲染中间。）
             window.defer(cx, move |window, _cx| {
-                crate::ui::platform::set_reader_fullscreen(immersive, window);
+                crate::ui::platform::set_reader_fullscreen(fullscreen, window);
             });
         }
         // 「界面亮度」跟着书走：书挂着才接管，书收了就把背光交还系统（判据在
@@ -1528,23 +1529,17 @@ impl Render for AppShell {
             }
         };
 
-        // 桌面：窗口 chrome 由应用自绘（窗口选项声明了透明自定义标题栏），
-        // 所以最上面补一条 `TitleBar`。移动端没有窗口 chrome，走 `cfg`。
         // 正文那一格给 `flex_1` 而不是让它自己 `size_full`：标题栏已经占掉一段高，
         // 再按 100% 算就会把页面底边（连同底栏）挤出窗口外。
         let body = if host::has_window_chrome() {
-            // 沉浸态连这条自绘标题栏一起收起：窗口 chrome 本来就是应用自己画的
-            // （窗口选项声明了透明自定义标题栏），收掉那一段高就还给正文；读者回到
-            // 任何一个目的地它都会跟着回来。拖窗与最大化在读书这几十分钟里不需要。
+            // 桌面窗口态保留标题栏，才能拖窗、缩放或双击最大化；真全屏时再收起。
             let stack = v_flex().size_full();
-            let stack = if immersive {
+            let stack = if fullscreen {
                 stack
             } else {
                 // 左侧不摆任何字样：那一段只留作拖窗与双击最大化的热区。
                 stack.child(gpui_kit::component::TitleBar::new())
             };
-            // 正文那一格给 `flex_1` 而不是让它自己 `size_full`：标题栏已经占掉一段高，
-            // 再按 100% 算就会把页面底边（连同底栏）挤出窗口外。
             stack
                 .child(div().flex_1().min_h_0().child(body))
                 .into_any_element()
@@ -1643,5 +1638,7 @@ fn nav_watch(shell: WeakEntity<AppShell>) -> impl IntoElement {
     .into_any_element()
 }
 
+#[cfg(all(test, not(mobile)))]
+mod fullscreen_tests;
 #[cfg(test)]
 mod tests;

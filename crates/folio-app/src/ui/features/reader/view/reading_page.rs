@@ -250,6 +250,7 @@ pub struct ReadingPage {
 pub enum ReadingPageEvent {
     Closed,
     OpenSettings,
+    SetFullscreen(bool),
 }
 
 impl EventEmitter<ReadingPageEvent> for ReadingPage {}
@@ -699,9 +700,6 @@ impl ReadingPage {
         }
     }
 
-    /// 阅读设置那张卡片：开 or 关。九格的内容、弹层停在哪一档与那七条滑条都装在它自己
-    /// 那个实体里（见 [`ReadingSheet`]）；这一屏只多管一件事 —— 目录那块弹层同时收掉：
-    /// 两块都是盖住整屏的模态层，叠着抬起来就是同一片遮罩底下两层东西。
     pub(in crate::ui::features::reader) fn toggle_settings(&mut self, cx: &mut Context<Self>) {
         if !self.settings.read(cx).is_open(cx) && self.toc.read(cx).is_open(cx) {
             self.toc.update(cx, |panel, cx| panel.hide(cx));
@@ -710,9 +708,6 @@ impl ReadingPage {
         cx.notify();
     }
 
-    /// 目录弹层：开 or 关。树跟着阅读位置重建、搜索框与「⋯」一并收掉、书头跟着重查，
-    /// 那些都在 [`TocPanel::toggle`] 里；这一屏只多管一件事 —— 设置那张卡片同时收掉，
-    /// 理由与反过来那一条相同（两块模态层不许同时在场）。
     pub(in crate::ui::features::reader) fn toggle_toc(&mut self, cx: &mut Context<Self>) {
         if !self.toc.read(cx).is_open(cx) && self.settings.read(cx).is_open(cx) {
             self.settings.update(cx, |sheet, cx| sheet.hide(cx));
@@ -2117,7 +2112,7 @@ impl Render for ReadingPage {
             )
             // 干净态读数带在会话里画；这里只管浮层。目录开着时顶栏已抬到遮罩之上（`toc_up`）。
             .when(self.chrome.is_open() && !quiet && !toc_up, |this| {
-                this.child(self.top_bar(cx)).child(if auto_on {
+                this.child(self.top_bar(window, cx)).child(if auto_on {
                     self.auto_bar(cx)
                 } else {
                     self.bottom_bar(cx)
@@ -2158,7 +2153,7 @@ impl Render for ReadingPage {
                     .top_0()
                     .left_0()
                     .right_0()
-                    .child(self.top_bar(cx)),
+                    .child(self.top_bar(window, cx)),
             );
         }
         // 脚注弹层压在目录之上、图片查看器之下：它是「从正文里抬起来的一张小纸」，

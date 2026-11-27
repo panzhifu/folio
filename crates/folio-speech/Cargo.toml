@@ -17,3 +17,16 @@ tracing.workspace = true
 # Android 后端由 app 的平台层注入；OHOS 不使用 Speech Dispatcher。
 [target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
 speech-dispatcher = "=0.16.0"
+
+# Windows 用系统 SAPI 声音与 MediaPlayer 播放合成出来的音频流。
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Foundation_Collections",
+    "Media_Core",
+    "Media_Playback",
+    "Media_SpeechSynthesis",
+    "Storage_Streams",
+    "Win32_System_Com",
+] }
+# windows 0.62 把异步操作拆到独立 crate；签名里需要直接引用这些类型。
+windows-future = { version = "0.3.2", features = ["std"] }

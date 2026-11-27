@@ -1,5 +1,10 @@
 [workspace]
 resolver = "3"
+exclude = [
+    "target/scratch/gpui-kit-local",
+    "target/scratch/gpui-folio-0314",
+    "target/scratch/mobile-upgrade",
+]
 default-members = ["crates/folio-app"]
 members = [
     "crates/folio-base",
@@ -46,7 +51,7 @@ folio-core = { path = "crates/folio-core" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit.git", branch = "main", features = ["assets"] }
 
 # GPUI HttpClient 的 reqwest 实现，版本须与 GPUI 快照一起升级。
-reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.12" }
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.14" }
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 dirs = "6"

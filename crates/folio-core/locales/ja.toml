@@ -95,6 +95,7 @@ book_count_other = "%{count} 冊"
 zoom_in = "文字を大きく"
 zoom_out = "文字を小さく"
 zoom_page = "ページを拡大"
+fullscreen = "全画面"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "目次"

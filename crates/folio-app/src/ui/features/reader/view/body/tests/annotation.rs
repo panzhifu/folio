@@ -4,12 +4,13 @@ use super::harness::{
     char_point, drag_select, drag_select_between, flow, meta, open_with_store, prefs, scroll_mode,
     settle,
 };
-use crate::ui::features::reader::model::session::ReaderSession;
+use crate::ui::features::reader::model::session::{ReaderSession, Selection};
 use crate::ui::services::config::ConfigHolder;
 use folio_core::ChapterExt;
 use folio_core::store::Store;
 use folio_core::sync::TombstoneKind;
 use folio_core::{AnnotationStyle, Chapter, FlowDoc, Format, Locator};
+use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Entity, Focusable as _, TestAppContext, point, px,
 };
@@ -320,6 +321,82 @@ fn a_note_lands_on_the_highlight_and_edits_the_same_one(cx: &mut TestAppContext)
     assert_eq!(rows.len(), 1, "改笔记不该多落一条");
     assert_eq!(rows[0].note, "改过的笔记");
     assert_eq!(rows[0].color, "amber", "只改笔记不该动颜色");
+}
+
+/// 长选区打开便签时，原文整段交给原文区；有界滚动负责查看，不再在 160 字处截断。
+#[gpui_kit::test]
+fn a_long_note_excerpt_is_kept_in_full(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let paragraph = "这一段原文要完整保留，不能只显示前一百六十个字。".repeat(40);
+    let flow = FlowDoc {
+        chapters: vec![Chapter::inline("长段", format!("<p>{paragraph}</p>"))],
+        ..Default::default()
+    };
+    let (view, handle) = open_with_store(
+        cx,
+        &flow,
+        "markdown",
+        prefs(16.0),
+        Locator::start(),
+        460.0,
+        None,
+        None,
+    );
+    view.update(cx, |v, _| {
+        v.selection = Some(Selection {
+            chapter: 0,
+            range: 0..paragraph.chars().count(),
+        });
+    });
+    let expected = view.read_with(cx, |v, _| v.selected_text().expect("长段已选中"));
+    assert!(expected.chars().count() > 160, "夹具必须越过旧截断线");
+
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, cx| v.open_note_editor(window, cx));
+    })
+    .expect("窗口应可更新");
+
+    let excerpt = view.read_with(cx, |v, _| {
+        v.note_editor
+            .as_ref()
+            .expect("便签该在")
+            .excerpt
+            .to_string()
+    });
+    assert_eq!(excerpt, expected, "便签里必须是完整选区，而不是开头一段");
+
+    settle(cx, handle);
+    assert!(
+        view.read_with(cx, |v, _| v.note_editor_open()),
+        "便签必须还开着，否则滚动断言谈的是一片不在屏上的区域"
+    );
+    let before = view.read_with(cx, |v, _| {
+        let scroll = &v.note_editor.as_ref().expect("便签该在").excerpt_scroll;
+        (scroll.offset(), scroll.max_offset())
+    });
+    assert!(before.1.y > px(0.0), "长引文必须比滚动区高，不能只是裁掉");
+    cx.update_window(handle, |_, window, cx| {
+        view.update(cx, |v, _| {
+            v.note_editor
+                .as_ref()
+                .expect("便签该在")
+                .excerpt_scroll
+                .scroll_to_bottom();
+        });
+        for _ in 0..4 {
+            window.render_frame(cx);
+        }
+    })
+    .expect("窗口应能渲染");
+    let offset = view.read_with(cx, |v, _| {
+        v.note_editor
+            .as_ref()
+            .expect("便签该在")
+            .excerpt_scroll
+            .offset()
+            .y
+    });
+    assert!(offset != px(0.0), "长引文区必须真能滚，不能只是裁掉");
 }
 
 /// M7 二期：留在书上的那片底色可以**再点回去**。点上去就是重新选中那一条，菜单跟着回来，

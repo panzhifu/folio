@@ -93,6 +93,7 @@ book_count_other = "%{count} 本書"
 zoom_in = "增大字型"
 zoom_out = "縮小字型"
 zoom_page = "放大整頁"
+fullscreen = "全螢幕"
 # 阅读页底栏那一排入口。`page.typography` 与 `account.settings` 复用既有的词，
 # 不在这里再给同一个东西起第二个名字。
 toc = "目錄"

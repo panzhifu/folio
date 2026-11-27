@@ -318,7 +318,14 @@ fn platform_factory() -> Option<BackendFactory> {
     {
         Some(Arc::new(crate::linux::create))
     }
-    #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+    #[cfg(target_os = "windows")]
+    {
+        Some(Arc::new(crate::windows::create))
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", not(target_env = "ohos")),
+        target_os = "windows"
+    )))]
     {
         None
     }

@@ -45,6 +45,8 @@ use crate::ui::{host, services};
 /// 一行的高：名字 + 下面那一行（进度条或读数）+ 上下留白。定死，虚拟列表要能滚就得
 /// 有一张等高的高度表（与扫描那一屏同一条理由）。
 const ROW_HEIGHT: f32 = 76.0;
+/// 行尾动作的固定栏宽：有标签与没标签的书共用同一条右边线，「打开」因此逐行同轴。
+const ACTION_LANE_W: f32 = 72.0;
 
 /// 头顶那一段：只有一行标题 + 上下留白。汇总那一行去掉之后收紧，别在标题下面
 /// 留一大块空 —— 报上来的高（[`record_height`]）得跟画出来的对得上。
@@ -638,14 +640,14 @@ impl ShelfView {
             .into_any_element()
     }
 
-    /// 一格：书名是唯一焦点，右边一枚状态标签与「打开」，下面一行次要读数。
+    /// 一格：书名占主栏，右边固定一条「打开」动作栏，下面一行次要读数。
     ///
     /// 「打开」只在有书可开时摆：没进来的那几本没有对象可作用，一颗按不动的钮
-    /// 比不摆更糟。元素 id 带上行号 —— 一列里同一个动作会出现很多次，共用一个 id 会让
-    /// gpui 把相邻几行的状态串在一起。
+    /// 比不摆更糟。动作栏本身每行都留同样的宽，因此有无「打开」、书名多长、状态多长，
+    /// 都不会挪动这一列的中心线。元素 id 带上行号 —— 一列里同一个动作会出现很多次，
+    /// 共用一个 id 会让 gpui 把相邻几行的状态串在一起。
     fn record_cell(&self, ix: usize, row: &Record, cx: &mut Context<Self>) -> AnyElement {
         let meta = self.record_meta(ix, row, cx);
-        let status = self.record_status(ix, row, cx);
         let opener = match row.landed {
             Some(Landed::Added {
                 book_id: Some(book_id),
@@ -688,8 +690,15 @@ impl ShelfView {
                             .font_weight(FontWeight::MEDIUM)
                             .child(row.name.clone()),
                     )
-                    .children(status)
-                    .children(opener),
+                    .child(
+                        div()
+                            .id(format!("shelf-record-action-{ix}"))
+                            .test_support()
+                            .w(px(ACTION_LANE_W))
+                            .flex_shrink_0()
+                            .justify_center()
+                            .children(opener),
+                    ),
             )
             .child(meta)
             .into_any_element()
@@ -697,14 +706,10 @@ impl ShelfView {
 
     /// 结清那一档的状态：**只有要读者处理的那几类**才出一枚语义色标签。
     ///
-    /// 成功与「已在架上」不在这儿出标签：它们在名字右边排成一列中性胶囊，把书名的
-    /// 层级压下去（设计指南：强调是有限预算），而这两件事本来也不需要读者做什么 ——
-    /// 行尾那颗「打开」已经说明这本书进来了。这两句改走 [`Self::record_meta`] 那一行
-    /// 的**文字**（`成功 · 11-04 · EPUB`），信息不丢、视觉压力降一档。
-    ///
-    /// 真正要读者处理的（没进来 / 要口令 / 带加密 …）仍是一枚语义色标签：那一档的
-    /// 读者需要**一眼看见**，压进小字反而藏起来了。文字本身就是读屏读到的那一句，
-    /// 不再额外挂一份 aria 名。
+    /// 成功与「已在架上」不在这儿出标签：它们落进 [`Self::record_meta`] 那一行小字的
+    /// 头一个词（`成功 · 11-04 · EPUB`）。真正要读者处理的（没进来 / 要口令 / 带加密 …）
+    /// 仍是一枚语义色标签，放在次要读数那一行开头：读者需要一眼看见，又不让标签宽度
+    /// 挤动书名与固定动作栏。文字本身就是读屏读到的那一句，不再额外挂一份 aria 名。
     fn record_status(&self, ix: usize, row: &Record, cx: &mut Context<Self>) -> Option<AnyElement> {
         let label = match row.landed? {
             // 成功 / 已在架上不占标签位：它们进 `record_meta` 那一行（见本函数文档）。
@@ -728,11 +733,11 @@ impl ShelfView {
         )
     }
 
-    /// 名字下面那一行：进度条（还在跑）或一串次要读数（已结清）。
+    /// 名字下面那一行：进度条（还在跑），或状态标签与一串次要读数（已结清）。
     ///
-    /// 要读者处理的那几档（没进来 / 要口令）状态在名字右边那枚语义色标签上；**成功 /
-    /// 已在架上**没有标签，这两句落成这一行的**第一个词**（`成功 · 11-04 · EPUB`）——
-    /// 信息不丢，而整张卡的视觉焦点仍是书名（见 [`Self::record_status`]）。
+    /// **成功 / 已在架上**没有标签，这两句落成这一行的**第一个词**
+    /// （`成功 · 11-04 · EPUB`）；要读者处理的失败原因由
+    /// [`Self::record_status`] 给一枚语义色标签。整张卡的视觉焦点仍是书名。
     fn record_meta(&self, ix: usize, row: &Record, cx: &mut Context<Self>) -> AnyElement {
         if row.landed.is_none() {
             // 还在路上：条子按字节走。总数不知道（`None`）就是不定进度那一档。
@@ -781,7 +786,15 @@ impl ShelfView {
             // 不为这一张卡另立一种写法。
             parts.push(duration(cx, secs.round() as i64).to_string());
         }
-        muted_label(parts.join(" · "), cx).into_any_element()
+        let status = self.record_status(ix, row, cx);
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .children(status)
+            .child(muted_label(parts.join(" · "), cx))
+            .into_any_element()
     }
 }
 
