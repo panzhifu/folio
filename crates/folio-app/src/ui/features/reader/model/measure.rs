@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use folio_core::content::format::css::computed::FontStretch as CssFontStretch;
 use folio_core::layout::{FontKey, LineMetrics, Measure};
+use folio_core::text::resolve_family_in as device_known;
 use gpui_kit::*;
 
 use crate::ui::features::reader::model::book_fonts::BookFonts;
@@ -137,6 +138,8 @@ fn cjk_class(family: &str) -> Option<&'static [&'static str]> {
 /// - primary 是书里那一份时读者那档降到 `fallbacks` 补缺；ASCII 与其余字符同待遇；
 /// - 泛族名（`serif` 那一族）不许从设备注册表里当 primary（交出去就是一条断掉的回退链），
 ///   但作者给泛族名挂上随书那份字体时照认 —— 那是他写明的正文用字。
+// 候选名先过进程别名索引（`device_known` = `folio_core::text::resolve_family_in`）：
+// 本地化名与英文名互通，两边都对不上的交 `None` 走逐档回落。
 pub fn gpui_font(
     key: &FontKey,
     body: &SharedString,
@@ -152,10 +155,7 @@ pub fn gpui_font(
     // 由补缺链兜住。
     // 一个声明名可能对多份内部家族（一份字体文件带好几个名字），带拉丁的那张优先当
     // primary（它自己接得住数字与英文），没有才轮到第一张；其余仍挂在补缺链上。
-    let requested = key
-        .candidates()
-        .iter()
-        .find_map(|name| faces.families_for(name));
+    let requested = key.candidates().iter().find_map(|name| faces.families_for(name));
     let shipped = requested.and_then(|names| {
         let primary = names
             .iter()
@@ -166,11 +166,11 @@ pub fn gpui_font(
     // 作者点名的是一整条候选链（`"MyFont", "Noto Serif CJK SC", serif`），逐个试，
     // 取第一个这台设备真装着的。只认第一个的话，`MyFont` 不在就整条落回读者的字体，
     // 而作者排在第二的那一份明明装着 —— 泛族名不算「装着」，见 [`GENERIC_FAMILIES`]。
-    let chosen = key.candidates().iter().find(|name| {
-        !is_generic(name)
-            && known.iter().any(|n| n.eq_ignore_ascii_case(name))
-            && faces.primary_usable(name)
-    });
+    let chosen = key
+        .candidates()
+        .iter()
+        .filter(|name| !is_generic(name))
+        .find_map(|name| device_known(name, known).filter(|name| faces.primary_usable(name)));
     let installed = chosen.is_some();
     // 整条链都没装着：先按**同一类**在设备上找一份中文（判据与那条边界见 [`CJK_CLASS`]），
     // 找到就用它 —— 作者点名了家族，落不到同类就直接换读者偏好是静默错配。
@@ -182,30 +182,29 @@ pub fn gpui_font(
             .find(|name| !is_generic(name))
             .and_then(|name| cjk_class(name))
             .and_then(|list| {
-                list.iter().find(|want| {
-                    known.iter().any(|n| n.eq_ignore_ascii_case(want)) && faces.primary_usable(want)
-                })
+                list.iter()
+                    .find_map(|want| device_known(want, known).filter(|f| faces.primary_usable(f)))
             })
             .map(|found| SharedString::from(found.to_string()))
     };
     // 四档优先级：作者点名的、这台机器真装着的 → 同类的那一份 → 读者的等宽偏好
-    // （只泛族名是等宽那几种时）→ 读者的正文偏好。`mono` 自己也要在册，否则退回 `body`
-    // （读者填了个没装的名字不该让全书画方框）。
-    let mono_pref = MONO_FAMILIES
+    // （只泛族名是等宽那几种时）→ 读者的正文偏好。`mono` 自己也要在册（先归一再
+    // 查），否则退回 `body`（读者填了个没装的名字不该让全书画方框）。
+    let mono_entry = MONO_FAMILIES
         .iter()
         .any(|m| key.family.eq_ignore_ascii_case(m))
-        && known
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(mono.as_ref()))
-        && faces.primary_usable(mono.as_ref());
+        .then(|| mono.as_ref())
+        .and_then(|mono| device_known(mono, known))
+        .filter(|mono| faces.primary_usable(mono));
     // 读者这一侧的整条链，按上面四档排好并去重。primary 取它的第一档，除非作者随书带了
     // 一份字体（那种情况下整条链降到补缺位，见下面 `fallbacks`）。
     let mut reader_chain: Vec<String> = Vec::new();
     for name in [
-        chosen.map(|name| name.to_string()),
+        chosen,
         mapped.map(|found| found.to_string()),
-        mono_pref.then(|| mono.to_string()),
-        Some(body.to_string()),
+        mono_entry,
+        // 正文偏好同样过一遍归一：另一台设备的英文名、手改的大小写都归到设备真实写法。
+        device_known(body.as_ref(), known).or_else(|| Some(body.to_string())),
     ]
     .into_iter()
     .flatten()
@@ -267,10 +266,11 @@ pub fn gpui_font(
         family,
         fallbacks,
         weight: FontWeight(key.weight as f32),
-        style: key
-            .italic
-            .then_some(FontStyle::Italic)
-            .unwrap_or(FontStyle::Normal),
+        style: if key.italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
         stretch: match key.stretch {
             CssFontStretch::UltraCondensed => gpui_kit::FontStretch::UltraCondensed,
             CssFontStretch::ExtraCondensed => gpui_kit::FontStretch::ExtraCondensed,

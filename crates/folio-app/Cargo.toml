@@ -35,7 +35,7 @@ base64.workspace = true
 image.workspace = true
 qrcode.workspace = true
 # 纯 CPU 网格与 uniform；rev 须与根清单的五条 gpui-folio patch 一致。
-folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ffeb02926064f89799caabf2fc5bcf29d619878" }
+folio-curl = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
 # 统一通过 gpui_kit 门面使用 GPUI。
 gpui-kit.workspace = true
 tracing.workspace = true
@@ -58,17 +58,35 @@ skera.workspace = true
 read-fonts.workspace = true
 write-fonts.workspace = true
 
+# 内嵌音频的桌面播放链路：symphonia 解码（mp3/ogg/flac/wav/m4a/opus），rodio 出声。
+# 只有桌面用这条链（audio_desktop 后端）；Android/iOS 走系统播放器（gpui-pre-mobile
+# 的 audio 包，Android 侧是 GpuiAudio 的 MediaPlayer），OHOS 的音频桥尚未接入。
+# 门控与 reader/model/audio.rs 的 Backend 三叉保持同一份 cfg。
+[target.'cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))'.dependencies]
+symphonia = { version = "0.5.4", default-features = false, features = [
+    "mp3", "ogg", "vorbis", "flac", "wav", "isomp4", "aac",
+] }
+rodio = "0.20"
+
 # 移动端使用固定 fork，升级须与 gpui-kit 使用的 gpui-pre 快照对齐。
 # 不提交仓库外 path 依赖；本地覆盖只放在用户 Cargo 配置中。
-# 默认平台插件尚未裁剪，关闭 default-features 前需核对实际使用能力。
 [target.'cfg(any(target_os = "android", target_os = "ios", target_env = "ohos"))'.dependencies]
 # fork 承载移动输入、系统能力与 OHOS 适配；patch 由 workspace 根统一提供。
-gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "dd5b187a4600d783f6fbc34c519eefac3e241e88", features = [
+# default-features 全关，只留真正在用的包（2026-11-28 收口：default 里那 25 个没用的
+# —— camera / webview / contacts / location / …—— 连同各自 Java 桥一起出包）。开新
+# 能力前先查 fork src/packages/mod.rs 的门控与对应 Java 类是否在 apk 里。
+gpui-pre-mobile = { git = "https://github.com/panzhifu/gpui-mobile", rev = "cd55ed21eb9b187521b18287ed7422f1e6618ee4", default-features = false, features = [
     "permission_handler",
     # 依赖根清单中支持页面捕获的渲染器。
     "offscreen",
     # 阿里云盘授权回跳必须把 code 送回 services::cloud_link。
     "deeplink",
+    # 容器内嵌音频走系统播放器（GpuiAudio/MediaPlayer）。
+    "audio",
+    # 打开目录 / 外链（设置页「配置文件在哪儿」、更新页）。
+    "url_launcher",
+    # gpui 平台剪贴板（src/android/platform.rs 的 #[cfg(feature = "clipboard")]）。
+    "clipboard",
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]

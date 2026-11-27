@@ -3,11 +3,17 @@
 //! folio-render 的 `Measure` 与这里的 [`FontSink`]。原住 folio-core::text
 //! （2026-11-12 阶段五拆分原样搬来，「换 crate 不换形状」：core 经模块别名沿用旧路径）。
 
+pub mod alias;
 pub mod families;
 pub mod load;
 pub mod names;
 pub mod scan;
+pub mod system_xml;
 
+pub use alias::{
+    normalize_family, note_family_aliases, resolve as resolve_family_alias,
+    resolve_in as resolve_family_in,
+};
 pub use families::*;
 pub use load::*;
 pub use names::*;

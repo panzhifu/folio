@@ -43,6 +43,9 @@ skera.workspace = true
 read-fonts.workspace = true
 write-fonts.workspace = true
 ttf-parser.workspace = true
+# 系统字体账本（text::system_xml）：Android 的 fonts.xml 是纯 XML，roxmltree
+# 已随 resvg 在锁里，这里显式声明不引入新的编译单元。
+roxmltree.workspace = true
 
 [dev-dependencies]
 # 下载 / 导入 / 删除的测试要真目录（原 folio-core 的 dev-dep 随 fonts 一同搬来）。

@@ -4,6 +4,8 @@ exclude = [
     "target/scratch/gpui-kit-local",
     "target/scratch/gpui-folio-0314",
     "target/scratch/mobile-upgrade",
+    "target/scratch/gpui-folio-fontfiles",
+    "target/scratch/gpui-mobile-fontfiles",
 ]
 default-members = ["crates/folio-app"]
 members = [
@@ -45,10 +47,12 @@ folio-speech = { path = "crates/folio-speech" }
 folio-store = { path = "crates/folio-store" }
 folio-core = { path = "crates/folio-core" }
 
-# themes/ 只在上游源码树中，故使用 git 源；具体提交由 Cargo.lock 固定。
+# themes/ 只在上游源码树中，故使用 git 源；rev 钉在 fork 的 upgrade-0.11.0 分支：
+# 上游 0.11.0 + Font 字面量补 stretch + gpui-pre 三件钉到 fork 快照，
+# 升级 gpui-pre 时这条分支的 patch rev 要与根清单六处一并顺延。
 # 升级需同步 gpui-pre-mobile fork 与锁文件，确保两者使用同一 gpui-pre 快照。
 # 先推送 fork，再更新 app 清单中的 rev，最后 cargo update -p gpui-kit -p gpui-pre-mobile。
-gpui-kit = { git = "https://github.com/longbridge/gpui-kit.git", branch = "main", features = ["assets"] }
+gpui-kit = { git = "https://github.com/panzhifu/gpui-kit", rev = "e71205ceffaf304a42b6000546589928cc48b65f", features = ["assets"] }
 
 # GPUI HttpClient 的 reqwest 实现，版本须与 GPUI 快照一起升级。
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.14" }
@@ -78,6 +82,8 @@ ttf-parser = "0.25"
 skera = "0.9"
 read-fonts = "0.46"
 write-fonts = "0.55"
+# Android 系统字体账本（fonts.xml）的解析；树里已随 resvg 编译同版。
+roxmltree = "0.21"
 # 只启用纯 Rust 压缩后端，避免新增交叉编译的 C 工具链要求。
 # zstd 依赖 zstd-sys，暂不支持；不支持的条目必须明确报错。
 zip = { version = "8", default-features = false, features = [
@@ -115,7 +121,7 @@ unicode-script = "0.5"
 chardetng = "1"
 # fork 提供上游缺少的文字墨迹盒、placed_images 与 outline 接口。
 # 这些能力涉及引擎内部数据；上游收齐并通过 PDF 回归后再撤 fork。
-hayro = { git = "https://github.com/panzhifu/hayro.git", rev = "cedf813b78def437a94a461cdd76c12fdb4d127f" }
+hayro = { git = "https://github.com/panzhifu/hayro.git", rev = "41a8bb5a13d5e4d0127a592602238233b88e9bb0" }
 # 纯 Rust 7z；默认 util 用于解包，compress 用于合成测试夹具。
 sevenz-rust2 = "0.20"
 # 只启用 RAR 读取，关闭写入、恢复、加密和并行的默认功能。
@@ -171,11 +177,11 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # Apple/Windows 也必须使用支持 PageCurlMeshes 的对应渲染器。
 # 升级：先推送 fork，统一六处 rev，再 cargo update 对应六个包并验证目标平台。
 # 不提交仓库外 path 覆盖；上游收齐相关接口后才能一起撤除这些补丁。
-gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ffeb02926064f89799caabf2fc5bcf29d619878" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ffeb02926064f89799caabf2fc5bcf29d619878" }
-gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ffeb02926064f89799caabf2fc5bcf29d619878" }
-gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ffeb02926064f89799caabf2fc5bcf29d619878" }
-gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "1ffeb02926064f89799caabf2fc5bcf29d619878" }
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
+gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
+gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
+gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
 
 # release 以移动包体积优先；LTO、strip、panic=abort 也作用于桌面。
 # panic=abort 不提供 unwind 恢复。

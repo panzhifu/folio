@@ -5,10 +5,12 @@
 //! 测试也不会因为开发机上恰好放了什么而多出一行。
 //!
 //! 文件活在常驻作业池上（下载是几十 MB 的网络活、导入是整份拷贝，都不该占界面线程），
-//! 下载进度经 `async_channel` 推回界面；字体字节进 `TextSystem` 的注册也在作业线程上
-//! 做 —— `system_fonts` 开机那一趟就是这么走的，`add_fonts_with_families` 本来就是
-//! `&self`。注册成功才有配置那条：注册失败的份连目录一起撤掉，盘上不留下认得一半的
-//! 一份，列表里也不出现一行排不出来的字。
+//! 下载进度经 `async_channel` 推回界面；字体进 `TextSystem` 的注册也在作业线程上
+//! 做（sfnt 走路径注册、woff 解回 sfnt 走字节，见 `platform::user_fonts` 的分流）——
+//! `system_fonts` 开机那一趟就是这么走的，两支 API 都是 `&self`。注册成功才有配置
+//! 那条：注册失败的份连目录一起撤掉，盘上不留下认得一半的一份，列表里也不出现一
+//! 行排不出来的字。删除走真注销（`remove_font_files` 把 face 摘出数据库）加退休表
+//! 双保险。
 //!
 //! 一趟一件事：同一时刻只有一份字体在装（下载或导入互斥，也和删除互斥）。状态是
 //! 单槽的，两趟并行会让结束事件写坏对方的状态；清单页上「装着的那份在动」时别的
@@ -256,11 +258,16 @@ pub fn remove(cx: &mut App, id: String) {
     if busy(&state.read(cx).status) {
         return;
     }
-    let family = ConfigHolder::fonts(cx)
+    let fonts = ConfigHolder::fonts(cx);
+    let entry = fonts
         .installed
         .iter()
-        .find(|entry| entry.id == id)
+        .find(|entry| entry.id == id);
+    let family = entry
         .map(|entry| entry.family.clone())
+        .unwrap_or_default();
+    let file = entry
+        .map(|entry| entry.file.clone())
         .unwrap_or_default();
     state.update(cx, |state, cx| {
         state.status = Status::Importing;
@@ -277,7 +284,9 @@ pub fn remove(cx: &mut App, id: String) {
             let Ok(result) = rx.recv().await else {
                 return;
             };
-            let _ = this.update(cx, |state, cx| state.finish_remove(&id, family, result, cx));
+            let _ = this.update(cx, |state, cx| {
+                state.finish_remove(&id, family, file, result, cx)
+            });
         })
         .detach();
     });
@@ -385,6 +394,7 @@ impl UserFontsState {
         &mut self,
         id: &str,
         family: String,
+        file: String,
         result: Result<(), FontsError>,
         cx: &mut Context<Self>,
     ) {
@@ -395,6 +405,15 @@ impl UserFontsState {
                 });
                 if !family.is_empty() {
                     font_primary::retire_family(&family);
+                }
+                // fontdb 没有按字节的注销，但按路径有：把这份文件的 face 从数据库
+                // 真正摘掉，已删字节的驻留到此为止。摘不掉（平台不支持）时退休表
+                // 仍在挡选择器，字节驻留到重启 —— 旧行为兜底。
+                if !file.is_empty() {
+                    let path = folio_core::fonts_dir().join(id).join(&file);
+                    if let Err(err) = cx.text_system().remove_font_files(vec![path]) {
+                        tracing::debug!("user_fonts: {id} 的 face 注销不了（留到重启）：{err}");
+                    }
                 }
                 // 选择器按版本号对账才重取名单；退休不注册新脸，版本要自己推。
                 font_primary::bump_families_revision();

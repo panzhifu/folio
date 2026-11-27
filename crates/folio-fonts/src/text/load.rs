@@ -680,11 +680,14 @@ fn strip_style_words(name: &str) -> String {
 
 /// 忽略大小写、空格、连字符的家族名比较；前缀只在唯一命中时才算。
 fn match_known(hint: &str, known: &[String]) -> Option<String> {
-    let normalized = normalize(hint);
+    let normalized = crate::text::alias::normalize_family(hint);
     if normalized.len() < 2 {
         return None;
     }
-    if let Some(found) = known.iter().find(|name| normalize(name) == normalized) {
+    if let Some(found) = known
+        .iter()
+        .find(|name| crate::text::alias::normalize_family(name) == normalized)
+    {
         return Some(found.clone());
     }
     // 太短的提示（`A` / `SG`）拿去做前缀会撞上半个字体表。
@@ -693,7 +696,7 @@ fn match_known(hint: &str, known: &[String]) -> Option<String> {
     }
     let mut by_prefix = known
         .iter()
-        .filter(|name| normalize(name).starts_with(&normalized));
+        .filter(|name| crate::text::alias::normalize_family(name).starts_with(&normalized));
     if let Some(first) = by_prefix.next()
         && by_prefix.next().is_none()
     {
@@ -701,20 +704,13 @@ fn match_known(hint: &str, known: &[String]) -> Option<String> {
     }
     let mut by_suffix = known
         .iter()
-        .filter(|name| normalized.starts_with(&normalize(name)));
+        .filter(|name| normalized.starts_with(&crate::text::alias::normalize_family(name)));
     if let Some(first) = by_suffix.next()
         && by_suffix.next().is_none()
     {
         return Some(first.clone());
     }
     None
-}
-
-fn normalize(name: &str) -> String {
-    name.chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 /// 读回来的一份字体：能切子集就用子集（带唯一家族名），切不动就交回整份。
 ///

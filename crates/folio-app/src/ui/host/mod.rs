@@ -178,15 +178,21 @@ pub fn stealth_capabilities(cx: &App) -> StealthCapabilities {
         .map_or(StealthCapabilities::default(), |s| s.0.capabilities())
 }
 
+/// 三条低干扰入口共用的取服务。gpui 是单线程运行时，这层 Arc 有意不带 Send/Sync
+/// 约束 —— `clippy::arc_with_non_send_sync` 在这里是误报，见 [`StealthServices`]。
+#[allow(clippy::arc_with_non_send_sync)]
+fn stealth_global(cx: &App) -> Option<Arc<StealthServices>> {
+    cx.try_global::<StealthServices>()
+        .map(|services| Arc::new(StealthServices(services.0.clone())))
+}
+
 /// 换窗口背景的透明档。
 pub fn stealth_transparent(
     transparent: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> Result<(), StealthError> {
-    let global: Option<Arc<StealthServices>> = cx
-        .try_global::<StealthServices>()
-        .map(|services| Arc::new(StealthServices(services.0.clone())));
+    let global = stealth_global(cx);
     match global {
         Some(services) => services.0.set_transparent(transparent, window, cx),
         None => Ok(()),
@@ -195,9 +201,7 @@ pub fn stealth_transparent(
 
 /// 老板键隐藏。
 pub fn stealth_hide(window: &mut Window, cx: &mut App) -> Result<(), StealthError> {
-    let global: Option<Arc<StealthServices>> = cx
-        .try_global::<StealthServices>()
-        .map(|services| Arc::new(StealthServices(services.0.clone())));
+    let global = stealth_global(cx);
     match global {
         Some(services) => services.0.hide(window, cx),
         None => Ok(()),
@@ -206,9 +210,7 @@ pub fn stealth_hide(window: &mut Window, cx: &mut App) -> Result<(), StealthErro
 
 /// 从隐藏恢复。
 pub fn stealth_restore(window: &mut Window, cx: &mut App) -> Result<(), StealthError> {
-    let global: Option<Arc<StealthServices>> = cx
-        .try_global::<StealthServices>()
-        .map(|services| Arc::new(StealthServices(services.0.clone())));
+    let global = stealth_global(cx);
     match global {
         Some(services) => services.0.restore(window, cx),
         None => Ok(()),
@@ -357,13 +359,17 @@ pub(crate) fn family_has_m(cx: &App, name: &str) -> bool {
 /// [`family_has_m`] 真解析得出一张带 `m` 的脸。
 pub(crate) fn find_family(wanted: &str, cx: &App) -> Option<String> {
     let names = folio_core::text::usable_names(cx.text_system().all_font_names());
+    // 偏好名先过一遍进程别名索引：另一台设备写下的英文名、读者手改的大小写，都
+    // 归到这台设备真注册的写法，再进大小写不敏感的比对。索引没登记的原样放行。
+    let wanted = folio_core::text::resolve_family_in(wanted, &names)
+        .unwrap_or_else(|| wanted.to_string());
     let find = |want: &str| {
         names
             .iter()
             .find(|name| name.eq_ignore_ascii_case(want) && family_has_m(cx, name))
             .cloned()
     };
-    find(wanted).or_else(|| CJK_PREFERRED.iter().find_map(|want| find(want)))
+    find(&wanted).or_else(|| CJK_PREFERRED.iter().find_map(|want| find(want)))
 }
 
 /// 候选全落空时的那句日志。两个平台都说同一件事，就不各写一遍、也就不用猜对方写没写。
