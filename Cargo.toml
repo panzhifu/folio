@@ -177,11 +177,11 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # Apple/Windows 也必须使用支持 PageCurlMeshes 的对应渲染器。
 # 升级：先推送 fork，统一六处 rev，再 cargo update 对应六个包并验证目标平台。
 # 不提交仓库外 path 覆盖；上游收齐相关接口后才能一起撤除这些补丁。
-gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
-gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
-gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
-gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
-gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "b8dc78a02139b13a59dad91503deab2f5759d145" }
+gpui-pre = { git = "https://github.com/panzhifu/gpui-folio", rev = "3b00d31acda877aab400fd21c5731f5c7c1946c1" }
+gpui-pre-wgpu = { git = "https://github.com/panzhifu/gpui-folio", rev = "3b00d31acda877aab400fd21c5731f5c7c1946c1" }
+gpui-pre-platform = { git = "https://github.com/panzhifu/gpui-folio", rev = "3b00d31acda877aab400fd21c5731f5c7c1946c1" }
+gpui-pre-apple = { git = "https://github.com/panzhifu/gpui-folio", rev = "3b00d31acda877aab400fd21c5731f5c7c1946c1" }
+gpui-pre-windows = { git = "https://github.com/panzhifu/gpui-folio", rev = "3b00d31acda877aab400fd21c5731f5c7c1946c1" }
 
 # release 以移动包体积优先；LTO、strip、panic=abort 也作用于桌面。
 # panic=abort 不提供 unwind 恢复。
