@@ -111,6 +111,11 @@ impl Book {
                 bytes.saturating_add(span.doc.estimated_cache_bytes())
             })
     }
+    /// 内嵌字体注册进设备的驻留字节（子集后；口径见 [`BookFonts::resident_bytes`]）。
+    /// 首趟排版作业带回新表之前是 0。
+    pub(in crate::ui::features::reader) fn fonts_resident_bytes(&self) -> u64 {
+        self.faces.resident_bytes()
+    }
     /// 从一份已打开的文档建出一本书，定位到 `locator` 那一章。
     ///
     /// **字体字节不在这一趟读**：`BookFonts::empty()` 先顶上，`FontLoadJob` 随首趟排版作业

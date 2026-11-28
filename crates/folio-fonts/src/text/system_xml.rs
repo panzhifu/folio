@@ -85,10 +85,11 @@ pub fn parse_font_config(xml: &str) -> SystemFontConfig {
                 }
             }
             "alias" => {
-                if let (Some(name), Some(to)) = (node.attribute("name"), node.attribute("to")) {
-                    if !name.is_empty() && !to.is_empty() {
-                        config.alias_targets.insert(name.to_owned(), to.to_owned());
-                    }
+                if let (Some(name), Some(to)) = (node.attribute("name"), node.attribute("to"))
+                    && !name.is_empty()
+                    && !to.is_empty()
+                {
+                    config.alias_targets.insert(name.to_owned(), to.to_owned());
                 }
             }
             _ => {}

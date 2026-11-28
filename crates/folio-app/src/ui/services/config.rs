@@ -30,8 +30,9 @@ use std::sync::Arc;
 use folio_core::BookSettingsExt;
 use folio_core::infra::config::ThemeBackground;
 use folio_core::{
-    Account, Appearance, BookSettings, Cloud, Config, Env, Language, Layer, Library, Membership,
-    Mode, Novel, Opds, Provenance, Reader, Resolved, Speech, Stealth, Sync, Translation,
+    Account, Appearance, BookSettings, Cloud, Config, Env, Language, Layer, Library, Logging,
+    Membership, Mode, Novel, Opds, Provenance, Reader, Resolved, Speech, Stealth, Sync,
+    Translation,
 };
 use gpui_kit::{App, AppContext as _, Entity, Global};
 
@@ -58,6 +59,11 @@ pub struct ConfigState {
     /// 于是每一帧的比较只是一个数，不必克隆两张 map
     /// （与 `folio_core::layout::LayoutKey::fonts_rev` 同一手法）。
     pub book_rev: u64,
+    /// 用户层落过几次**真改动**（只有 [`ConfigHolder::edit`] 升它）。外壳的落盘观察者
+    /// 按它判脏：书差量那一族（`set_book` / `clear_book`）不落 config.json，却同样
+    /// `notify`——按号判，没号的 notify 不排队也不写盘。与 [`book_rev`](Self::book_rev)
+    /// 同一手法。
+    pub user_rev: u64,
     /// 每一项由哪一层定下来（诊断用，§2.1）。
     pub provenance: Provenance,
     /// 读盘时那份环境变量覆盖层：编辑后要重新叠一次才能算出新的生效值。
@@ -133,6 +139,7 @@ impl ConfigHolder {
                 config: Arc::new(effective),
                 book: None,
                 book_rev: 0,
+                user_rev: 0,
                 provenance,
                 env,
                 path,
@@ -194,6 +201,17 @@ impl ConfigHolder {
     /// 不想写的时候一次 map 克隆都不做。
     pub fn book_rev(cx: &App) -> u64 {
         Self::entity(cx).read(cx).book_rev
+    }
+
+    /// [`user_rev`](ConfigState::user_rev) 的读口——外壳的落盘观察者按它判脏。
+    pub fn user_rev(cx: &App) -> u64 {
+        Self::entity(cx).read(cx).user_rev
+    }
+
+    /// 用户层的日志一节。热重载的 diff 在外壳的观察者里做（照 `watched_library` 同一
+    /// 形状）：整份 [`Config`] 克隆（[`Self::user_config`]）只为看一节太贵，给个窄的。
+    pub fn user_logging(cx: &App) -> Logging {
+        Self::entity(cx).read(cx).user.logging.clone()
     }
 
     /// 换上 / 撤下当前那本书的差量（开书与关书走这一条）。
@@ -403,7 +421,13 @@ impl ConfigHolder {
             f(&mut user);
             let user = user.normalized();
             user.language.locale.apply();
-            state.user = user;
+            // 值没变的编辑（重开一屏、滑条停在原格）不算账：号不动，落盘观察者就
+            // 不排队。notify 与重算照旧——界面那一侧可能仍依赖「编辑发生过」这次唤醒。
+            if user != state.user {
+                state.user = user;
+                // 落盘观察者的脏号只在这一处升：`edit` 是用户层唯一写入口（§2.1）。
+                state.user_rev += 1;
+            }
             // 重算两层，换整个 Arc（§2.3）：手上有旧 Arc 的一方不受影响。
             recompute(state);
             cx.notify();
@@ -660,6 +684,77 @@ mod tests {
             ConfigHolder::edit_reader(cx, |p| p.font_size = 20.0);
         });
         assert!(seen.get() > 0, "改配置应通知观察者，实际 0 次");
+    }
+
+    /// 落盘脏号只认**用户层的真改动**：`edit` 升号、同值编辑不升号、书差量一族永不升号。
+    /// 外壳的落盘观察者按 [`ConfigHolder::user_rev`] 判脏——书差量不落 config.json 却
+    /// 同样 notify，没有这个号就会白排一趟落盘并整份重写磁盘。
+    #[gpui_kit::test]
+    fn the_save_rev_tracks_real_user_edits_only(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            ConfigHolder::install(Config::default(), cx);
+            assert_eq!(ConfigHolder::user_rev(cx), 0, "安装不改动，号从零起");
+        });
+        cx.update(|cx| ConfigHolder::edit_reader(cx, |p| p.font_size = 20.0));
+        let after_edit = cx.update(|cx| ConfigHolder::user_rev(cx));
+        assert_eq!(after_edit, 1, "用户层真改动升一号");
+        cx.update(|cx| ConfigHolder::edit_reader(cx, |p| p.font_size = 20.0));
+        let after_same = cx.update(|cx| ConfigHolder::user_rev(cx));
+        assert_eq!(after_same, after_edit, "同值的编辑不算账：号不动，观察者不排队");
+
+        let mut patch = BookSettings::default();
+        let base = cx.update(|cx| ConfigHolder::default_reader(cx));
+        let mut wanted = base.clone();
+        wanted.font_size = 31.0;
+        patch.record_reader(&base, &wanted);
+        cx.update(|cx| ConfigHolder::set_book(cx, Some(patch)));
+        cx.update(|cx| ConfigHolder::clear_book(cx));
+        assert_eq!(
+            cx.update(|cx| ConfigHolder::user_rev(cx)),
+            after_edit,
+            "书差量那一族（set_book / clear_book）不落 config.json，永不升号"
+        );
+    }
+
+    /// 端到端钉住观察者的判脏：只有书差量的 notify **不产生 config.json**，用户层
+    /// 编辑在 debounce 到点后落盘。`ConfigPath` 指到临时目录，真写盘可观察；debounce
+    /// 用测试执行器的 `advance_clock` 推到点，不睡真实时间。
+    #[gpui_kit::test]
+    fn book_overlays_alone_never_touch_the_config_file(cx: &mut TestAppContext) {
+        use std::time::Duration;
+
+        cx.update(gpui_kit::init);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let handle: AnyWindowHandle = cx
+            .open_window(size(px(600.), px(400.)), |window, cx| {
+                cx.set_global(super::ConfigPath(Some(path.clone())));
+                crate::ui::services::app_store::install(
+                    folio_core::Store::in_memory().expect("内存库"),
+                    cx,
+                );
+                ConfigHolder::install(Config::default(), cx);
+                Root::new(cx.new(|cx| AppShell::boot(window, cx)), window, cx)
+            })
+            .into();
+        cx.update_window(handle, |_, window, cx| window.render_frame(cx))
+            .unwrap();
+
+        let mut patch = BookSettings::default();
+        let base = cx.update(|cx| ConfigHolder::default_reader(cx));
+        let mut wanted = base.clone();
+        wanted.font_size = 33.0;
+        patch.record_reader(&base, &wanted);
+        cx.update(|cx| ConfigHolder::set_book(cx, Some(patch)));
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(!path.exists(), "书差量的 notify 不该触发 config.json 落盘（脏号没动）");
+
+        cx.update(|cx| ConfigHolder::edit_reader(cx, |p| p.font_size = 21.0));
+        cx.executor().advance_clock(Duration::from_millis(600));
+        cx.run_until_parked();
+        assert!(path.exists(), "用户层编辑在 debounce 到点后该真落盘");
     }
 
     /// 挂上一本书的差量：生效值跟着走，而**默认层一个字都不动**；撤掉之后生效值回默认。

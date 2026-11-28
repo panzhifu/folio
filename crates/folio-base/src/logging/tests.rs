@@ -1,4 +1,4 @@
-use super::{Directive, LogFile, Logging, build, log_file, purge_rotated, subscriber};
+use super::{Directive, LogFile, Logging, build, filter, log_file, purge_rotated, subscriber};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::Registry;
@@ -439,7 +439,8 @@ fn the_built_subscriber_filters_the_dependency_noise() {
         ..Default::default()
     };
     {
-        let _guard = tracing::subscriber::set_default(subscriber(&logging, None));
+        let (filter_layer, _) = tracing_subscriber::reload::Layer::new(filter(&logging));
+        let _guard = tracing::subscriber::set_default(subscriber(&logging, None, filter_layer));
         tracing::trace!(target: "zz_dependency", "这行不该进文件");
         tracing::warn!(target: "zz_dependency", "这行该进");
     }
@@ -485,4 +486,13 @@ fn purge_rotated_removes_only_the_rotated_siblings() {
     // 没有轮转目录可删时（`logging.dir` 指到不存在的地方）安静回零，不 panic。
     let missing = dir.path().join("没有这里");
     assert_eq!(purge_rotated(&missing.join("folio.log")), (0, 0));
+}
+
+/// 没装过 subscriber 时换档必须安全返回 `false`，不能 panic。
+///
+/// 外壳在配置观察者里调 [`reload_filter`](super::reload_filter)，装没装都要接得住；
+/// 本 crate 的测试从没调过 `init`，`FILTER_HANDLE` 正好是空的那一档。
+#[test]
+fn reload_filter_without_an_installed_subscriber_is_a_noop() {
+    assert!(!super::reload_filter(&Logging::default()));
 }

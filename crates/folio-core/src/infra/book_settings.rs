@@ -11,7 +11,7 @@
 //! 真相源 —— 新增一格时抄的那份必然漏，症状是「这一格在全局有用、在这本书里没反应」。
 //! 现在的写法是：默认值序列化成对象 → 差量盖上去 → 解回来，新增字段天然可覆盖。
 //!
-//! 唯一的例外是 [`APPEARANCE_GLOBAL_ONLY`] 那五格。它们不是「还没抄进来」，而是**语义上
+//! 唯一的例外是 [`APPEARANCE_GLOBAL_ONLY`] 那几格。它们不是「还没抄进来」，而是**语义上
 //! 不该给单本书覆盖**（见那条常量的文档），所以用一张排除表挡住；有测试盯着这张表里的
 //! 名字都还在，以及「除它们以外全部可覆盖」。
 //!
@@ -39,12 +39,15 @@ pub use folio_model::reading::BookSettings;
 ///   同一个问题，还得多记一层折叠规则（本书差量盖全局默认），2026-11-07 起收归全局：
 ///   夜里看书、白天刷架、读什么纸，软件里只有一份答案。库里旧差量若还存着这两格，
 ///   会被 [`overlay`] 挡掉，安静失效、不需要迁移。
+/// - [`keep_screen_on`](Appearance::keep_screen_on) —— 阅读时保持屏幕常亮。它与亮度
+///   同族：只要有一本书开着就是同一个答案，且由外壳每帧向平台重递（见
+///   `platform::set_keep_screen_on`），不存在「这一本书常亮」的形状。
 ///
 /// 反过来，`Appearance` 里其余的格子（亮度、翻页方式与时长、划词默认样式）
-/// **默认就可覆盖** —— 新增一格时不用回来改这里，除非它像上面五格一样不归单本书。
+/// **默认就可覆盖** —— 新增一格时不用回来改这里，除非它像上面几格一样不归单本书。
 /// 有测试钉住这条口径，见本文件底部。
 pub const APPEARANCE_GLOBAL_ONLY: &[&str] =
-    &["mode", "light", "dark", "reading_mode", "reading_theme"];
+    &["mode", "light", "dark", "reading_mode", "reading_theme", "keep_screen_on"];
 
 /// 咬着 `Reader` / `Appearance` 的那半行为：差量怎么盖回默认、生效值怎么记回差量。
 ///
@@ -224,6 +227,8 @@ mod tests {
             turn_duration: 500.0,
             highlight_style: AnnotationStyle::Wavy,
             brightness: Some(0.4),
+            // 与默认（true）相反：这一格只归全局，非默认值才测得出「被排除」。
+            keep_screen_on: false,
         }
     }
 

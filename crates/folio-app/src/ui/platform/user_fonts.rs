@@ -28,6 +28,7 @@ use std::borrow::Cow;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui_kit::{App, AppContext as _, TextSystem};
 
@@ -77,6 +78,17 @@ struct Summary {
     registered_files: usize,
     missing: usize,
     unreadable: usize,
+}
+
+/// 已驻留的用户字体字节。只有 woff / woff2 解回 sfnt 按字节注册的那一支会计入
+/// （解出来的 sfnt 没有文件路径可挂，注册时全量驻留）；sfnt 走路径注册，字节留在
+/// 盘上、首次用到才映射，驻留按零记账 —— 真用起来的映射页归渲染器/allocator 的
+/// 未知项。内存账本的「注册字体」一格读它。
+static RESIDENT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// 进程内已驻留的用户字体字节（口径见 [`RESIDENT_BYTES`]）。
+pub(crate) fn resident_bytes() -> u64 {
+    RESIDENT_BYTES.load(Ordering::Relaxed)
 }
 
 fn register_all(texts: &TextSystem, installed: &[PathBuf]) -> Summary {
@@ -134,6 +146,7 @@ pub(crate) fn register_file(texts: &TextSystem, path: &Path) -> Option<Vec<Strin
             // 覆盖要在注册**前**读：add_fonts_with_families 拿走字节的所有权。
             let coverage = latin_by_family(&bytes);
             let table_names: Vec<String> = coverage.families().map(str::to_string).collect();
+            let resident = bytes.len();
             let family_sets = texts
                 .add_fonts_with_families(vec![Cow::Owned(bytes)])
                 .ok()?;
@@ -141,6 +154,7 @@ pub(crate) fn register_file(texts: &TextSystem, path: &Path) -> Option<Vec<Strin
             if families.is_empty() {
                 return None;
             }
+            RESIDENT_BYTES.fetch_add(resident as u64, Ordering::Relaxed);
             note_registered(&families, &coverage, &table_names);
             Some(families)
         }

@@ -90,6 +90,10 @@ pub struct BookFonts {
     families: HashMap<String, Vec<FaceName>>,
     /// 建这张表时的字体表版本，见 [`FACE_EVENTS`]。
     revision: u32,
+    /// 注册进文本系统的字节驻留：子集成的脸按子集字节记，切不动走整份的按整份记；
+    /// 别名缓存命中的脸不读字节、不计。读者自装的 sfnt 走路径注册（懒映射，零驻留），
+    /// 不在这里，那份账在 app 的 `user_fonts`。内存账本的「注册字体」一格读它。
+    resident_bytes: u64,
 }
 
 /// 注册成功后设备报回来的一个内部家族名，以及它有没有拉丁 `m` 的字形。
@@ -130,6 +134,7 @@ impl Default for BookFonts {
         Self {
             families: HashMap::new(),
             revision: face_revision(),
+            resident_bytes: 0,
         }
     }
 }
@@ -367,6 +372,11 @@ impl BookFonts {
     pub fn families_len(&self) -> usize {
         self.families.len()
     }
+
+    /// 注册进文本系统的字节驻留（口径见字段注释）。内存账本读它。
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
+    }
     /// 用 UI 已经折好的 [`FontRequest`] 建别名表。worker 只做三件事：
     /// 按身份查别名缓存 → 未命中才读这一份字节 → 注册。
     ///
@@ -450,8 +460,10 @@ impl BookFonts {
                     });
                 }
                 let pending_len = pending.len();
+                let pending_bytes: u64 = pending.iter().map(|face| face.bytes.len() as u64).sum();
                 match register_batch(sink, pending) {
                     Some(results) => {
+                        fonts.resident_bytes = pending_bytes;
                         for (declared, names) in results {
                             if names.is_empty() {
                                 stats.empty_diff += 1;
@@ -508,8 +520,10 @@ impl BookFonts {
                     });
                 }
                 let pending_len = pending.len();
+                let pending_bytes: u64 = pending.iter().map(|face| face.bytes.len() as u64).sum();
                 match register_batch(sink, pending) {
                     Some(results) => {
+                        fonts.resident_bytes = pending_bytes;
                         for (declared, names) in results {
                             if names.is_empty() {
                                 stats.empty_diff += 1;

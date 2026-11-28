@@ -126,13 +126,13 @@ pub(crate) struct ScanRow {
 }
 
 impl ScanRow {
-    /// 这一行的本地路径（勾选与开容器都用它当身份）。远端候选没有 —— 扫描只交本地文件，
-    /// 真来了远端的就空一行，别让它在清单里冒充一本。
+    /// 这一行的本地路径（勾选与开容器都用它当身份）。远端候选没有——扫描只交本地文件，真来了就空一行。
     fn path(&self) -> Option<&Path> {
         match &self.candidate.origin {
             folio_core::Origin::Local(path) => Some(path),
             folio_core::Origin::Remote { .. } => None,
             folio_core::Origin::Cloud { .. } => None,
+            folio_core::Origin::External { .. } => None,
         }
     }
 }

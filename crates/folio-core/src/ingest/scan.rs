@@ -257,6 +257,7 @@ fn candidate_path(candidate: &Candidate) -> &Path {
         Origin::Local(path) => path,
         Origin::Remote { .. } => Path::new(""),
         Origin::Cloud { .. } => Path::new(""),
+        Origin::External { .. } => Path::new(""),
     }
 }
 

@@ -1,6 +1,7 @@
-//! intent 送进来的文件入口：把 `services::intent_import` 队列里的 `content://` 落成
-//! 临时文件、交导入管线。挂在这一层是因为导入卡片与进度都住在架面；渲染帧里调
-//! （[`run`](self::run)），空队列零开销。临时副本读完即弃，与选择器副本同一条口径。
+//! intent 送进来的文件入口：把 `services::intent_import` 队列里的 `content://`
+//! 交给 [`DocumentsSource`] 流式捕获进暂存区（不经 cache 预拷贝），再交导入管线。
+//! 挂在这一层是因为导入卡片与进度都住在架面；渲染帧里调（[`run`](self::run)），
+//! 空队列零开销。
 
 use gpui_kit::{Context, WeakEntity};
 
@@ -11,21 +12,19 @@ pub(in crate::ui::features::shelf) fn run(cx: &mut Context<ShelfView>) {
         return;
     }
     cx.spawn(async move |this: WeakEntity<ShelfView>, cx| {
-        let paths = cx
+        // stat（display_name / 大小）是 worker-only 的 JNI：整体丢到后台。
+        let docs = cx
             .background_executor()
-            .spawn(async move {
-                uris.iter()
-                    .filter_map(|uri| crate::ui::platform::import_uri_to_temp(uri).ok().flatten())
-                    .collect::<Vec<_>>()
-            })
+            .spawn(async move { crate::ui::platform::intent_documents(&uris) })
             .await;
-        if paths.is_empty() {
+        if docs.is_empty() {
             return;
         }
         let _ = this.update(cx, |this, cx| {
             this.dispatch_import(
-                Box::new(folio_core::ingest::import::PathsSource::picked_temporary(
-                    paths,
+                Box::new(folio_core::ingest::import::DocumentsSource::new(
+                    docs,
+                    crate::ui::platform::source_access(),
                 )),
                 cx,
             )

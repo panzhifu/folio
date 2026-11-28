@@ -39,12 +39,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 use tracing::Subscriber;
 use tracing_subscriber::Registry;
 use tracing_subscriber::filter::{LevelFilter, Targets};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::layer::{Layer, SubscriberExt};
+use tracing_subscriber::layer::{Layer, Layered, SubscriberExt};
+use tracing_subscriber::reload;
 
 use crate::error::Result;
 use crate::paths;
@@ -77,6 +79,10 @@ const FALLBACK_LEVEL: LevelFilter = LevelFilter::INFO;
 /// 这一节存在理由是**不改代码就能调级**：真机上出问题往往是「这次什么都不显示」，
 /// 而重新编一遍 Android 是十几分钟加一次签名重装。手改 `config.json` 里的一行、重启，
 /// 就拿到现场了。（要连依赖库一起打开，仍然有 `FOLIO_LOG` 那条环境变量，见 [`crate::logging`]。）
+///
+/// `level` 与 `targets` 连重启都不用：外壳在配置变化时调 [`reload_filter`] 现场换档。
+/// `file` / `stderr` / `dir` 决定的是**装不装那一层**，装好的 subscriber 拆不了层，
+/// 改它们仍要重启。
 ///
 /// 默认值分平台：桌面 stderr 本来就开着，而移动平台上没人对着控制台。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +158,17 @@ impl Logging {
 
 /// 平台自己那一层的类型（Android 的 logcat 就是这么递进来的）。
 pub type BoxedLayer = Box<dyn Layer<Registry> + Send + Sync>;
+
+/// 热重载把手的类型。reload 层的 `S` 必须是**过滤层接进去那一刻**的 subscriber
+/// （`Registry ⊕ extra`）：`reload::Layer<L, S>` 只对那一个 `S` 是层，换别的就回到
+/// [`subscriber`] 文档里「具体类型走到底」要防的那个坑。
+type FilterSubscriber = Layered<Option<BoxedLayer>, Registry>;
+type FilterLayer = reload::Layer<Targets, FilterSubscriber>;
+type FilterHandle = reload::Handle<Targets, FilterSubscriber>;
+
+/// [`init`] 装 subscriber 的那一次留下的换档把手。每个进程只装一次（见 [`init`]），
+/// [`reload_filter`] 从这里拿把手。
+static FILTER_HANDLE: OnceLock<FilterHandle> = OnceLock::new();
 
 /// 一条写法（`logging.targets` 的一项，或 [`LEVEL_ENV`] 里以逗号分隔的一段）解出来的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,16 +363,20 @@ pub fn purge_rotated(active: &Path) -> (usize, u64) {
 /// 因此 `extra`（平台那一层，`dyn Layer<Registry>`）必须**最先**接：链一旦走过一层，
 /// subscriber 的类型就成了 `Layered<…>`，而 `dyn Layer<Registry>` 只对 `Registry` 本身是层，
 /// 对 `Layered<…>` 不是。剩下几层的类型编译期已知，所以能一路具体类型走到底。
+///
+/// `filter_layer` 由调用方先把 [`filter(logging)`] 包进 reload 层再递进来（见 [`init`]）：
+/// 这一层是全链唯一要在运行期换档的地方。
 fn subscriber(
     logging: &Logging,
     extra: Option<BoxedLayer>,
+    filter_layer: FilterLayer,
 ) -> impl Subscriber + Send + Sync + 'static {
     // stderr 只在真的是终端时上色：重定向进文件的那份带一堆 ESC 只会更难读。
     let ansi = io::stderr().is_terminal();
     Registry::default()
         .with(extra)
         // 过滤器紧跟其后：之后每一层拿到的都是它筛过的东西。
-        .with(filter(logging))
+        .with(filter_layer)
         .with(if logging.stderr {
             Some(
                 tracing_subscriber::fmt::layer()
@@ -389,7 +410,12 @@ fn subscriber(
 /// 我们**不**需要 `LogTracer`：Android 那层是反着走的（tracing 事件递进 `log::logger()`），
 /// 桌面的 stderr / 文件也不经过 `log` facade。
 pub fn init(logging: &Logging, extra: Option<BoxedLayer>) -> Result<()> {
-    tracing::subscriber::set_global_default(subscriber(logging, extra))?;
+    // 过滤器包进 reload 层，把手留在进程级：外壳在 `logging` 节变化时调
+    // [`reload_filter`] 换档。把手与 subscriber 必须同趟建立，所以这行在
+    // `set_global_default` 之前。
+    let (filter_layer, handle) = reload::Layer::new(filter(logging));
+    let _ = FILTER_HANDLE.set(handle);
+    tracing::subscriber::set_global_default(subscriber(logging, extra, filter_layer))?;
     // `try_init` 原本会在这一步顺手装 `LogTracer`（`log` → `tracing` 的桥）——
     // 桌面靠它把依赖库（wgpu / html5ever 那一串）通过 `log` facade 发的记录也收进同一份
     // 日志。这里显式补回来，且**允许失败**：Android 的 `android_logger` 已经占了 `log`
@@ -400,6 +426,26 @@ pub fn init(logging: &Logging, extra: Option<BoxedLayer>) -> Result<()> {
     // 从这里往后的日志才有去处，所以启动现场只能报在这里。
     report_startup(logging);
     Ok(())
+}
+
+/// 运行期换一次日志下限（`logging.level` / `logging.targets` 变了之后）。
+///
+/// 只换**过滤器**那层：`file` / `stderr` / `dir` 决定的是装不装那两层，装好的
+/// subscriber 拆不了层，改它们仍要重启。`FOLIO_LOG` 的覆盖在 [`filter`] 里天然
+/// 保持——重算时重读环境变量，启动时给过的覆盖不会因换档丢失。还没装 subscriber
+/// （[`init`] 没跑过，测试里就是这种）时返回 `false`，不动全局；换档失败也返回
+/// `false` 并告警一行，调用方不必为这一格失败停下来。
+pub fn reload_filter(logging: &Logging) -> bool {
+    let Some(handle) = FILTER_HANDLE.get() else {
+        return false;
+    };
+    handle
+        .reload(filter(logging))
+        .map(|_| true)
+        .unwrap_or_else(|err| {
+            tracing::warn!("日志过滤器换档失败：{err}");
+            false
+        })
 }
 
 /// 把「现在是什么配置」写一条。

@@ -11,14 +11,10 @@ import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 
-/** GPUI file prompts import SAF documents into cache before releasing URI access. */
+/** GPUI file prompts hand SAF URIs straight to the import pipeline (single-pass capture). */
 public final class GpuiPathPicker extends Activity {
     private static final int PICK_FILES = 9010;
     private static final int PICK_FOLDER = 9011;
@@ -162,24 +158,20 @@ public final class GpuiPathPicker extends Activity {
         } else if (data.getData() != null) {
             uris.add(data.getData());
         }
-        // Keep this Activity (and its temporary URI grants) alive while reading.
-        // Files from remote providers can be large, so copying cannot run on UI.
+        // Keep this Activity (and its temporary URI grants) alive while registering.
+        // Persisting the grant and querying display names touch the provider, so this
+        // stays off the UI thread — but no byte copy happens here: the import pipeline
+        // captures straight from the URI into its staging area (single-pass IO).
         new Thread(() -> {
-            ArrayList<File> imported = new ArrayList<>();
             try {
-                for (Uri uri : uris) {
-                    File copied = importFile(uri);
-                    imported.add(copied);
-                    FolioSourceAccess.rememberPick(this, uri, copied, data.getFlags());
+                String[] picks = new String[uris.size()];
+                for (int i = 0; i < picks.length; i++) {
+                    Uri uri = uris.get(i);
+                    picks[i] = uri.toString();
+                    FolioSourceAccess.rememberPick(this, uri, displayName(uri), data.getFlags());
                 }
-                String[] paths = new String[imported.size()];
-                for (int i = 0; i < paths.length; i++) paths[i] = imported.get(i).getAbsolutePath();
-                request.complete(paths, null);
+                request.complete(picks, null);
             } catch (Exception error) {
-                for (File file : imported) {
-                    file.delete();
-                    file.getParentFile().delete();
-                }
                 request.complete(null, error);
             } finally {
                 runOnUiThread(this::finish);
@@ -217,33 +209,16 @@ public final class GpuiPathPicker extends Activity {
         }
     }
 
-    private File importFile(Uri uri) throws IOException {
+    /** Query the provider's display name; fall back to the URI's last segment. */
+    private String displayName(Uri uri) {
         String name = null;
         try (Cursor cursor = getContentResolver().query(uri,
                 new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
             if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
-        }
-        // Keep the original extension and Unicode filename for attachment checks,
-        // but never allow a provider's display name to escape the import directory.
+        } catch (Exception ignored) { }
         if (name == null || name.isEmpty()) name = uri.getLastPathSegment();
-        if (name == null) name = "attachment";
-        name = name.replace('/', '_').replace('\\', '_').replace('\0', '_');
-        if (name.isEmpty() || name.equals(".") || name.equals("..")) name = "attachment";
-        File directory = new File(getCacheDir(), "gpui-import-" + UUID.randomUUID());
-        if (!directory.mkdir()) throw new IOException("Could not create import directory");
-        File file = new File(directory, name);
-        try (InputStream input = getContentResolver().openInputStream(uri);
-             FileOutputStream output = new FileOutputStream(file)) {
-            if (input == null) throw new IOException("Could not read selected document");
-            byte[] buffer = new byte[64 * 1024];
-            int count;
-            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
-        } catch (Exception error) {
-            file.delete();
-            directory.delete();
-            throw error;
-        }
-        return file;
+        if (name == null || name.isEmpty()) name = "document";
+        return name.replace('/', '_').replace('\\', '_').replace('\0', '_');
     }
 
     @Override protected void onDestroy() {

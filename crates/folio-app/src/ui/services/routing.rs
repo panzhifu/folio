@@ -18,10 +18,10 @@ const CAP: usize = 4;
 
 /// 入站分流点（由 `cloud_link::deliver` 调到这里）。
 pub fn deliver(url: &str) {
-    if let Ok(mut queue) = PENDING.lock() {
-        if queue.len() < CAP {
-            queue.push(url.to_string());
-        }
+    if let Ok(mut queue) = PENDING.lock()
+        && queue.len() < CAP
+    {
+        queue.push(url.to_string());
     }
 }
 

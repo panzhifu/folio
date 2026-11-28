@@ -154,6 +154,10 @@ enum Slot {
     /// 的那一趟在取活检查点直接交回，不再画一张早就不在屏上的页。
     Loading {
         seen: u64,
+        /// 这一格在请求里自估的瓦片字节（[`DecodeRequest::tile_bytes`]，与预算封顶
+        /// 同一把尺）。内存账本的「解码在途」按它报数——是估算，不是实测；解完
+        /// 落地就换成真像素数进 `Held`。
+        tile_bytes: usize,
         _load: Task<()>,
         cancel: folio_core::Cancel,
     },
@@ -434,6 +438,7 @@ impl ImageAtlas {
             key,
             Slot::Loading {
                 seen: frame,
+                tile_bytes: request.tile_bytes,
                 _load: load,
                 cancel,
             },
@@ -596,8 +601,10 @@ impl ImageAtlas {
             .map_or(local, |budget| local.min(budget))
     }
 
-    /// CPU 为实际像素长度，GPU 是已上传像素的估算，不含渲染器对齐和捕获纹理。
-    pub(in crate::ui::features::reader) fn memory_usage(&self) -> (usize, usize, usize) {
+    /// CPU 为实际像素长度，GPU 是已上传像素的估算，不含渲染器对齐和捕获纹理；
+    /// 末两项是解码在途格子的（个数，自估字节）—— 字节是请求时的瓦片估算，
+    /// 不是实测，落地后按真像素数换账。
+    pub(in crate::ui::features::reader) fn memory_usage(&self) -> (usize, usize, usize, usize) {
         let gpu = self
             .slots
             .values()
@@ -610,12 +617,20 @@ impl ImageAtlas {
                 _ => None,
             })
             .sum();
-        let pending = self
-            .slots
-            .values()
-            .filter(|slot| matches!(slot, Slot::Loading { .. }))
-            .count();
-        (self.bytes.saturating_add(self.preview_bytes), gpu, pending)
+        let mut pending = 0;
+        let mut pending_bytes = 0usize;
+        for slot in self.slots.values() {
+            if let Slot::Loading { tile_bytes, .. } = slot {
+                pending += 1;
+                pending_bytes += *tile_bytes;
+            }
+        }
+        (
+            self.bytes.saturating_add(self.preview_bytes),
+            gpu,
+            pending,
+            pending_bytes,
+        )
     }
 
     pub(in crate::ui::features::reader) fn set_session_budget(&mut self, bytes: usize) {
@@ -1143,6 +1158,48 @@ mod tests {
             "整趟应当取三次字节：pic-0 进场一次、pic-1 进场一次、pic-0 被回收之后回屏再一次。\
              只取到 2 次说明那张图根本没被回收（回屏时旧格子还在），多于 3 次说明在场期间在重解"
         );
+    }
+
+    /// 解码在途的格子按请求自估的瓦片字节进账，落地后清零。
+    ///
+    /// `paint` 不推进执行器（见它的注释），所以画完那一帧后格子必然还在 `Loading`，
+    /// 这个中间态是确定的，不用抢时间窗。
+    #[gpui_kit::test]
+    fn loading_tiles_report_their_estimate_until_the_decode_lands(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (atlas, table, _reads) = cx.update(|cx| book(cx, 1, 2, 2));
+        let key = table["pic-0.png"].key.clone();
+        let tile_bytes = table["pic-0.png"].tile_bytes;
+        let window = cx.open_window(size(px(64.0), px(64.0)), {
+            let atlas = atlas.clone();
+            move |_, _| Screen {
+                atlas,
+                table,
+                showing: vec!["pic-0.png".into()],
+            }
+        });
+        let handle: AnyWindowHandle = window.into();
+        paint(handle, cx);
+        let pending = asked(&atlas, cx, |atlas| {
+            let (_, _, decoding, decoding_bytes) = atlas.memory_usage();
+            (decoding, decoding_bytes)
+        });
+        assert_eq!(pending.0, 1, "前提：画完那一帧解码还在途");
+        assert_eq!(
+            pending.1, tile_bytes,
+            "在途字节报的应是请求自估的瓦片字节（与预算封顶同一把尺）"
+        );
+        settle(handle, cx);
+        let landed = asked(&atlas, cx, |atlas| {
+            let (_, _, decoding, decoding_bytes) = atlas.memory_usage();
+            (decoding, decoding_bytes)
+        });
+        assert_eq!(
+            landed,
+            (0, 0),
+            "解完落地后按真像素数换账，在途的个数与字节都该清零"
+        );
+        assert!(held(&atlas, &key, cx).is_some(), "前提：这一格确实落地了");
     }
 
     /// 在场期间**不重解**：同一张图连着画五帧，容器只该被问一次。

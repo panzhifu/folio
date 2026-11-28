@@ -48,6 +48,8 @@ pub use pipeline::reindex;
 pub use pipeline::schedule_reindex;
 pub use sources::CloudItem;
 pub use sources::CloudSource;
+pub use sources::DocumentRef;
+pub use sources::DocumentsSource;
 pub use sources::PathsSource;
 pub use sources::UrlSource;
 // `scan` 与 `watch` 都靠这一句把本地候选落进暂存区。
@@ -91,6 +93,10 @@ pub enum Origin {
         path: String,
         size: Option<u64>,
     },
+    /// 平台文档提供方的一个条目（Android SAF 的 `content://`）。`locator` 交给平台的
+    /// [`crate::ingest::external_source::ExternalSourceAccess`] 解读；本体没有可重放
+    /// 的本地路径，捕获直接流式进暂存区，不经 cache 预拷贝。
+    External { locator: String },
 }
 
 /// 一个候选 = 一本书的出处，加上「它叫什么」。

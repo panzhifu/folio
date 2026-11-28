@@ -467,3 +467,35 @@ fn equal_second_conflicts_converge_across_receivers_order_and_retries() {
     assert_eq!(again.stats.applied(), 0);
     assert!(again.plan.annotation_deletes.is_empty());
 }
+
+/// 同一快照桶里同一 uid 既有活跃记录又有墓碑，必须确定收敛到删除。
+///
+/// 这是分页导出（页间放锁）才会出现的新形状：删除落在「记录页已扫、墓碑趟未扫」
+/// 之间时，桶里两头都在。keep_event 的时间规则管的就是这一格——删除的
+/// deleted_at 必大于记录的 updated_at，所以删除胜：活跃项不进合并结果、本地
+/// 来源不写回（不把删除又改回去），墓碑保留给下一轮。
+#[test]
+fn an_active_record_and_its_tombstone_in_one_bucket_converge_on_the_deletion() {
+    let local = with_book(
+        Snapshot::new("dev-local", 30),
+        "hash",
+        BookSnapshot {
+            annotations: vec![annotation("a", 20)],
+            tombstones: vec![tombstone(TombstoneKind::Annotation, "a", 25)],
+            ..BookSnapshot::default()
+        },
+    );
+
+    let merged = merge(&local, &[], 50);
+    assert!(
+        merged.snapshot.books["hash"].annotations.is_empty(),
+        "同桶并存的活跃项不该活过合并"
+    );
+    assert_eq!(
+        merged.snapshot.books["hash"].tombstones.len(),
+        1,
+        "墓碑必须保留，下一轮它还在"
+    );
+    assert!(merged.plan.annotation_upserts.is_empty());
+    assert!(merged.plan.annotation_deletes.is_empty(), "本地来源不写回");
+}

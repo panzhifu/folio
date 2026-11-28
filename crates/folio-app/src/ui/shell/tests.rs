@@ -233,29 +233,19 @@ fn the_reader_mode_only_wins_while_the_layer_covers() {
     );
 }
 
-/// 回归门：音量键只在阅读页翻页，别处必须把这一按还给系统。
-///
-/// 这条分流是整个功能唯一的判据，而两头的失败都安静：阅读页里不翻页＝键按下去没反应，
-/// 书架里不转音量＝把系统本来就有的键做成了死键。翻页那一路要进阅读页、音量那一路要进
-/// JNI，宿主测试两样都摸不到，所以钉在 [`VolumeKey::of`] 这一层。
-/// 「音量上 = 往前一页、音量下 = 往后一页」的符号也钉在这里 —— 改了口径测试会红，
-/// 不会悄悄反过来。
+/// 回归门：音量键只在阅读页（且听书没在播）翻页，其余一律把这一按还给系统。
+/// 两头的失败都安静：阅读页里不翻页＝键按下去没反应，书架里不转音量＝把系统本来就有的
+/// 键做成了死键；两头（阅读页、JNI）宿主测试都摸不到，所以钉在 [`VolumeKey::of`] 这层。
+/// 「音量上 = 往前一页」的符号与「听书播着还键」也钉在这里——改了口径测试会红，不悄悄变。
 #[test]
 fn the_volume_keys_page_only_on_the_reading_view() {
     use super::VolumeKey;
 
-    assert_eq!(VolumeKey::of(true, true), VolumeKey::Turn(-1));
-    assert_eq!(VolumeKey::of(true, false), VolumeKey::Turn(1));
-    assert_eq!(
-        VolumeKey::of(false, true),
-        VolumeKey::SystemVolume { up: true },
-        "不在阅读页时音量键该调音量"
-    );
-    assert_eq!(
-        VolumeKey::of(false, false),
-        VolumeKey::SystemVolume { up: false },
-        "两个方向都别吞"
-    );
+    assert_eq!(VolumeKey::of(true, false, true), VolumeKey::Turn(-1));
+    assert_eq!(VolumeKey::of(true, false, false), VolumeKey::Turn(1));
+    assert_eq!(VolumeKey::of(true, true, false), VolumeKey::SystemVolume { up: false }, "听书播着还键给音量");
+    assert_eq!(VolumeKey::of(false, true, true), VolumeKey::SystemVolume { up: true }, "不在阅读页时调音量");
+    assert_eq!(VolumeKey::of(false, false, false), VolumeKey::SystemVolume { up: false }, "两个方向都别吞");
 }
 
 /// 回归门：报给正文的那份扣减里必须含安全区上下两条，而**摆层只让顶上那一条**。

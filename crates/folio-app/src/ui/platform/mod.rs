@@ -39,7 +39,7 @@ mod android_sources;
 mod android_speech;
 mod restore;
 pub mod user_fonts;
-pub(crate) use android_sources::{import_uri_to_temp, source_access, source_for_pick};
+pub(crate) use android_sources::{intent_documents, source_access, source_for_pick};
 pub(crate) use restore::CAN_QUIT_FOR_RESTORE;
 
 // ── 移动三端共用的启动 ────────────────────────────────────────────────────────
@@ -600,8 +600,11 @@ pub(crate) fn boot(cx: &mut App, resolved: Resolved) {
             Some(&provenance),
             db_version,
             Some(crate::ui::services::resident::pool().queued()),
-            // 物理内存还没接（平台层给），所以给 `None` —— 报「未知」也不报假数。
-            None,
+            // 预算执行端已接线：物理内存由 host 读（Android 走 sysconf 页数），
+            // 读不到时 `for_device` 自己回退设备档。
+            Some(folio_core::MemoryBudget::for_device(
+                crate::ui::host::physical_memory_bytes(),
+            )),
         );
     }
     // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。

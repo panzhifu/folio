@@ -13,7 +13,7 @@ pub mod stealth;
 use std::time::Duration;
 
 use folio_core::Library;
-use folio_core::infra::config::Appearance;
+use folio_core::infra::config::{Appearance, Logging};
 use gpui_kit::base::motion::{Presence, PresencePhase, PresenceSample, TransitionId};
 use gpui_kit::base::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, NavStackState};
 use gpui_kit::component::{ActiveTheme, ThemeMode, h_flex, v_flex};
@@ -59,9 +59,10 @@ actions!(
 );
 
 /// 一次音量键按下该去哪儿。
-/// 判据只有一条，而它两边都错不起：有一本书正在被读时音量键是翻页，别处必须把这一按
-/// 还给系统去调音量（不然书架、设置里音量键直接成了死键）。抽成纯函数是因为翻页要走
-/// 阅读页、调音量要走 JNI，宿主测试里两样都摸不到，只有这条分流能被直接断言。
+/// 判据有两条：有一本书正在被读（且听书没在播）时音量键是翻页，其余一律把这一按还给
+/// 系统去调音量——不然书架、设置里音量键直接成了死键，而听书播着时那一按的意图几乎
+/// 总是调媒体音量，拿去翻页只会搅乱跟读的页对齐。抽成纯函数是因为翻页要走阅读页、
+/// 调音量要走 JNI，宿主测试里两样都摸不到，只有这条分流能被直接断言。
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum VolumeKey {
     /// 按读书顺序走这么多页（`+1` = 往后一页）。
@@ -74,9 +75,9 @@ impl VolumeKey {
     /// 「音量上 = 往前一页、音量下 = 往后一页」是拍的口径（与 KOReader 的
     /// `VOLUME_UP → 上一页` / `VOLUME_DOWN → 下一页` 一致），改它只改这一行。RTL 不
     /// 反过来：页号本来就按阅读序排（左右分区那套换算在 `reader::chrome::zone` 里），
-    /// 所以 ±1 在两种方向下都还是「往前 / 往后一页」。
-    pub(crate) fn of(reading_open: bool, up: bool) -> Self {
-        if reading_open {
+    /// 所以 ±1 在两种方向下都还是「往前 / 往后一页」。听书播着时不翻：还键给音量。
+    pub(crate) fn of(reading_open: bool, speech_playing: bool, up: bool) -> Self {
+        if reading_open && !speech_playing {
             Self::Turn(if up { -1 } else { 1 })
         } else {
             Self::SystemVolume { up }
@@ -334,6 +335,12 @@ pub struct AppShell {
     applied: Option<(Appearance, ThemeMode)>,
     /// 上次同步给监听服务的书库目录；只在监听字段变更时重启。
     watched_library: Library,
+    /// 上次**排落盘**时看到的用户层改动号。号没动就不排队也不写盘：书差量那一族
+    /// （`set_book` / `edit_book_*`）不落 config.json，却同样 notify。
+    last_save_rev: u64,
+    /// 上次热重载用的日志一节；变了才调 `reload_filter` 换档（照 `watched_library`
+    /// 同一形状）。
+    watched_logging: Logging,
     /// 去抖落盘：drop 取消，安静后写盘（§2.5）。
     _save_debounce: Option<Task<()>>,
     /// 桌面阅读想要的全屏态；默认小屏，顶栏模式键请求。
@@ -555,7 +562,20 @@ impl AppShell {
 
         let _config_watch = cx.observe(&ConfigHolder::handle(cx), |this, _, cx| {
             // 落盘**去抖**（§2.5）：拖滑条会产出几十次改动，攒一攒再写一次盘。
-            this.schedule_save(cx);
+            // 只有**用户层**真的改过才排：书差量那一族（`set_book` / `edit_book_*`）
+            // 不落 config.json，却同样 notify —— 按号判，没号的 notify 不排队。
+            let rev = ConfigHolder::user_rev(cx);
+            if rev != this.last_save_rev {
+                this.last_save_rev = rev;
+                this.schedule_save(cx);
+            }
+            // 日志下限热重载：`logging` 节变了就换档（`FOLIO_LOG` 的覆盖在过滤器
+            // 里天然保持）。`file` / `stderr` 开关仍要重启，`reload_filter` 换不了层。
+            let logging = ConfigHolder::user_logging(cx);
+            if logging != this.watched_logging {
+                this.watched_logging = logging.clone();
+                folio_core::infra::logging::reload_filter(&logging);
+            }
             // 监听只在**监听相关的那几项**真的变了才动：书库目录或 `watch`（开关/目录/节奏）。
             // 改个字号也去重启一遍监听服务，是文档 §2.5 点名要避免的「无关服务重启」。
             let library = ConfigHolder::library(cx);
@@ -664,6 +684,9 @@ impl AppShell {
             _memory_watch,
             applied: None,
             watched_library: ConfigHolder::library(cx),
+            // 落盘从「当下」的号起算：启动前发生过的编辑不属于这个外壳要结的账。
+            last_save_rev: ConfigHolder::user_rev(cx),
+            watched_logging: ConfigHolder::user_logging(cx),
             _save_debounce: None,
             fullscreen_wanted: false,
             fullscreen_asked: None,
@@ -928,6 +951,12 @@ impl AppShell {
 
     /// 应用生命周期：后台按离开这一刻结账并停钟，前台续段。
     fn on_app_lifecycle(&mut self, phase: AppLifecyclePhase, cx: &mut Context<Self>) {
+        // 丢后台先把配置落盘（与栈底 `SendToBack` 同一口径）：这条路不走
+        // `on_app_quit`，而进程在后台随时可能被系统回收，debounce 窗口里没写的
+        // 就丢了。位置与时长归阅读页那一条（它有自己的离席 flush）。
+        if matches!(phase, AppLifecyclePhase::Background) {
+            ConfigHolder::save(cx);
+        }
         let Some(layer) = self.reading.as_ref() else {
             return;
         };
@@ -1192,10 +1221,14 @@ impl AppShell {
 
     /// 音量键按下：翻页还是还给系统，判据在 [`VolumeKey::of`]。
     /// 翻页走阅读页自己那条路（与点屏幕左右两边同一个入口），所以分页 / 连续滚动 /
-    /// 章末跨章的行为全都跟着正文。调音量那一路只有 Android 有实现，见
-    /// [`crate::ui::platform::adjust_system_volume`]。
+    /// 章末跨章的行为全都跟着正文；听书播着时还键给音量。调音量那一路只有 Android
+    /// 有实现，见 [`crate::ui::platform::adjust_system_volume`]。
     fn volume_key(&mut self, up: bool, cx: &mut Context<Self>) {
-        match VolumeKey::of(self.reading_open(), up) {
+        let listening = self
+            .reading
+            .as_ref()
+            .is_some_and(|layer| layer.page.read(cx).speech_playing(cx));
+        match VolumeKey::of(self.reading_open(), listening, up) {
             VolumeKey::Turn(delta) => {
                 if let Some(layer) = self.reading.as_ref() {
                     layer.page.update(cx, |page, cx| page.turn_page(delta, cx));

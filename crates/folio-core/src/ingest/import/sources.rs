@@ -10,6 +10,8 @@ use crate::error::IoResultExt as _;
 use crate::error::Result;
 use crate::infra::paths;
 use crate::infra::task::StageCtx;
+use crate::ingest::external_source::capture_external;
+use crate::ingest::external_source::ExternalSourceAccess;
 use crate::net::cloud::Drive;
 use crate::net::remote::Method;
 use crate::net::remote::Request;
@@ -499,5 +501,198 @@ impl Source for CloudSource {
         let total = self.drive.download(path, &mut sink, ctx.cancel())?;
         ctx.bytes(total, Some(total), &candidate.name);
         Ok(dest)
+    }
+}
+
+/// 平台文档提供方交来的一条文档：定位串、建议名、大小。
+#[derive(Debug, Clone)]
+pub struct DocumentRef {
+    /// 平台来源定位串（Android SAF 的 `content://…`）。解读归平台的
+    /// [`ExternalSourceAccess`]。
+    pub locator: String,
+    /// 建议名：提供方报的 display_name，取不到时调用方给个中性名。
+    pub name: String,
+    pub size: Option<u64>,
+    /// 持久授权拿到了没有。拿不到时 [`Source::source_link`] 不发 link，导入按
+    /// 一次性输入收档——字节照样进暂存区，不回退预拷贝。
+    pub linked: bool,
+}
+
+/// 一批**平台文档**（Android SAF）：选择器交回 URI、intent 送进 URI，两路共用。
+///
+/// 与本地路径那族的本质差别是**没有可以预拷的文件**——字节只在提供方手里。所以
+/// [`Source::stage_with_hash`] 直接经 [`capture_external`] 流式写进暂存区：SHA-256
+/// 同趟算，前后元数据核验、取消、8 GiB 上限全部继承那份契约。原先「选择器先拷进
+/// cache、管线再拷进暂存区」的那一遍重复 IO 就是从这里省掉的。
+pub struct DocumentsSource {
+    docs: Vec<DocumentRef>,
+    access: Arc<dyn ExternalSourceAccess>,
+    kind: ImportKind,
+}
+
+impl DocumentsSource {
+    /// 一批文档。选择器与 intent 两路都按 [`ImportKind::Picked`] 报；授权成败由
+    /// [`DocumentRef::linked`] 随条目带着，这里不再区分。
+    pub fn new(docs: Vec<DocumentRef>, access: Arc<dyn ExternalSourceAccess>) -> Self {
+        Self {
+            docs,
+            access,
+            kind: ImportKind::Picked,
+        }
+    }
+}
+
+impl Source for DocumentsSource {
+    fn kind(&self) -> ImportKind {
+        self.kind
+    }
+
+    fn candidates(&self, _book_dir: &Path, _ctx: &StageCtx) -> Result<Vec<Candidate>> {
+        Ok(self
+            .docs
+            .iter()
+            .map(|doc| Candidate {
+                origin: Origin::External {
+                    locator: doc.locator.clone(),
+                },
+                name: doc.name.clone(),
+                size: doc.size,
+            })
+            .collect())
+    }
+
+    fn stage(&self, candidate: &Candidate, staging_dir: &Path, ctx: &StageCtx) -> Result<PathBuf> {
+        self.stage_with_hash(candidate, staging_dir, ctx)
+            .map(|(path, _)| path)
+    }
+
+    fn stage_with_hash(
+        &self,
+        candidate: &Candidate,
+        staging_dir: &Path,
+        ctx: &StageCtx,
+    ) -> Result<(PathBuf, Option<String>)> {
+        let Origin::External { locator } = &candidate.origin else {
+            return Err(Error::Io {
+                path: PathBuf::from(&candidate.name),
+                source: "文档候选不该是本地出处".to_string().into(),
+            });
+        };
+        let staged = capture_external(self.access.as_ref(), locator, staging_dir, ctx)?;
+        let (path, hash) = staged.hand_off();
+        Ok((path, Some(hash)))
+    }
+
+    fn persistent_local(&self, _candidate: &Candidate) -> Option<PathBuf> {
+        // 平台文档没有本地原件；持久授权的成败在 link 里，不在路径上。
+        None
+    }
+
+    fn source_link(
+        &self,
+        candidate: &Candidate,
+    ) -> Option<crate::ingest::external_source::SourceLink> {
+        let Origin::External { locator } = &candidate.origin else {
+            return None;
+        };
+        self.docs
+            .iter()
+            .find(|doc| &doc.locator == locator)
+            .filter(|doc| doc.linked)
+            .map(|doc| crate::ingest::external_source::SourceLink {
+                kind: "android-document".into(),
+                locator: doc.locator.clone(),
+            })
+    }
+}
+
+#[cfg(test)]
+mod documents_tests {
+    use super::DocumentRef;
+    use super::DocumentsSource;
+    use super::{Origin, Source};
+    use crate::infra::task::StageCtx;
+    use crate::ingest::external_source::{ExternalSourceAccess, SourceMetadata};
+    use std::io::{Cursor, Read};
+    use std::sync::Arc;
+
+    /// 内存里的一台「文档提供方」，形状照 external_source 的测试件。
+    struct FakeAccess {
+        bytes: &'static [u8],
+        name: &'static str,
+    }
+    impl ExternalSourceAccess for FakeAccess {
+        fn metadata(&self, _: &str) -> std::io::Result<SourceMetadata> {
+            Ok(SourceMetadata {
+                size: Some(self.bytes.len() as u64),
+                modified: None,
+                display_name: self.name.into(),
+            })
+        }
+        fn open(&self, _: &str) -> std::io::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(Cursor::new(self.bytes.to_vec())))
+        }
+    }
+
+    #[test]
+    fn documents_stage_streams_into_staging_and_links_only_authorized_ones() {
+        use sha2::{Digest as _, Sha256};
+        let access = Arc::new(FakeAccess {
+            bytes: b"fake book bytes",
+            name: "书.epub",
+        });
+        let source = DocumentsSource::new(
+            vec![
+                DocumentRef {
+                    locator: "content://provider/1".into(),
+                    name: "书.epub".into(),
+                    size: Some(15),
+                    linked: true,
+                },
+                DocumentRef {
+                    locator: "content://provider/2".into(),
+                    name: "一次性.pdf".into(),
+                    size: None,
+                    linked: false,
+                },
+            ],
+            access,
+        );
+        let staging = tempfile::tempdir().unwrap();
+        let ctx = StageCtx::detached();
+        let candidates = source.candidates(staging.path(), &ctx).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(matches!(
+            candidates[0].origin,
+            Origin::External { ref locator } if locator == "content://provider/1"
+        ));
+
+        let (path, hash) = source
+            .stage_with_hash(&candidates[0], staging.path(), &ctx)
+            .unwrap();
+        assert_eq!(path.parent(), Some(staging.path()), "字节必须落在暂存区里");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, b"fake book bytes", "流式捕获应当一字不差");
+        let mut expected = Sha256::new();
+        expected.update(b"fake book bytes");
+        assert_eq!(
+            hash.as_deref(),
+            Some(expected.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>().as_str()),
+            "哈希应当是同一趟算出的那份"
+        );
+        assert!(source.source_link(&candidates[0]).is_some(), "有授权的条目要发 link");
+        assert_eq!(
+            source.source_link(&candidates[0]).unwrap().kind,
+            "android-document"
+        );
+
+        // 没拿到持久授权的那条照常捕获（字节进暂存区），只是不发 link。
+        let (second, second_hash) = source
+            .stage_with_hash(&candidates[1], staging.path(), &ctx)
+            .unwrap();
+        assert!(second.is_file());
+        assert_eq!(second_hash, hash, "同字节同哈希");
+        assert!(source.source_link(&candidates[1]).is_none());
+        assert!(source.persistent_local(&candidates[0]).is_none());
     }
 }

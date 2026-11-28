@@ -365,6 +365,8 @@ fn config_roundtrips_through_a_file() {
             turn_duration: 420.0,
             highlight_style: AnnotationStyle::Wavy,
             brightness: Some(0.6),
+            // 故意与默认（true）相反：这一格也要真写出去再读回来。
+            keep_screen_on: false,
         },
         language: Language { locale: Locale::Ja },
         ..Default::default()

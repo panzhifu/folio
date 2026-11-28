@@ -99,17 +99,17 @@ impl DesktopPlayer {
     }
 
     fn send(&self, cmd: Cmd) {
-        if let Some(cmd_tx) = &self.cmd {
-            if cmd_tx.send(cmd).is_err() {
-                // 播放线程已经没了（设备恢复失败之类）：状态里留着原因，
-                // 下一次 play 重建不了就报错给读者看。
-                *self
-                    .shared
-                    .error
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                    Some("播放线程已退出，重启应用后可再试".to_owned());
-            }
+        if let Some(cmd_tx) = &self.cmd
+            && cmd_tx.send(cmd).is_err()
+        {
+            // 播放线程已经没了（设备恢复失败之类）：状态里留着原因，
+            // 下一次 play 重建不了就报错给读者看。
+            *self
+                .shared
+                .error
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some("播放线程已退出，重启应用后可再试".to_owned());
         }
     }
 }

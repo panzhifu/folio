@@ -1984,8 +1984,8 @@ fn paint_picture_page(
 /// 的画法 —— 逐像素的多边形裁剪要的是 gpui 没有的东西（`ContentMask` 只有矩形）。
 /// 留白块比伸到隔壁那张纸上的色块好读。捕获层里那两份副本照单全收（不裁）。
 ///
-/// 只有这一帧真要写捕获副本时才逐块查背景图；实时页那一趟多查一遍
-/// `painted_picture` 是白花钱。
+/// 只有这一帧真要写捕获副本时才逐块查背景图（实时页那一趟多查一遍 `painted_picture` 是白花钱）。
+#[allow(clippy::too_many_arguments)]
 fn paint_scene_decorations(
     atlas: &Entity<ImageAtlas>,
     view: EntityId,

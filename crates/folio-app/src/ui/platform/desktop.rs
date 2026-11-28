@@ -100,8 +100,11 @@ pub fn run_desktop() {
                     Some(&provenance),
                     db_version,
                     Some(crate::ui::services::resident::pool().queued()),
-                    // 物理内存还没接（平台层给），所以给 `None` —— 报「未知」也不报假数。
-                    None,
+                    // 预算执行端已接线：物理内存由 host 读，读不到时 `for_device`
+                    // 自己回退设备档。
+                    Some(folio_core::MemoryBudget::for_device(
+                        crate::ui::host::physical_memory_bytes(),
+                    )),
                 );
             }
             // 清掉上次崩溃留在书库目录里的 `.part` 半成品（§1.3 末条）。

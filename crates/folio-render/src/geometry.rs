@@ -284,7 +284,6 @@ pub struct Layout {
 /// 把**逻辑横排**长条整体投影成竖排物理坐标。断行、基线、shaping、命中
 /// (`Measure::byte_at_x` / `char_edges`) 都只认「沿内联轴的纯量」，在逻辑空间里本来就对；
 /// 让 `collect` 直接按竖轴摆就得改引擎里的 x/y、app 三处读 `glyph.position` 的地方。
-
 impl Layout {
     /// 组装排版结果：竖排先把两张表整体投影成物理坐标，然后折「行 → 块」那张表，
     /// 并量一次沿推进轴的叠放性。

@@ -56,6 +56,18 @@ impl Drop for ExternalStaged {
     }
 }
 
+impl ExternalStaged {
+    /// 把暂存文件的所有权交出去（路径与哈希），接管方负责后续 rename 与清场。
+    ///
+    /// `Drop` 会删 `path` 下的半成品；先把它两个字段搬空再落 Drop，那次删除
+    /// 注定 NotFound、安静吞掉 —— 更新链路靠 capture_staged 先 rename 达成同一
+    /// 效果，首遍捕获（`stage_with_hash` 交回路径、rename 在管线里）走这里。
+    pub(crate) fn hand_off(self) -> (PathBuf, String) {
+        let mut this = self;
+        (std::mem::take(&mut this.path), std::mem::take(&mut this.hash))
+    }
+}
+
 const MAX_SOURCE_BYTES: u64 = 8 << 30;
 
 pub(crate) fn capture_external(

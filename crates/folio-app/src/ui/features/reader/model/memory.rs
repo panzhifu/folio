@@ -1,4 +1,5 @@
-//! 阅读会话的缓存账与回收。当前文档/注册字体/渲染器内部占用不冒充已测值。
+//! 阅读会话的缓存账与回收。注册字体与解码在途按估算口径入账；当前文档/渲染器内部
+//! 占用/allocator 不冒充已测值。
 
 use std::time::{Duration, Instant};
 
@@ -15,8 +16,14 @@ pub(in crate::ui::features::reader) struct CacheUsage {
     pub gpu_pixels_estimate: usize,
     pub reusable_layout_estimate: usize,
     pub font_cache_estimate: usize,
-    /// 在途解码任务数；其尚未返回的字节占用未知。
+    /// 在途解码任务数。
     pub decoding: usize,
+    /// 在途解码字节的估算：请求自估的瓦片字节（解完落地按真像素数换账）。
+    pub decoding_bytes_estimate: usize,
+    /// 随书内嵌字体注册进设备的驻留字节 + 用户字体按字节注册的那一支。
+    /// **不进** [`total_estimate`](Self::total_estimate)：字体注册不可回收，
+    /// 计入压力总数只会让回收反复空跑；这里只报数。
+    pub registered_fonts_estimate: u64,
 }
 
 impl CacheUsage {
@@ -37,6 +44,7 @@ pub(in crate::ui::features::reader) struct CachePeaks {
     pub cpu_pixels: usize,
     pub total_estimate: u64,
     pub decoding: usize,
+    pub decoding_bytes: usize,
 }
 
 impl CachePeaks {
@@ -44,6 +52,7 @@ impl CachePeaks {
         self.cpu_pixels = self.cpu_pixels.max(usage.cpu_pixels);
         self.total_estimate = self.total_estimate.max(usage.total_estimate());
         self.decoding = self.decoding.max(usage.decoding);
+        self.decoding_bytes = self.decoding_bytes.max(usage.decoding_bytes_estimate);
     }
 }
 
@@ -72,17 +81,25 @@ impl Default for CacheControl {
 
 impl ReaderSession {
     pub(in crate::ui::features::reader) fn cache_usage(&self, cx: &App) -> CacheUsage {
-        let (cpu_pixels, gpu_pixels_estimate, decoding) = self.atlas.read(cx).memory_usage();
+        let (cpu_pixels, gpu_pixels_estimate, decoding, decoding_bytes_estimate) =
+            self.atlas.read(cx).memory_usage();
         let reusable_layout_estimate = match &self.source {
             Source::Book(book) => book.estimated_cache_bytes(),
             _ => 0,
         };
+        let registered_fonts_estimate = match &self.source {
+            Source::Book(book) => book.fonts_resident_bytes(),
+            _ => 0,
+        }
+        .saturating_add(crate::ui::platform::user_fonts::resident_bytes());
         CacheUsage {
             cpu_pixels,
             gpu_pixels_estimate,
             reusable_layout_estimate,
             font_cache_estimate: self.font_cache.estimated_cache_bytes(),
             decoding,
+            decoding_bytes_estimate,
+            registered_fonts_estimate,
         }
     }
 
@@ -155,13 +172,16 @@ impl ReaderSession {
             font_cache_estimate = usage.font_cache_estimate,
             total_estimate = usage.total_estimate(),
             decoding = usage.decoding,
+            decoding_bytes_estimate = usage.decoding_bytes_estimate,
+            registered_fonts_estimate = usage.registered_fonts_estimate,
             peak_cpu_pixels = self.cache_control.peaks.cpu_pixels,
             peak_total_estimate = self.cache_control.peaks.total_estimate,
             peak_decoding = self.cache_control.peaks.decoding,
+            peak_decoding_bytes = self.cache_control.peaks.decoding_bytes,
             released_estimate,
             budget = self.cache_control.budget.total,
             physical_bytes = self.cache_control.physical_bytes,
-            unknown = "current_document,registered_fonts,renderer,decoding_bytes,allocator",
+            unknown = "current_document,renderer,allocator",
             "阅读缓存账（CPU像素实测，其余为估算；不代表进程RSS）"
         );
     }
@@ -234,6 +254,15 @@ mod tests {
                 assert!(
                     before.reusable_layout_estimate > 0,
                     "前提：真实排版已经生成块级缓存"
+                );
+                assert_eq!(
+                    (before.decoding, before.decoding_bytes_estimate),
+                    (0, 0),
+                    "纯文字会话没有在途解码"
+                );
+                assert_eq!(
+                    before.registered_fonts_estimate, 0,
+                    "合成文档没有内嵌字体、用户字体清单为空，注册字节应为零"
                 );
                 reader.cache_control.budget = MemoryBudget::for_device(Some(1));
                 reader.enforce_cache_budget(cx);

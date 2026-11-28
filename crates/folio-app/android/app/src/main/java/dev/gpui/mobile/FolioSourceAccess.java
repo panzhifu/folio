@@ -48,19 +48,23 @@ public final class FolioSourceAccess {
         }
     }
 
-    /** Called only for the exact cache file created from this selected URI. */
-    public static void rememberPick(Context context, Uri uri, File cacheFile, int returnedFlags) {
+    /**
+     * Register a picked URI right after its grant was (attempted to be) persisted.
+     *
+     * <p>The pick is keyed by the URI string itself: the picker hands the same string
+     * back to Rust, which looks it up identity-wise in {@link #sourceForPick}. No cache
+     * copy exists any more — the import pipeline captures straight from the URI.</p>
+     */
+    public static void rememberPick(Context context, Uri uri, String displayName, int returnedFlags) {
         if (!persistSelection(context, uri, returnedFlags)) return;
-        try {
-            String path = cacheFile.getCanonicalPath();
-            synchronized (PICKS) { PICKS.put(path, new Pick(uri.toString(), cacheFile.getName())); }
-        } catch (IOException | SecurityException ignored) { }
+        String name = (displayName == null || displayName.isEmpty()) ? "document" : displayName;
+        synchronized (PICKS) { PICKS.put(uri.toString(), new Pick(uri.toString(), name)); }
     }
 
-    public static String sourceForPick(Activity activity, String cachePath) {
+    public static String sourceForPick(Activity activity, String pickKey) {
         try {
             Pick pick;
-            synchronized (PICKS) { pick = PICKS.get(new File(cachePath).getCanonicalPath()); }
+            synchronized (PICKS) { pick = PICKS.get(pickKey); }
             if (pick == null || !hasReadGrant(activity, Uri.parse(pick.uri))) return null;
             return new JSONObject().put("locator", pick.uri).put("display_name", pick.name).toString();
         } catch (Exception error) { return null; }

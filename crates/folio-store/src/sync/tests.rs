@@ -581,3 +581,78 @@ fn the_lan_manifest_carries_only_books_with_a_content_identity() {
         "空串不是身份，它进不了清单"
     );
 }
+
+/// 分页与单趟必须等价：页游标按 id 走、跨页状态递进，页边界落在书中间也要对得上。
+///
+/// 锁纪律的登记例外就挂在这条测试上——「一次调用只上锁一次」的"调用"是页，
+/// 不是整趟（`doc/储存.md`）。
+#[test]
+fn paged_collect_matches_a_single_pass() {
+    use std::collections::{BTreeMap, HashMap};
+
+    let store = Store::in_memory().unwrap();
+    for i in 0..5 {
+        let book = store
+            .add_book(Path::new(&format!("/books/{i}.epub")), &meta(&format!("书{i}")))
+            .unwrap();
+        store
+            .set_content_hash(book, &format!("hash-{i}"), "sha256")
+            .unwrap();
+        store
+            .set_position(
+                book,
+                "paged",
+                &Locator {
+                    chapter: i,
+                    offset: i as usize * 10,
+                },
+            )
+            .unwrap();
+    }
+    let whole = store.collect_sync("dev", 0).unwrap();
+
+    let mut owners = HashMap::new();
+    let mut books = BTreeMap::new();
+    let mut skipped = 0;
+    let mut after = 0;
+    while let Some(next) = store
+        .collect_sync_page(after, 2, &mut owners, &mut books, &mut skipped)
+        .unwrap()
+    {
+        assert!(next > after, "游标必须前进，否则组装层会死循环");
+        after = next;
+    }
+    // 空库没有墓碑，页扫之后只剩排序那半收尾；两边各排一遍才比得了。
+    for book in books.values_mut() {
+        book.annotations.sort_by(|a, b| a.uid.cmp(&b.uid));
+        book.bookmarks.sort_by(|a, b| a.uid.cmp(&b.uid));
+        book.tombstones.sort_by(super::sort_tombstones);
+    }
+    assert_eq!(books, whole.snapshot.books, "分页扫出的桶应与单趟一致");
+    assert_eq!(skipped, whole.skipped_books);
+    // 整趟入口的页长是常量：5 本书必须一页扫完，别让页长悄悄变小。
+    assert_eq!(whole.snapshot.books.len(), 5);
+}
+
+/// 同内容多书目的完整性断言在分页实现下原样保留。
+///
+/// 触发它不需要页边界：写路径不设这道闸，收集侧的 `owner()` 是唯一一道——
+/// 收第一本书的桶时就拦住（同一内容在 books / book_revisions 里对应多个书目）。
+/// 这条钉的是「按页放锁的重构没有把整趟断言弄丢」。
+#[test]
+fn collect_sync_still_reports_integrity_for_shared_content_hashes() {
+    let store = Store::in_memory().unwrap();
+    let left = store
+        .add_book(Path::new("/books/a.epub"), &meta("书甲"))
+        .unwrap();
+    store.set_content_hash(left, "hash-same", "sha256").unwrap();
+    let right = store
+        .add_book(Path::new("/books/b.epub"), &meta("书乙"))
+        .unwrap();
+    store.set_content_hash(right, "hash-same", "sha256").unwrap();
+
+    assert!(matches!(
+        store.collect_sync("dev", 0),
+        Err(crate::Error::Integrity(_))
+    ));
+}

@@ -31,8 +31,8 @@ pub fn dump(
         }
     }
     match memory_budget {
-        Some(budget) => tracing::info!(budget_bytes = budget.total, "内存预算（执行端尚未接线）"),
-        None => tracing::info!("内存预算：未知（执行端尚未接线）"),
+        Some(budget) => tracing::info!(budget_bytes = budget.total, "内存预算"),
+        None => tracing::info!("内存预算：未知"),
     }
     for (name, value) in crate::infra::metrics::snapshot() {
         tracing::info!(name, value, "计数器");

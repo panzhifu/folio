@@ -562,6 +562,12 @@ impl ReadingPage {
             .update(cx, |reader, cx| reader.scroll_page(delta, cx));
     }
 
+    /// 听书此刻在不在播（外壳的音量键分流要问这一句）：播着就还键给调音量，
+    /// 拿去翻页只会搅乱跟读的页对齐，而那一按的意图几乎总是调媒体音量。
+    pub fn speech_playing(&self, cx: &App) -> bool {
+        self.reader.read(cx).speech_playing()
+    }
+
     /// 方向键翻页（PC）。返回 `false` = 这一键不归阅读页，调用方该 `cx.propagate()`。
     ///
     /// 子栈上压着别的屏（紧凑设置）时让开：那一屏的滑条与列表用同一套方向键，抢过来

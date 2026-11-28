@@ -128,6 +128,15 @@ fn share_file_name(title: &str, format: Format) -> String {
 /// 搜索行收起时让出的高度（逻辑像素）：`py_2` 上下各 8，加搜索框那一档。
 const SEARCH_BAND: f32 = 52.0;
 
+/// 文档 URI 没登记成持久来源时的建议名：取 URI 末段，取不到给中性名。
+/// 只是判定层的扩展名线索与日志里认得出是哪一本；最终文件名由内容哈希定。
+fn uri_fallback_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| "document".to_owned())
+}
+
 /// 一排封面在滚动里的缩放档：视口正中 1.0，进出视口的两端收到 0.96。
 ///
 /// 只走封面图自己的尺寸（这个框架的 div 没有 transform），所以不影响排距；
@@ -763,8 +772,10 @@ impl ShelfView {
         cx.notify();
     }
 
-    /// 选择文件并登记真实来源能力，持久URI与临时副本分别传入。
-    /// 捕获/解析/发布在后台，移动临时文件按所有权清理，外部原件不删除。
+    /// 选择文件并登记真实来源能力。Android SAF 交回的是 `content://` 文档 URI——
+    /// 不预拷，交 [`DocumentsSource`] 从 URI 流式捕获进暂存区（首遍 IO，哈希同趟
+    /// 算）；桌面交回的是真实路径，照走 [`PathsSource`]。捕获/解析/发布在后台，
+    /// 一次性副本按所有权清理，外部原件不删除。
     fn open_picker(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -789,25 +800,67 @@ impl ShelfView {
                 return;
             }
             let _ = this.update(cx, |this, cx| {
-                let temporary = crate::ui::host::picked_files_are_temporary(cx);
-                let links = paths
+                let (documents, paths): (Vec<_>, Vec<_>) =
+                    paths.into_iter().partition(|path| {
+                        path.to_str().is_some_and(|s| s.starts_with("content://"))
+                    });
+                if documents.is_empty() {
+                    let temporary = crate::ui::host::picked_files_are_temporary(cx);
+                    let links = paths
+                        .iter()
+                        .filter_map(|path| {
+                            crate::ui::platform::source_for_pick(path)
+                                .filter(|source| !source.display_name.trim().is_empty())
+                                .map(|source| {
+                                    (
+                                        path.clone(),
+                                        folio_core::ingest::external_source::SourceLink {
+                                            kind: "android-document".into(),
+                                            locator: source.locator,
+                                        },
+                                    )
+                                })
+                        })
+                        .collect();
+                    let source = Box::new(PathsSource::with_links(paths, links, temporary));
+                    this.dispatch_import(source, cx);
+                    return;
+                }
+                if !paths.is_empty() {
+                    tracing::warn!(
+                        "ShelfView: 选择器同时交回 {} 个文档 URI 与 {} 个路径，路径按文档 URI 那批处理",
+                        documents.len(),
+                        paths.len()
+                    );
+                }
+                // 授权登记与校验都在 Java 侧（PICKS 表 + hasReadGrant）：查得到的
+                // 条目带上 link，查不到的按一次性输入捕获——字节照样进暂存区，
+                // 不回退预拷贝。
+                let docs = documents
                     .iter()
                     .filter_map(|path| {
-                        crate::ui::platform::source_for_pick(path)
-                            .filter(|source| !source.display_name.trim().is_empty())
-                            .map(|source| {
-                                (
-                                    path.clone(),
-                                    folio_core::ingest::external_source::SourceLink {
-                                        kind: "android-document".into(),
-                                        locator: source.locator,
-                                    },
-                                )
-                            })
+                        let locator = path.to_str()?;
+                        let (name, linked) = match crate::ui::platform::source_for_pick(path) {
+                            Some(source) if !source.display_name.trim().is_empty() => {
+                                (source.display_name, true)
+                            }
+                            _ => (uri_fallback_name(path), false),
+                        };
+                        Some(folio_core::ingest::import::DocumentRef {
+                            locator: locator.to_owned(),
+                            name,
+                            size: None,
+                            linked,
+                        })
                     })
                     .collect();
-                let source = Box::new(PathsSource::with_links(paths, links, temporary));
-                this.dispatch_import(source, cx)
+                this.dispatch_import(
+                    Box::new(folio_core::ingest::import::DocumentsSource::new(
+                        docs,
+                        crate::ui::platform::source_access(),
+                    )),
+                    cx,
+                )
             });
         })
         .detach();
